@@ -1,1 +1,44 @@
+# Agent 工作区
 .claude/
+
+# 编辑器 / IDE
+.idea
+.vscode
+*.swp
+
+# 用户级 shell 与工具配置（不应出现在仓库里）
+.bashrc
+.bash_profile
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.ripgreprc
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / 前端
+node_modules/
+dist/
+build/
+.vite/
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 运行期产物（渲染图、导出的 JSONL 等，具体路径待 #10 / #5 定稿后收敛）
+*.jsonl
