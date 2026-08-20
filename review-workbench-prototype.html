@@ -1,0 +1,1671 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>PPTExtract · 逐页策展工作台原型</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --monitor: #171b20;
+      --monitor-2: #20262c;
+      --monitor-3: #293139;
+      --paper: #e8ebec;
+      --paper-2: #f6f7f7;
+      --ink: #172026;
+      --muted: #657078;
+      --line-dark: #3a444d;
+      --line: #c8ced1;
+      --teal: #64bbb8;
+      --teal-deep: #276f70;
+      --amber: #f2b84b;
+      --amber-deep: #895e12;
+      --red: #e05d4d;
+      --red-deep: #8d3027;
+      --green: #5ca47d;
+      --focus: #9ee9e5;
+      --shadow: 0 10px 28px rgba(0, 0, 0, .32);
+      --radius: 12px;
+      --font-ui: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-data: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      min-width: 1120px;
+      overflow: hidden;
+      background: var(--monitor);
+      color: #f4f6f7;
+      font-family: var(--font-ui);
+      font-size: 14px;
+      line-height: 1.45;
+      accent-color: var(--teal);
+    }
+
+    body > .direction-contract { display: none; }
+
+    ::selection { background: var(--teal); color: #071012; }
+
+    :focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+
+    .app-shell {
+      display: grid;
+      grid-template-rows: 52px minmax(0, 1fr) 58px;
+      height: 100vh;
+      background: var(--monitor);
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: auto minmax(220px, 1fr) auto auto;
+      align-items: center;
+      border-bottom: 1px solid var(--line-dark);
+      background: #11161a;
+      min-width: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      height: 100%;
+      padding: 0 18px;
+      border-right: 1px solid var(--line-dark);
+      font-size: 17px;
+      font-weight: 760;
+      letter-spacing: -.02em;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border: 1px solid #b8c0c5;
+      color: var(--teal);
+      font-family: var(--font-data);
+      font-size: 12px;
+    }
+
+    .document-meta {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      min-width: 0;
+      padding: 0 16px;
+    }
+
+    .document-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 620;
+    }
+
+    .prototype-tag, .status-chip, .source-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .prototype-tag { color: #c0c8cd; }
+    .status-chip.pending { color: #ffd178; }
+    .status-chip.approved { color: #86d4a8; }
+    .status-chip.excluded { color: #ff9286; }
+    .status-chip.hidden { color: #b8c0c5; }
+    .source-chip { color: var(--teal-deep); background: #dcebea; }
+
+    .top-metrics {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 0 18px;
+      color: #cbd1d4;
+      font-family: var(--font-data);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 100%;
+      padding: 0 10px;
+      border-left: 1px solid var(--line-dark);
+    }
+
+    .icon-button, .quiet-button, .primary-button, .danger-button, .decision-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 34px;
+      border: 1px solid var(--line-dark);
+      border-radius: 7px;
+      background: transparent;
+      color: inherit;
+      padding: 6px 10px;
+    }
+
+    .icon-button { width: 36px; padding: 0; }
+    .quiet-button:hover, .icon-button:hover { background: #2a3239; }
+    .primary-button { background: var(--teal-deep); border-color: #4fa8a5; color: white; }
+    .primary-button:hover { background: #328184; }
+    .danger-button { background: var(--red-deep); border-color: #d35c4d; color: white; }
+    .danger-button:hover { background: #a33b31; }
+    .decision-button { color: var(--ink); background: var(--paper-2); border-color: #aeb7bb; }
+    .decision-button.selected { color: white; background: var(--teal-deep); border-color: var(--teal-deep); }
+    .decision-button.exclude.selected { background: var(--red-deep); border-color: var(--red-deep); }
+
+    svg.icon { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(184px, 14vw) minmax(520px, 1fr) minmax(380px, 30vw);
+      min-height: 0;
+    }
+
+    .page-rail {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--line-dark);
+      background: #12171b;
+    }
+
+    .rail-head { padding: 14px 12px 10px; border-bottom: 1px solid var(--line-dark); }
+    .rail-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .rail-title { margin: 0; font-size: 15px; }
+
+    .jump-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 11px; }
+
+    .dark-input, .dark-select {
+      min-width: 0;
+      border: 1px solid #46515a;
+      border-radius: 6px;
+      background: #0d1114;
+      color: #f4f6f7;
+      padding: 7px 9px;
+    }
+
+    .filter-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      margin-top: 9px;
+    }
+
+    .filter-tab {
+      min-width: 0;
+      border: 1px solid #3e4952;
+      border-radius: 6px;
+      background: transparent;
+      color: #bfc7cb;
+      padding: 6px 4px;
+      font-size: 12px;
+    }
+
+    .filter-tab.active { border-color: var(--teal); color: #dcfffd; background: #1d3435; }
+
+    .page-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 10px;
+      scrollbar-color: #56616a #151a1f;
+      scrollbar-width: thin;
+    }
+
+    .page-item {
+      position: relative;
+      width: 100%;
+      margin: 0 0 9px;
+      border: 1px solid #303a42;
+      border-radius: 8px;
+      background: #191f24;
+      color: #eef1f2;
+      overflow: hidden;
+    }
+
+    .page-item:hover { border-color: #65717a; }
+    .page-item.current { border-color: var(--teal); box-shadow: 0 5px 16px rgba(0, 0, 0, .25); }
+    .page-item.inherited { opacity: .7; }
+    .page-item-open {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: 8px;
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      padding: 8px 8px 5px;
+      text-align: left;
+    }
+    .page-select { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px 38px; color: #aeb7bc; font-size: 11px; cursor: pointer; }
+    .page-index { font-family: var(--font-data); color: #cdd4d7; font-variant-numeric: tabular-nums; }
+    .page-item-main { min-width: 0; }
+
+    .mini-slide {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      align-items: end;
+      gap: 3px;
+      height: 60px;
+      margin-bottom: 7px;
+      border: 1px solid #747e84;
+      background: #f4f5f3;
+      padding: 9px 10px;
+    }
+
+    .mini-slide span { display: block; background: #438f92; min-height: 8px; }
+    .mini-slide span:nth-child(1) { height: 31%; }
+    .mini-slide span:nth-child(2) { height: 58%; }
+    .mini-slide span:nth-child(3) { height: 43%; }
+    .mini-slide span:nth-child(4) { height: 76%; }
+    .mini-slide span:nth-child(5) { height: 63%; }
+    .page-item:nth-child(2n) .mini-slide span { background: #667c94; }
+    .page-item:nth-child(3n) .mini-slide span { background: #a57b4b; }
+
+    .page-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+    .page-item-state { display: flex; gap: 5px; align-items: center; margin-top: 4px; color: #aeb7bc; font-size: 11px; }
+    .state-dot { width: 8px; height: 8px; border: 1px solid currentColor; border-radius: 50%; }
+    .state-dot.pending { background: var(--amber); color: var(--amber); }
+    .state-dot.approved { background: var(--green); color: var(--green); }
+    .state-dot.excluded { background: var(--red); color: var(--red); }
+    .state-dot.hidden { background: transparent; color: #929ba1; }
+
+    .batch-bar {
+      border-top: 1px solid var(--line-dark);
+      padding: 10px 12px;
+      background: #101519;
+    }
+
+    .batch-summary { display: flex; justify-content: space-between; gap: 8px; color: #b9c1c6; font-size: 12px; margin-bottom: 7px; }
+    .batch-bar .dark-select, .batch-bar .quiet-button { width: 100%; }
+    .batch-bar .quiet-button { margin-top: 7px; }
+
+    .stage-panel {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: #0d1114;
+    }
+
+    .stage-toolbar {
+      position: absolute;
+      z-index: 4;
+      top: 12px;
+      left: 50%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transform: translateX(-50%);
+      border: 1px solid #46515a;
+      border-radius: 9px;
+      background: rgba(18, 23, 27, .96);
+      box-shadow: var(--shadow);
+      padding: 5px;
+    }
+
+    .tool-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: #d9dee0;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+
+    .tool-button:hover { background: #2b343b; }
+    .tool-button.active { background: #295a5c; color: white; }
+
+    .slide-viewport {
+      display: grid;
+      place-items: center;
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      padding: 68px 34px 32px;
+    }
+
+    .slide-wrap {
+      position: relative;
+      width: min(100%, calc((100vh - 205px) * 16 / 9));
+      max-height: 100%;
+      aspect-ratio: 16 / 9;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, .38);
+    }
+
+    .slide-wrap.actual-size { width: 960px; max-height: none; }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background: #f4f5f2;
+      color: #243038;
+      container-type: size;
+      user-select: none;
+    }
+
+    .local-page-image {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #f4f5f2;
+    }
+
+    .synthetic-slide { position: absolute; inset: 0; padding: 6% 7%; }
+    .slide-heading { margin: 0; font-size: 4.5cqh; letter-spacing: -.025em; }
+    .slide-subtitle { margin: 1.2cqh 0 4cqh; color: #667078; font-size: 1.9cqh; }
+    .slide-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 4cqh; height: 66%; }
+    .chart-panel, .table-panel { position: relative; border-top: .35cqh solid #4a9696; padding-top: 3cqh; }
+    .slide-panel-title { font-size: 2.3cqh; font-weight: 700; margin-bottom: 2cqh; }
+
+    .bar-chart { display: flex; gap: 3.4%; align-items: end; height: 70%; padding: 0 5% 3%; border-bottom: 1px solid #aab2b5; }
+    .bar { position: relative; flex: 1; background: #4b9898; min-width: 0; }
+    .bar:nth-child(2n) { background: #6f858c; }
+    .bar::after { content: attr(data-value); position: absolute; left: 50%; top: -2.3cqh; transform: translateX(-50%); font-family: var(--font-data); font-size: 1.5cqh; }
+
+    .synthetic-table { width: 100%; border-collapse: collapse; font-size: 1.55cqh; }
+    .synthetic-table th, .synthetic-table td { border-bottom: 1px solid #bfc6c9; padding: 1.05cqh .8cqw; text-align: right; }
+    .synthetic-table th:first-child, .synthetic-table td:first-child { text-align: left; }
+    .synthetic-table th { color: #2d7778; font-weight: 750; }
+
+    .visual-box {
+      position: absolute;
+      z-index: 2;
+      border: 2px solid var(--teal);
+      background: rgba(100, 187, 184, .045);
+      touch-action: none;
+    }
+
+    .visual-box:hover { background: rgba(100, 187, 184, .1); }
+    .visual-box.selected { border-width: 3px; box-shadow: 0 0 0 2px rgba(23, 27, 32, .72); }
+    .visual-box.excluded { border-color: var(--red); background: rgba(224, 93, 77, .05); }
+    .visual-box.pending { border-style: dashed; }
+    .visual-label {
+      position: absolute;
+      top: -26px;
+      left: -3px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      height: 24px;
+      background: var(--teal-deep);
+      color: white;
+      padding: 0 8px;
+      font-family: var(--font-data);
+      font-size: 12px;
+    }
+
+    .visual-box.excluded .visual-label { background: var(--red-deep); }
+    .resize-handle { position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; border: 2px solid #0d1114; background: var(--teal); cursor: nwse-resize; }
+    .draw-preview { position: absolute; z-index: 5; border: 2px dashed var(--amber); background: rgba(242, 184, 75, .12); pointer-events: none; }
+
+    .stage-hint {
+      position: absolute;
+      left: 18px;
+      bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      border: 1px solid #3d4850;
+      border-radius: 7px;
+      background: #171d22;
+      color: #bfc7cb;
+      padding: 7px 10px;
+      font-size: 12px;
+    }
+
+    .inspector {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      border-left: 1px solid #101519;
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    .inspector-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid var(--line);
+      background: #dfe4e5;
+    }
+
+    .inspector-tab {
+      border: 0;
+      border-bottom: 3px solid transparent;
+      background: transparent;
+      color: #4f5a61;
+      padding: 10px;
+      font-weight: 700;
+    }
+
+    .inspector-tab.active { border-color: var(--teal-deep); color: #172026; background: var(--paper-2); }
+    .inspector .status-chip.pending { border-color: #936500; background: #fff0c9; color: #5c4000; }
+    .inspector .status-chip.approved { border-color: #327357; background: #e1f2e9; color: #194c38; }
+    .inspector .status-chip.excluded { border-color: #a84b40; background: #f8e5e2; color: #6f2a23; }
+    .inspector .status-chip.hidden { border-color: #68737a; background: #e2e6e8; color: #3f494f; }
+
+    .inspector-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      scrollbar-color: #96a0a5 #dfe4e5;
+      scrollbar-width: thin;
+    }
+
+    .gate-dock {
+      flex: 0 0 auto;
+      height: min(218px, 28vh);
+      overflow: hidden;
+      border-top: 2px solid var(--teal-deep);
+      box-shadow: 0 -10px 24px rgba(23, 32, 38, .12);
+      background: #eef1f2;
+    }
+
+    .gate-dock .section-block { display: grid; grid-template-rows: auto minmax(44px, 1fr) auto auto; height: 100%; border-bottom: 0; padding-block: 11px; }
+    .gate-messages { min-height: 0; overflow-y: auto; }
+
+    .section-block { border-bottom: 1px solid var(--line); padding: 14px 16px; }
+    .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 10px; font-size: 15px; }
+    .section-meta { display: grid; grid-template-columns: 92px 1fr; gap: 6px 10px; color: #4c575e; font-size: 12px; }
+    .section-meta strong { color: var(--ink); font-weight: 650; }
+
+    .field { display: grid; gap: 5px; margin-top: 10px; }
+    .field label { font-size: 12px; font-weight: 680; color: #465159; }
+    .field input, .field textarea, .field select {
+      width: 100%;
+      border: 1px solid #aeb7bb;
+      border-radius: 6px;
+      background: #fbfcfc;
+      color: var(--ink);
+      padding: 8px 9px;
+    }
+
+    .field textarea { min-height: 70px; resize: vertical; caret-color: var(--teal-deep); }
+    .field input:disabled, .field textarea:disabled, .field select:disabled { background: #dce1e2; color: #69737a; }
+
+    .visual-list { display: grid; gap: 8px; }
+    .visual-card { border: 1px solid #aeb7bb; border-radius: 9px; background: var(--paper-2); overflow: hidden; }
+    .visual-card.selected { border-color: var(--teal-deep); box-shadow: 0 6px 16px rgba(36, 50, 58, .12); }
+    .visual-card-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 10px; }
+    .visual-number { display: grid; place-items: center; width: 30px; height: 28px; border: 1px solid var(--teal-deep); border-radius: 5px; color: var(--teal-deep); font-family: var(--font-data); font-weight: 760; }
+    .visual-card-title { min-width: 0; font-weight: 700; }
+    .visual-card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #69747a; font-size: 11px; font-weight: 500; }
+    .visual-card-actions { display: flex; gap: 4px; }
+    .mini-action { border: 1px solid #aeb7bb; border-radius: 5px; background: transparent; color: #334047; padding: 4px 7px; font-size: 11px; }
+    .mini-action:hover { background: #e0e5e6; }
+    .visual-card-body { border-top: 1px solid #ccd2d5; padding: 10px; }
+
+    .decision-row { display: flex; gap: 7px; margin-bottom: 8px; }
+    .decision-row .decision-button { flex: 1; }
+
+    .draft-panel, .prefill-panel, .blocker, .quality-hint, .info-note {
+      margin-top: 9px;
+      border: 1px solid #c9a14b;
+      border-radius: 7px;
+      background: #fff6df;
+      color: #5d450f;
+      padding: 9px 10px;
+      font-size: 12px;
+    }
+
+    .prefill-panel { border-color: #83afae; background: #e6f1f0; color: #254f50; }
+    .blocker { border-color: #d27a70; background: #fae9e6; color: #742b24; }
+    .quality-hint { border-color: #aeb7bb; background: #edf0f1; color: #4e5b62; }
+    .info-note { border-color: #8fa3b6; background: #eaf0f5; color: #334c62; }
+    .inline-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .text-action { border: 0; background: transparent; color: var(--teal-deep); padding: 2px; font-weight: 720; text-decoration: underline; text-underline-offset: 3px; }
+    .text-action.danger { color: var(--red-deep); }
+
+    .gate { background: #eef1f2; }
+    .gate-count { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+    .gate-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 7px; margin-top: 11px; }
+    .gate-actions button { min-width: 0; }
+
+    .source-view { padding: 0; }
+    .source-section { border-bottom: 1px solid var(--line); padding: 14px 16px; }
+    .source-section:last-child { border-bottom: 0; }
+    .anydoc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .anydoc-head h2, .source-section h3 { margin: 0; font-size: 15px; }
+    .anydoc-head p { margin: 4px 0 0; color: #566269; font-size: 12px; }
+    .source-lineage { display: inline-flex; margin-top: 10px; border: 1px solid #aeb7bb; border-radius: 5px; background: #f7f8f8; color: #4e5b62; padding: 4px 7px; font: 11px/1.45 var(--font-data); }
+    .source-review-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+    .source-review-title span { color: #5a666d; font-size: 11px; }
+    .source-text-control { width: 100%; min-height: 132px; border: 1px solid #aeb7bb; border-radius: 6px; background: #fbfcfc; color: var(--ink); padding: 9px 10px; line-height: 1.6; resize: vertical; caret-color: var(--teal-deep); }
+    .source-confirmed { border-color: #69a487; background: #e5f2eb; color: #20563e; }
+    .source-asset-list { display: grid; gap: 9px; }
+    .source-asset { border: 1px solid #aeb7bb; border-radius: 8px; background: var(--paper-2); overflow: hidden; }
+    .source-asset-main { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; align-items: center; padding: 9px; }
+    .source-file-preview { display: flex; align-items: end; gap: 5px; height: 62px; border: 1px solid #9da7ac; background: #edf1ef; padding: 10px; }
+    .source-file-preview span { flex: 1; background: #4f9898; }
+    .source-file-preview span:nth-child(1) { height: 36%; }
+    .source-file-preview span:nth-child(2) { height: 68%; }
+    .source-file-preview span:nth-child(3) { height: 52%; }
+    .source-file-preview span:nth-child(4) { height: 84%; }
+    .source-file-preview.brand { align-items: center; }
+    .source-file-preview.brand span { height: 12px; background: #809099; }
+    .source-asset-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 650 12px/1.45 var(--font-data); }
+    .source-asset-meta { display: block; margin-top: 4px; color: #667279; font-size: 11px; }
+    .source-asset-body { border-top: 1px solid #ccd2d5; padding: 9px; }
+    .source-asset-body .decision-row { margin-bottom: 0; }
+    .source-review-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+    .source-review-actions p { margin: 0; color: #536068; font-size: 12px; }
+
+    .command-bar {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 16px;
+      border-top: 1px solid var(--line-dark);
+      background: #11161a;
+      padding: 0 14px;
+    }
+
+    .command-group { display: flex; align-items: center; gap: 8px; }
+    .command-group.center { justify-content: center; }
+    .command-group.end { justify-content: flex-end; }
+    .key-command { display: inline-flex; align-items: center; gap: 8px; color: #d3d9dc; }
+    kbd { min-width: 28px; border: 1px solid #6a757d; border-bottom-width: 2px; border-radius: 5px; background: #1d2429; color: white; padding: 4px 7px; font-family: var(--font-data); text-align: center; }
+    .save-state { color: #aeb7bc; font-size: 12px; }
+    .save-state strong { color: var(--green); }
+
+    .toast {
+      position: fixed;
+      z-index: 20;
+      left: 50%;
+      bottom: 74px;
+      transform: translate(-50%, 18px);
+      opacity: 0;
+      pointer-events: none;
+      border: 1px solid #53606a;
+      border-radius: 8px;
+      background: #0d1215;
+      color: white;
+      box-shadow: var(--shadow);
+      padding: 10px 14px;
+      transition: opacity 160ms ease-out, transform 160ms ease-out;
+    }
+
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    .state-drawer {
+      position: fixed;
+      z-index: 15;
+      top: 52px;
+      right: 0;
+      bottom: 58px;
+      width: min(520px, 44vw);
+      border-left: 1px solid #5c6871;
+      background: #0c1114;
+      box-shadow: -12px 0 30px rgba(0, 0, 0, .38);
+      transform: translateX(102%);
+      transition: transform 180ms cubic-bezier(.16, 1, .3, 1);
+    }
+
+    .state-drawer.open { transform: translateX(0); }
+    .state-drawer-head { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line-dark); padding: 12px 14px; }
+    .state-drawer pre { height: calc(100% - 52px); margin: 0; overflow: auto; color: #b7e2df; padding: 14px; font: 12px/1.55 var(--font-data); white-space: pre-wrap; }
+
+    .mapping-mode {
+      position: fixed;
+      z-index: 10;
+      inset: 52px 0 0;
+      display: none;
+      background: var(--monitor);
+      padding: 24px;
+    }
+
+    .mapping-mode.open { display: grid; grid-template-rows: auto 1fr; gap: 18px; }
+    .mapping-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .mapping-head h2 { margin: 0 0 6px; font-size: 22px; }
+    .mapping-head p { margin: 0; color: #b8c1c5; }
+    .mapping-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: 0; gap: 18px; }
+    .mapping-evidence { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-height: 0; }
+    .mapping-page { display: grid; grid-template-rows: auto 1fr; min-height: 0; border: 1px solid #3d4850; border-radius: 10px; overflow: hidden; background: #101519; }
+    .mapping-page h3 { margin: 0; border-bottom: 1px solid #3d4850; padding: 10px 12px; font-size: 14px; }
+    .mapping-slide { margin: 18px; background: #f4f5f2; color: #263139; padding: 8%; aspect-ratio: 16 / 9; align-self: center; }
+    .mapping-slide h4 { margin: 0 0 8%; font-size: 22px; }
+    .mapping-bars { display: flex; align-items: end; gap: 6%; height: 50%; border-bottom: 1px solid #9ba5aa; }
+    .mapping-bars span { flex: 1; background: #4b9898; }
+    .mapping-panel { overflow-y: auto; border: 1px solid #b6bec2; border-radius: 10px; background: var(--paper); color: var(--ink); padding: 16px; }
+    .candidate { border: 1px solid #adb6ba; border-radius: 8px; background: #f8f9f9; padding: 12px; margin-bottom: 10px; }
+    .candidate.selected { border-color: var(--teal-deep); }
+    .evidence-list { margin: 8px 0 0; padding-left: 18px; color: #536068; font-size: 12px; }
+    .mapping-actions { display: grid; gap: 7px; margin-top: 14px; }
+
+    .screen-reader-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+
+    @media (max-width: 1350px) {
+      .workspace { grid-template-columns: 178px minmax(520px, 1fr) 384px; }
+      .top-metrics { gap: 10px; padding: 0 10px; }
+      .slide-viewport { padding-inline: 24px; }
+      .visual-card-head { grid-template-columns: auto minmax(0, 1fr); }
+      .visual-card-actions { grid-column: 1 / -1; padding-left: 38px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; animation-duration: .001ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <!--
+  THESIS: 专家连续逐页策展是一场样片审看；拒绝把来源证据压缩进通用卡片后台。
+  OWN-WORLD: 中性监看器黑、明亮场记纸、teal 选择、amber 待确认、red 排除，紧凑发丝线和可见传输键。
+  STORY: 策展人员从页队列进入来源画面，先审核 AnyDoc 文字与图片源文件；仅在来源不足时手动画框截图，清空审核闸门后批准并自动前进。
+  FIRST VIEWPORT: 14% 页列、56% 标准页渲染、30% AnyDoc 来源审核与可选截图日志；主操作位于右侧审核闸门与底部键盘条。
+  FORM: 页列、画面与纵向日志；三种构图中的第三种；方向种子 b53dcab6。
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+  -->
+  <div class="app-shell" id="appShell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">PX</span><span>PPTExtract</span></div>
+      <div class="document-meta">
+        <span class="document-name">演示文稿 · 区域经营分析（合成样本）</span>
+        <span class="prototype-tag">一次性原型</span>
+        <span id="renderWarning" class="status-chip pending">渲染警告 1</span>
+      </div>
+      <div class="top-metrics">
+        <span id="pageMetric">第 18 / 43 页</span>
+        <span id="sessionTimer">00:00</span>
+        <span id="averageMetric">均值 —</span>
+      </div>
+      <div class="top-actions">
+        <button class="quiet-button" id="mappingButton" type="button" aria-haspopup="dialog">页对应 <strong>2</strong></button>
+        <button class="quiet-button" id="loadLocalButton" type="button">载入本地页</button>
+        <input id="localFileInput" class="screen-reader-only" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+        <button class="icon-button" id="stateButton" type="button" aria-label="查看原型状态 JSON" title="查看原型状态 JSON">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4 3 12l5 8M16 4l5 8-5 8M14 3l-4 18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="page-rail" aria-label="页队列">
+        <div class="rail-head">
+          <div class="rail-title-row">
+            <h1 class="rail-title">页队列</h1>
+            <span id="queueCount" class="status-chip pending">2 待处理</span>
+          </div>
+          <form id="jumpForm" class="jump-row">
+            <label class="screen-reader-only" for="jumpInput">跳转页码</label>
+            <input class="dark-input" id="jumpInput" type="number" min="1" max="999" value="18">
+            <button class="quiet-button" type="submit">跳转</button>
+          </form>
+          <div class="filter-tabs" aria-label="页队列筛选">
+            <button class="filter-tab active" type="button" data-filter="pending">待处理</button>
+            <button class="filter-tab" type="button" data-filter="all">全部</button>
+            <button class="filter-tab" type="button" data-filter="inherited">已继承</button>
+          </div>
+        </div>
+        <div class="page-list" id="pageList"></div>
+        <div class="batch-bar">
+          <div class="batch-summary"><span>批量选择</span><strong id="batchCount">0 页</strong></div>
+          <label class="screen-reader-only" for="batchReason">批量排除原因</label>
+          <select class="dark-select" id="batchReason">
+            <option value="">选择统一排除原因</option>
+            <option value="no_meaningful_content">无有意义内容</option>
+            <option value="duplicate">重复页</option>
+            <option value="irrelevant">无关</option>
+            <option value="unreadable">不可读</option>
+            <option value="other">其他</option>
+          </select>
+          <button class="quiet-button" id="batchExcludeButton" type="button" disabled>批量排除所选页</button>
+        </div>
+      </aside>
+
+      <section class="stage-panel" aria-label="标准页渲染与按需截图定位">
+        <div class="stage-toolbar" role="toolbar" aria-label="按需截图工具">
+          <button class="tool-button" id="drawObjectButton" type="button" disabled>画框截图</button>
+          <button class="tool-button" id="mergeButton" type="button" disabled>合并截图</button>
+          <button class="tool-button" id="fitButton" type="button">100% 显示</button>
+          <button class="tool-button" id="ackWarningButton" type="button">确认渲染警告</button>
+        </div>
+        <div class="slide-viewport">
+          <div class="slide-wrap" id="slideWrap">
+            <div class="slide" id="slideCanvas">
+              <div class="synthetic-slide" id="syntheticSlide">
+                <h2 class="slide-heading">2025 年第一季度运营概览</h2>
+                <p class="slide-subtitle">合成示例 · 用于验证逐页策展交互，不代表真实业务数据</p>
+                <div class="slide-grid">
+                  <div class="chart-panel">
+                    <div class="slide-panel-title">季度营收与增长率</div>
+                    <div class="bar-chart">
+                      <div class="bar" style="height: 46%" data-value="800"></div>
+                      <div class="bar" style="height: 58%" data-value="950"></div>
+                      <div class="bar" style="height: 71%" data-value="1,100"></div>
+                      <div class="bar" style="height: 86%" data-value="1,320"></div>
+                    </div>
+                  </div>
+                  <div class="table-panel">
+                    <div class="slide-panel-title">核心指标对比</div>
+                    <table class="synthetic-table">
+                      <thead><tr><th>指标</th><th>上期</th><th>本期</th></tr></thead>
+                      <tbody>
+                        <tr><td>新增客户</td><td>1,250</td><td>1,480</td></tr>
+                        <tr><td>活跃客户</td><td>8,200</td><td>9,650</td></tr>
+                        <tr><td>客单价</td><td>620</td><td>668</td></tr>
+                        <tr><td>复购率</td><td>31.2%</td><td>34.6%</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <img class="local-page-image" id="localPageImage" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="本机载入的标准页渲染" hidden>
+              <div id="visualOverlay"></div>
+            </div>
+          </div>
+        </div>
+        <div class="stage-hint"><span id="stageMode">先审核右侧 AnyDoc 文字与源图片；确认后可按需画框截图</span></div>
+      </section>
+
+      <aside class="inspector" aria-label="策展日志">
+        <div class="inspector-tabs" role="tablist" aria-label="检查器视图">
+          <button class="inspector-tab active" id="sourceTab" type="button" role="tab" data-tab="source" aria-selected="true" aria-controls="sourceView">AnyDoc 来源</button>
+          <button class="inspector-tab" id="screenshotsTab" type="button" role="tab" data-tab="screenshots" aria-selected="false" aria-controls="screenshotView" tabindex="-1">截图提取 <span id="screenshotCount">0</span></button>
+        </div>
+        <div class="inspector-scroll" id="inspectorScroll">
+          <div id="sourceView" class="source-view" role="tabpanel" aria-labelledby="sourceTab"></div>
+          <div id="screenshotView" role="tabpanel" aria-labelledby="screenshotsTab" hidden></div>
+        </div>
+        <div class="gate-dock" id="gateDock"></div>
+      </aside>
+    </main>
+
+    <footer class="command-bar" aria-label="键盘命令">
+      <div class="command-group">
+        <span class="key-command"><kbd>←</kbd><span>上一页</span></span>
+        <span class="key-command"><kbd>→</kbd><span>下一页</span></span>
+      </div>
+      <div class="command-group center">
+        <span class="key-command"><kbd>A</kbd><span>批准</span></span>
+        <span class="key-command"><kbd>X</kbd><span>排除</span></span>
+        <span class="key-command"><kbd>R</kbd><span>重新打开</span></span>
+        <span class="key-command"><kbd>V</kbd><span>生成草稿</span></span>
+      </div>
+      <div class="command-group end"><span class="save-state" id="saveState"><strong>已保存</strong> · 内存状态</span></div>
+    </footer>
+  </div>
+
+  <section class="mapping-mode" id="mappingMode" role="dialog" aria-modal="true" aria-labelledby="mappingTitle">
+    <div class="mapping-head">
+      <div><h2 id="mappingTitle">页对应确认</h2><p>版本处于 awaiting_mapping。全部确认后才会返回策展工作台。</p></div>
+      <span class="status-chip pending" id="mappingRemainingLabel">剩余 2 项</span>
+    </div>
+    <div class="mapping-grid">
+      <div class="mapping-evidence">
+        <article class="mapping-page"><h3>新版本 · 源页 18 · SlideID 327</h3><div class="mapping-slide"><h4>区域经营概览</h4><div class="mapping-bars"><span style="height:35%"></span><span style="height:58%"></span><span style="height:72%"></span><span style="height:86%"></span></div></div></article>
+        <article class="mapping-page"><h3>候选旧页 · 页 15 · SlideID 327</h3><div class="mapping-slide"><h4>区域经营概览</h4><div class="mapping-bars"><span style="height:32%"></span><span style="height:53%"></span><span style="height:69%"></span><span style="height:82%"></span></div></div></article>
+      </div>
+      <aside class="mapping-panel">
+        <h3>系统候选与证据</h3>
+        <div class="candidate selected">
+          <label><input type="radio" name="mapping" value="15" checked> 沿用页 15 的稳定身份</label>
+          <ul class="evidence-list"><li>源 SlideID 相同：327</li><li>前一页已确认对应</li><li>相对顺序偏移 +3</li><li>页指纹不同：内容已变化</li></ul>
+        </div>
+        <div class="candidate"><label><input type="radio" name="mapping" value="14"> 沿用页 14 的稳定身份</label><ul class="evidence-list"><li>标题文本相近</li><li>相邻页证据较弱</li></ul></div>
+        <div class="candidate"><label><input type="radio" name="mapping" value="new"> 这是新页</label><ul class="evidence-list"><li>不继承 page_id、chunk_id 或审核历史</li></ul></div>
+        <div class="mapping-actions"><button class="primary-button" id="confirmMappingButton" type="button">确认此对应并查看下一项</button></div>
+      </aside>
+    </div>
+  </section>
+
+  <aside class="state-drawer" id="stateDrawer" role="dialog" aria-modal="true" aria-label="原型完整状态" aria-hidden="true" hidden>
+    <div class="state-drawer-head"><strong>原型状态 JSON</strong><button class="icon-button" id="closeStateButton" type="button" aria-label="关闭状态面板"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <pre id="stateDump"></pre>
+  </aside>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const svgIcons = {
+      chevron: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>',
+      lock: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>'
+    };
+
+    const pages = [
+      { id: 17, title: '年度经营回顾', status: 'approved', inherited: true, changed: false, overview: '年度经营表现保持稳定。', notes: '', sourceReviewConfirmed: true, anydoc: { textConfirmed: true, extractedText: '年度经营回顾\n经营表现保持稳定。', images: [] }, visuals: [] },
+      { id: 18, title: '第一季度运营概览', status: 'pending', inherited: false, changed: true, overview: '', notes: '关注第四季度到第一季度的结构变化。', renderWarning: true, pageExclusionReason: '', pageExclusionNote: '', sourceReviewConfirmed: false, anydoc: {
+        textConfirmed: false,
+        extractedText: '2025 年第一季度运营概览\n季度营收与增长率\n核心指标对比：新增客户、活跃客户、客单价、复购率',
+        images: [
+          { id: 'SRC-01', filename: 'image-001.png', mime: 'image/png', dimensions: '1240 × 680', kind: 'chart', disposition: '', summary: '', exclusionReason: '' },
+          { id: 'SRC-02', filename: 'image-002.png', mime: 'image/png', dimensions: '160 × 48', kind: 'brand', disposition: '', summary: '', exclusionReason: '' }
+        ]
+      }, visuals: [] },
+      { id: 19, title: '区域构成与费用', status: 'pending', inherited: false, changed: false, overview: '', notes: '', pageExclusionReason: '', pageExclusionNote: '', sourceReviewConfirmed: false, anydoc: {
+        textConfirmed: false,
+        extractedText: '区域构成与费用\n区域收入占比与费用变化\n华东、华南、华北、西部',
+        images: [
+          { id: 'SRC-01', filename: 'image-001.jpeg', mime: 'image/jpeg', dimensions: '1180 × 720', kind: 'chart', disposition: '', summary: '', exclusionReason: '' }
+        ]
+      }, visuals: [] },
+      { id: 20, title: '客户结构分析', status: 'approved', inherited: true, changed: false, overview: '客户结构与上一版本相同。', notes: '', sourceReviewConfirmed: true, anydoc: { textConfirmed: true, extractedText: '客户结构分析\n客户分层与复购表现。', images: [] }, visuals: [] },
+      { id: 21, title: '过渡页', status: 'excluded', inherited: false, changed: false, overview: '', notes: '', pageExclusionReason: 'no_meaningful_content', pageExclusionNote: '仅章节标题。', sourceReviewConfirmed: true, anydoc: { textConfirmed: true, extractedText: '第二部分', images: [] }, visuals: [] },
+      { id: 22, title: '附录（隐藏页）', status: 'hidden', hidden: true, inherited: false, changed: false, overview: '', notes: '', sourceReviewConfirmed: false, anydoc: { textConfirmed: false, extractedText: '附录', images: [] }, visuals: [] }
+    ];
+
+    const state = {
+      filter: 'pending',
+      currentPageId: 18,
+      selectedVisualId: null,
+      selectedPageIds: [],
+      inspectorTab: 'source',
+      drawing: false,
+      actualSize: false,
+      renderWarningAcknowledged: false,
+      sessionStartedAt: Date.now(),
+      pageStartedAt: Date.now(),
+      pageElapsedSecondsById: { 18: 0 },
+      reviewedDurations: [],
+      actionLog: [],
+      mappingRemaining: 2,
+      autosaveAt: Date.now()
+    };
+
+    const el = id => document.getElementById(id);
+    const currentPage = () => pages.find(page => page.id === state.currentPageId);
+    const currentVisual = () => currentPage()?.visuals.find(visual => visual.id === state.selectedVisualId);
+    const isEditable = page => page?.status === 'pending';
+    const statusLabel = status => ({ pending: '待审核', approved: '已批准', excluded: '已排除', hidden: '隐藏页' }[status] || status);
+    const pad = value => String(value).padStart(2, '0');
+    const formatSeconds = total => `${pad(Math.floor(total / 60))}:${pad(total % 60)}`;
+    let focusBeforeOverlay = null;
+
+    function elapsedForPage(pageId) {
+      const accumulated = state.pageElapsedSecondsById[pageId] || 0;
+      if (pageId === state.currentPageId && state.pageStartedAt) return accumulated + (Date.now() - state.pageStartedAt) / 1000;
+      return accumulated;
+    }
+
+    function pausePageTiming() {
+      if (!state.pageStartedAt) return;
+      state.pageElapsedSecondsById[state.currentPageId] = elapsedForPage(state.currentPageId);
+      state.pageStartedAt = null;
+    }
+
+    function beginPageTiming(pageId) {
+      if (state.pageElapsedSecondsById[pageId] == null) state.pageElapsedSecondsById[pageId] = 0;
+      state.pageStartedAt = Date.now();
+    }
+
+    function record(action, detail = {}) {
+      state.actionLog.unshift({ at: new Date().toISOString(), page: state.currentPageId, action, ...detail });
+      state.autosaveAt = Date.now();
+      renderStateDump();
+      el('saveState').innerHTML = '<strong>已保存</strong> · 刚刚';
+    }
+
+    function toast(message) {
+      const node = el('toast');
+      node.textContent = message;
+      node.classList.add('show');
+      window.clearTimeout(toast.timer);
+      toast.timer = window.setTimeout(() => node.classList.remove('show'), 2200);
+    }
+
+    function visiblePages() {
+      if (state.filter === 'pending') return pages.filter(page => page.status === 'pending');
+      if (state.filter === 'inherited') return pages.filter(page => page.inherited);
+      return pages;
+    }
+
+    function renderPageRail() {
+      const list = visiblePages();
+      el('queueCount').textContent = `${pages.filter(page => page.status === 'pending').length} 待处理`;
+      el('pageList').innerHTML = list.map(page => `
+        <div class="page-item ${page.id === state.currentPageId ? 'current' : ''} ${page.inherited ? 'inherited' : ''}">
+          <button class="page-item-open" type="button" data-page-id="${page.id}" aria-current="${page.id === state.currentPageId ? 'page' : 'false'}">
+            <span class="page-index">${page.id}</span>
+            <span class="page-item-main">
+              <span class="mini-slide" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
+              <span class="page-item-title">${page.title}</span>
+              <span class="page-item-state"><span class="state-dot ${page.status}"></span>${statusLabel(page.status)}${page.inherited ? ' · 已继承' : ''}${page.changed ? ' · 已变化' : ''}</span>
+            </span>
+          </button>
+          <label class="page-select"><input type="checkbox" data-select-page="${page.id}" ${state.selectedPageIds.includes(page.id) ? 'checked' : ''}>批量选择第 ${page.id} 页</label>
+        </div>`).join('') || '<p class="info-note">当前筛选下没有页。</p>';
+      el('batchCount').textContent = `${state.selectedPageIds.length} 页`;
+      el('batchExcludeButton').disabled = state.selectedPageIds.length === 0;
+      document.querySelectorAll('[data-page-id]').forEach(button => button.addEventListener('click', () => switchPage(Number(button.dataset.pageId))));
+      document.querySelectorAll('[data-select-page]').forEach(box => box.addEventListener('change', () => {
+        const id = Number(box.dataset.selectPage);
+        state.selectedPageIds = box.checked ? [...new Set([...state.selectedPageIds, id])] : state.selectedPageIds.filter(item => item !== id);
+        renderPageRail();
+        renderStateDump();
+      }));
+    }
+
+    function renderSlide() {
+      const page = currentPage();
+      el('pageMetric').textContent = `第 ${page.id} / 43 页`;
+      el('jumpInput').value = page.id;
+      el('slideWrap').classList.toggle('actual-size', state.actualSize);
+      const image = el('localPageImage');
+      if (page.localImage) {
+        image.src = page.localImage;
+        image.hidden = false;
+        el('syntheticSlide').hidden = true;
+      } else {
+        image.hidden = true;
+        el('syntheticSlide').hidden = false;
+      }
+      el('visualOverlay').innerHTML = page.visuals.map(visual => {
+        const dispositionClass = visual.disposition === 'exclude' ? 'excluded' : (!visual.confirmed ? 'pending' : '');
+        return `<div class="visual-box ${state.selectedVisualId === visual.id ? 'selected' : ''} ${dispositionClass}" data-visual-id="${visual.id}" role="button" tabindex="${state.selectedVisualId === visual.id ? '0' : '-1'}" aria-label="截图对象 ${visual.id}，${visual.type}；Shift 加方向键移动，Alt 加方向键调整尺寸" style="left:${visual.bbox.x}%;top:${visual.bbox.y}%;width:${visual.bbox.w}%;height:${visual.bbox.h}%">
+          <span class="visual-label">${visual.id}${visual.prefill && !visual.confirmed ? ' · 继承预填' : ''}</span>
+          ${isEditable(page) && state.selectedVisualId === visual.id ? '<span class="resize-handle" data-resize="true" aria-hidden="true"></span>' : ''}
+        </div>`;
+      }).join('');
+      bindVisualBoxes();
+    }
+
+    function bindVisualBoxes() {
+      document.querySelectorAll('.visual-box').forEach(box => {
+        box.addEventListener('pointerdown', event => {
+          const page = currentPage();
+          if (!isEditable(page) || state.drawing) return;
+          const visual = page.visuals.find(item => item.id === box.dataset.visualId);
+          const resizing = event.target.matches('[data-resize]');
+          state.selectedVisualId = visual.id;
+          renderInspector();
+          renderSlide();
+          const activeBox = document.querySelector(`[data-visual-id="${visual.id}"]`);
+          activeBox?.focus({ preventScroll: true });
+          const slideRect = el('slideCanvas').getBoundingClientRect();
+          const start = { x: event.clientX, y: event.clientY, bbox: { ...visual.bbox } };
+          const move = moveEvent => {
+            const dx = (moveEvent.clientX - start.x) / slideRect.width * 100;
+            const dy = (moveEvent.clientY - start.y) / slideRect.height * 100;
+            if (resizing) {
+              visual.bbox.w = Math.max(6, Math.min(100 - visual.bbox.x, start.bbox.w + dx));
+              visual.bbox.h = Math.max(6, Math.min(100 - visual.bbox.y, start.bbox.h + dy));
+            } else {
+              visual.bbox.x = Math.max(0, Math.min(100 - visual.bbox.w, start.bbox.x + dx));
+              visual.bbox.y = Math.max(0, Math.min(100 - visual.bbox.h, start.bbox.y + dy));
+            }
+            activeBox.style.left = `${visual.bbox.x}%`;
+            activeBox.style.top = `${visual.bbox.y}%`;
+            activeBox.style.width = `${visual.bbox.w}%`;
+            activeBox.style.height = `${visual.bbox.h}%`;
+          };
+          const up = () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+            record(resizing ? 'resize_visual' : 'move_visual', { visual: visual.id, bbox: visual.bbox });
+            renderSlide();
+          };
+          window.addEventListener('pointermove', move);
+          window.addEventListener('pointerup', up, { once: true });
+        });
+      });
+    }
+
+    function blockersFor(page) {
+      if (page.status !== 'pending') return [];
+      const blockers = [];
+      const sourceIssues = sourceReviewIssues(page);
+      if (!page.sourceReviewConfirmed) {
+        if (sourceIssues.length) blockers.push(...sourceIssues);
+        else blockers.push('尚未完成 AnyDoc 来源审核');
+      }
+      page.visuals.forEach(visual => {
+        if (!visual.summary.trim()) blockers.push(`截图对象 ${visual.id} 缺少 summary`);
+        if (visual.draft && !visual.draftConfirmed) blockers.push(`截图对象 ${visual.id} 的 VLM 草稿尚未确认或丢弃`);
+      });
+      return blockers;
+    }
+
+    function sourceReviewIssues(page) {
+      const issues = [];
+      if (!page.anydoc) return ['AnyDoc 来源尚未生成'];
+      if (!page.anydoc.textConfirmed) issues.push('AnyDoc 文字提取尚未确认');
+      page.anydoc.images.forEach(image => {
+        if (!image.disposition) issues.push(`${image.id} 源图片尚未选择保留或忽略`);
+        if (image.disposition === 'include' && !image.summary.trim()) issues.push(`${image.id} 源图片缺少 summary`);
+        if (image.disposition === 'exclude' && !image.exclusionReason) issues.push(`${image.id} 源图片缺少忽略原因`);
+      });
+      return issues;
+    }
+
+    function gateSuccessMarkup(page) {
+      return page.sourceReviewConfirmed && page.visuals.length === 0
+        ? '<div class="quality-hint source-confirmed"><strong>来源完整，无需截图即可批准。</strong> 如页面仍有源文件未覆盖的组合视觉，再使用“按需画框截图”。</div>'
+        : '<div class="quality-hint">硬校验已通过。写作质量提示不会阻止批准。</div>';
+    }
+
+    function refreshGateMessages() {
+      const blockers = blockersFor(currentPage());
+      const count = document.querySelector('.gate-count');
+      const messages = document.querySelector('.gate-messages');
+      if (count) count.textContent = `${blockers.length} 项阻塞`;
+      if (messages) messages.innerHTML = blockers.length
+        ? blockers.map(item => `<div class="blocker">${item}</div>`).join('')
+        : gateSuccessMarkup(currentPage());
+      const approve = document.querySelector('[data-approve-page]');
+      if (approve) approve.disabled = currentPage().status !== 'pending' || blockers.length > 0;
+    }
+
+    function reflectSourceReviewInvalidation() {
+      const page = currentPage();
+      state.drawing = false;
+      const chip = document.querySelector('.anydoc-head .status-chip');
+      if (chip) {
+        chip.classList.remove('approved');
+        chip.classList.add('pending');
+        chip.textContent = '需重审';
+      }
+      if (!page.anydoc?.textConfirmed) {
+        const textStatus = document.querySelector('.source-section:nth-child(2) .source-review-title span');
+        if (textStatus) textStatus.textContent = '待确认';
+      }
+      const actionCopy = document.querySelector('.source-review-actions p');
+      if (actionCopy) actionCopy.textContent = '来源已发生修改；请重新完成来源审核后，再决定是否需要截图。';
+      const capture = document.querySelector('[data-start-capture]');
+      if (capture) {
+        capture.disabled = true;
+        capture.textContent = '来源变更，需重新确认';
+      }
+      el('drawObjectButton').classList.remove('active');
+      el('drawObjectButton').disabled = true;
+      el('drawObjectButton').textContent = '画框截图';
+      el('mergeButton').disabled = true;
+      el('stageMode').textContent = '来源已修改；重新确认 AnyDoc 文字与源图片后，才能按需画框截图';
+      refreshGateMessages();
+    }
+
+    function sourceImageMarkup(image, page) {
+      const locked = !isEditable(page);
+      const dispositionText = image.disposition === 'include' ? '保留源文件' : image.disposition === 'exclude' ? '已忽略' : '待审核';
+      return `<article class="source-asset">
+        <div class="source-asset-main">
+          <div class="source-file-preview ${image.kind === 'brand' ? 'brand' : ''}" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+          <div><strong class="source-asset-name">${image.id} · ${image.filename}</strong><span class="source-asset-meta">${image.mime} · ${image.dimensions} · ${dispositionText}</span></div>
+        </div>
+        <div class="source-asset-body">
+          <div class="decision-row" role="group" aria-label="${image.id} 源图片处置">
+            <button class="decision-button ${image.disposition === 'include' ? 'selected' : ''}" type="button" aria-pressed="${image.disposition === 'include'}" data-source-disposition="include" data-source-id="${image.id}" ${locked ? 'disabled' : ''}>保留源文件</button>
+            <button class="decision-button exclude ${image.disposition === 'exclude' ? 'selected' : ''}" type="button" aria-pressed="${image.disposition === 'exclude'}" data-source-disposition="exclude" data-source-id="${image.id}" ${locked ? 'disabled' : ''}>忽略</button>
+          </div>
+          ${image.disposition === 'include' ? `<div class="field"><label for="sourceSummary-${image.id}">summary（必填）</label><textarea id="sourceSummary-${image.id}" data-source-image-field="summary" data-source-id="${image.id}" ${locked ? 'disabled' : ''}>${image.summary}</textarea></div>` : ''}
+          ${image.disposition === 'exclude' ? `<div class="field"><label for="sourceReason-${image.id}">忽略原因（必填）</label><select id="sourceReason-${image.id}" data-source-image-field="exclusionReason" data-source-id="${image.id}" ${locked ? 'disabled' : ''}><option value="">请选择</option><option value="decorative" ${image.exclusionReason === 'decorative' ? 'selected' : ''}>装饰性内容</option><option value="duplicate" ${image.exclusionReason === 'duplicate' ? 'selected' : ''}>重复内容</option><option value="irrelevant" ${image.exclusionReason === 'irrelevant' ? 'selected' : ''}>与关键信息无关</option><option value="unreadable" ${image.exclusionReason === 'unreadable' ? 'selected' : ''}>不可读</option><option value="other" ${image.exclusionReason === 'other' ? 'selected' : ''}>其他</option></select></div>` : ''}
+        </div>
+      </article>`;
+    }
+
+    function visualCardMarkup(visual, page) {
+      const selected = visual.id === state.selectedVisualId;
+      const locked = !isEditable(page);
+      return `<article class="visual-card ${selected ? 'selected' : ''}" data-card-id="${visual.id}">
+        <div class="visual-card-head">
+          <span class="visual-number">${visual.id}</span>
+          <button class="text-action visual-card-title" type="button" data-select-visual="${visual.id}">${visual.type}<span class="visual-card-sub">手动画框 · 已纳入</span></button>
+          <span class="visual-card-actions">
+            <button class="mini-action" type="button" data-move-up="${visual.id}" ${locked ? 'disabled' : ''}>上移</button>
+            <button class="mini-action" type="button" data-move-down="${visual.id}" ${locked ? 'disabled' : ''}>下移</button>
+            <button class="mini-action" type="button" data-delete-visual="${visual.id}" ${locked ? 'disabled' : ''}>删除</button>
+          </span>
+        </div>
+        ${selected ? `<div class="visual-card-body">
+          <div class="field"><label for="visualType">视觉类型（可选）</label><select id="visualType" data-field="visualType" ${locked ? 'disabled' : ''}><option value="">未指定</option><option value="chart" ${visual.visualType === 'chart' ? 'selected' : ''}>图表</option><option value="table" ${visual.visualType === 'table' ? 'selected' : ''}>表格</option><option value="infographic" ${visual.visualType === 'infographic' ? 'selected' : ''}>信息图</option><option value="image" ${visual.visualType === 'image' ? 'selected' : ''}>图片</option></select></div>
+          <div class="field"><label for="visualSummary">summary（必填）</label><textarea id="visualSummary" data-field="summary" ${locked ? 'disabled' : ''}>${visual.summary}</textarea></div>
+          ${visual.draft ? `<div class="draft-panel"><strong>VLM 草稿 · 未确认</strong><p>${visual.draft}</p><div class="inline-actions"><button class="text-action" type="button" data-accept-draft="true">采用到 summary 并确认</button><button class="text-action danger" type="button" data-discard-draft="true">丢弃草稿</button></div></div>` : ''}
+          <div class="inline-actions"><button class="text-action" type="button" data-generate-draft="true" ${locked ? 'disabled' : ''}>${visual.generating ? '正在生成…' : '显式生成 VLM 草稿'}</button></div>
+        </div>` : ''}
+      </article>`;
+    }
+
+    function renderInspector() {
+      const page = currentPage();
+      const locked = !isEditable(page);
+      const blockers = blockersFor(page);
+      const screenshots = el('screenshotView');
+      screenshots.hidden = state.inspectorTab !== 'screenshots';
+      el('sourceView').hidden = state.inspectorTab !== 'source';
+      el('sourceView').innerHTML = `
+        <section class="source-section">
+          <div class="anydoc-head"><div><h2>AnyDoc 来源审核</h2><p>先核对直接提取的文字与图片源文件，不从页面截图推断对象。</p></div><span class="status-chip ${page.sourceReviewConfirmed ? 'approved' : 'pending'}">${page.sourceReviewConfirmed ? '已确认' : '先审核'}</span></div>
+          <span class="source-lineage">anydoc · page ${page.id} · synthetic prototype · <span class="page-timer">00:00</span></span>
+          ${locked ? `<div class="info-note">${svgIcons.lock} 当前页为 ${statusLabel(page.status)}，必须先重新打开才能修改来源审核。</div>` : ''}
+          ${page.hidden ? '<div class="info-note"><strong>隐藏页尚未启用策展。</strong><div class="inline-actions"><button class="text-action" type="button" data-enable-hidden="true">启用并处理此页</button></div></div>' : ''}
+        </section>
+        <section class="source-section">
+          <div class="source-review-title"><h3>文字提取</h3><span>${page.anydoc?.textConfirmed ? '已确认' : '待确认'}</span></div>
+          <textarea class="source-text-control" data-anydoc-text="true" aria-label="AnyDoc 提取文字" ${locked ? 'disabled' : ''}>${page.anydoc?.extractedText || ''}</textarea>
+          <div class="inline-actions"><button class="text-action" type="button" data-confirm-anydoc-text="true" ${locked ? 'disabled' : ''}>${page.anydoc?.textConfirmed ? '重新审核文字' : '确认文字提取'}</button></div>
+          ${page.notes ? `<div class="quality-hint"><strong>演讲者备注</strong>：${page.notes}</div>` : ''}
+        </section>
+        <section class="source-section">
+          <div class="source-review-title"><h3>图片源文件</h3><span>${page.anydoc?.images.length || 0} 个文件</span></div>
+          <div class="source-asset-list">${page.anydoc?.images.length ? page.anydoc.images.map(image => sourceImageMarkup(image, page)).join('') : '<div class="quality-hint">AnyDoc 未提取出独立图片源文件。确认文字后，可直接批准；只有需要保留页面组合视觉时才画框截图。</div>'}</div>
+        </section>
+        <section class="source-section source-review-actions">
+          <p>${page.sourceReviewConfirmed ? '来源已确认。若页面仍有未被源文件覆盖的组合视觉，可按需画框。' : '完成所有文字和源图片处置后，确认本页来源审核。'}</p>
+          ${page.sourceReviewConfirmed ? `<button class="primary-button" type="button" data-start-capture="true" ${locked ? 'disabled' : ''}>按需画框截图</button>` : `<button class="primary-button" type="button" data-confirm-source-review="true" ${locked ? 'disabled' : ''}>完成来源审核</button>`}
+        </section>`;
+      screenshots.innerHTML = `
+        <section class="section-block">
+          <h2 class="section-heading">按需截图 <span class="status-chip ${page.sourceReviewConfirmed ? 'approved' : 'pending'}">${page.sourceReviewConfirmed ? '来源已审' : '先审来源'}</span></h2>
+          <div class="section-meta"><span>页码</span><strong>${page.id} / 43</strong><span>截图对象</span><strong>${page.visuals.length} 个</strong><span>页耗时</span><strong class="page-timer">00:00</strong></div>
+          <div class="${page.sourceReviewConfirmed ? 'quality-hint source-confirmed' : 'info-note'}">${page.sourceReviewConfirmed ? '源文件优先。只有 AnyDoc 文字与源图片不能完整表达页面信息时，才画框截图。' : '请先回到 AnyDoc 来源页签完成审核，画框功能随后解锁。'}</div>
+          <div class="field"><label for="overview">overview（可选）</label><textarea id="overview" data-page-field="overview" ${locked ? 'disabled' : ''}>${page.overview || ''}</textarea></div>
+          ${page.renderWarning && !state.renderWarningAcknowledged ? '<div class="quality-hint"><strong>渲染警告</strong>：检测到字体替代。它不阻止本页审核，但未经确认会阻止发布。</div>' : ''}
+        </section>
+        <section class="section-block">
+          <h2 class="section-heading">截图对象 <button class="mini-action" type="button" data-sort-visuals="true" ${locked || page.visuals.length < 2 ? 'disabled' : ''}>按页面顺序整理</button></h2>
+          <div class="visual-list">${page.visuals.length ? page.visuals.map(visual => visualCardMarkup(visual, page)).join('') : '<div class="quality-hint">尚未创建截图对象。这是合法状态：若 AnyDoc 来源已经足够，可直接批准本页。</div>'}</div>
+        </section>`;
+      el('gateDock').innerHTML = `<section class="section-block gate" id="auditGate">
+          <h2 class="section-heading">审核闸门 <span class="gate-count" role="status" aria-live="polite" aria-atomic="true">${blockers.length} 项阻塞</span></h2>
+          <div class="gate-messages">${blockers.length ? blockers.map(item => `<div class="blocker">${item}</div>`).join('') : gateSuccessMarkup(page)}</div>
+          ${page.status === 'pending' ? `<div class="field"><label for="pageExclusionReason">整页排除原因（排除时必填）</label><select id="pageExclusionReason" data-page-field="pageExclusionReason"><option value="">请选择</option><option value="no_meaningful_content" ${page.pageExclusionReason === 'no_meaningful_content' ? 'selected' : ''}>无有意义内容</option><option value="duplicate" ${page.pageExclusionReason === 'duplicate' ? 'selected' : ''}>重复页</option><option value="irrelevant" ${page.pageExclusionReason === 'irrelevant' ? 'selected' : ''}>无关</option><option value="unreadable" ${page.pageExclusionReason === 'unreadable' ? 'selected' : ''}>不可读</option><option value="other" ${page.pageExclusionReason === 'other' ? 'selected' : ''}>其他</option></select></div>` : ''}
+          <div class="gate-actions"><button class="primary-button" type="button" data-approve-page="true" ${page.status !== 'pending' || blockers.length ? 'disabled' : ''}>批准并前进</button><button class="danger-button" type="button" data-exclude-page="true" ${page.status !== 'pending' ? 'disabled' : ''}>排除并前进</button><button class="decision-button" type="button" data-reopen-page="true" ${page.status === 'pending' || page.status === 'hidden' ? 'disabled' : ''}>重新打开</button></div>
+        </section>`;
+      bindInspectorEvents();
+      renderStateDump();
+    }
+
+    function bindInspectorEvents() {
+      document.querySelectorAll('[data-select-visual]').forEach(button => button.addEventListener('click', () => selectVisual(button.dataset.selectVisual)));
+      document.querySelectorAll('[data-source-disposition]').forEach(button => button.addEventListener('click', () => {
+        const image = currentPage().anydoc.images.find(item => item.id === button.dataset.sourceId);
+        image.disposition = button.dataset.sourceDisposition;
+        currentPage().sourceReviewConfirmed = false;
+        record('set_source_image_disposition', { source: image.id, disposition: image.disposition });
+        renderAll();
+      }));
+      document.querySelectorAll('[data-source-image-field]').forEach(field => field.addEventListener('input', () => {
+        const image = currentPage().anydoc.images.find(item => item.id === field.dataset.sourceId);
+        const wasConfirmed = currentPage().sourceReviewConfirmed;
+        image[field.dataset.sourceImageField] = field.value;
+        currentPage().sourceReviewConfirmed = false;
+        record('edit_source_image_field', { source: image.id, field: field.dataset.sourceImageField });
+        renderStateDump();
+        if (wasConfirmed) reflectSourceReviewInvalidation();
+        else refreshGateMessages();
+      }));
+      document.querySelectorAll('[data-source-image-field]').forEach(field => field.addEventListener('change', () => renderInspector()));
+      document.querySelector('[data-anydoc-text]')?.addEventListener('input', fieldEvent => {
+        const wasConfirmed = currentPage().sourceReviewConfirmed;
+        currentPage().anydoc.extractedText = fieldEvent.target.value;
+        currentPage().anydoc.textConfirmed = false;
+        currentPage().sourceReviewConfirmed = false;
+        record('edit_anydoc_text');
+        renderStateDump();
+        if (wasConfirmed) reflectSourceReviewInvalidation();
+        else refreshGateMessages();
+      });
+      document.querySelector('[data-anydoc-text]')?.addEventListener('change', () => renderInspector());
+      document.querySelector('[data-confirm-anydoc-text]')?.addEventListener('click', () => {
+        currentPage().anydoc.textConfirmed = !currentPage().anydoc.textConfirmed;
+        currentPage().sourceReviewConfirmed = false;
+        record(currentPage().anydoc.textConfirmed ? 'confirm_anydoc_text' : 'reopen_anydoc_text');
+        renderAll();
+      });
+      document.querySelector('[data-confirm-source-review]')?.addEventListener('click', () => {
+        const issues = sourceReviewIssues(currentPage());
+        if (issues.length) { toast(`来源审核还有 ${issues.length} 项未完成`); el('auditGate')?.scrollIntoView({ block: 'start' }); return; }
+        currentPage().sourceReviewConfirmed = true;
+        record('confirm_anydoc_source_review');
+        renderAll();
+        toast('来源审核已完成；可直接批准，或按需画框截图');
+      });
+      document.querySelector('[data-start-capture]')?.addEventListener('click', () => beginDrawMode(true));
+      document.querySelectorAll('[data-field]').forEach(field => field.addEventListener('input', () => {
+        const visual = currentVisual();
+        visual[field.dataset.field] = field.value;
+        record('edit_visual_field', { visual: visual.id, field: field.dataset.field });
+        renderSlide();
+        renderStateDump();
+        refreshGateMessages();
+      }));
+      document.querySelectorAll('[data-field]').forEach(field => field.addEventListener('change', () => renderInspector()));
+      document.querySelectorAll('[data-page-field]').forEach(field => field.addEventListener('input', () => {
+        currentPage()[field.dataset.pageField] = field.value;
+        record('edit_page_field', { field: field.dataset.pageField });
+        renderStateDump();
+      }));
+      document.querySelectorAll('[data-page-field]').forEach(field => field.addEventListener('change', () => renderInspector()));
+      document.querySelectorAll('[data-move-up]').forEach(button => button.addEventListener('click', () => moveVisual(button.dataset.moveUp, -1)));
+      document.querySelectorAll('[data-move-down]').forEach(button => button.addEventListener('click', () => moveVisual(button.dataset.moveDown, 1)));
+      document.querySelectorAll('[data-delete-visual]').forEach(button => button.addEventListener('click', () => deleteVisual(button.dataset.deleteVisual)));
+      document.querySelector('[data-generate-draft]')?.addEventListener('click', generateDraft);
+      document.querySelector('[data-accept-draft]')?.addEventListener('click', () => { const visual = currentVisual(); visual.summary = visual.draft; visual.draftConfirmed = true; delete visual.draft; record('accept_vlm_draft', { visual: visual.id }); renderAll(); });
+      document.querySelector('[data-discard-draft]')?.addEventListener('click', () => { const visual = currentVisual(); delete visual.draft; visual.draftConfirmed = false; record('discard_vlm_draft', { visual: visual.id }); renderAll(); });
+      document.querySelector('[data-approve-page]')?.addEventListener('click', approvePage);
+      document.querySelector('[data-exclude-page]')?.addEventListener('click', excludePage);
+      document.querySelector('[data-reopen-page]')?.addEventListener('click', reopenPage);
+      document.querySelector('[data-enable-hidden]')?.addEventListener('click', enableHiddenPage);
+      document.querySelector('[data-sort-visuals]')?.addEventListener('click', sortVisuals);
+    }
+
+    function selectVisual(id) {
+      state.selectedVisualId = id;
+      renderSlide();
+      renderInspector();
+      document.querySelector(`[data-card-id="${id}"]`)?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function deleteVisual(id) {
+      const page = currentPage();
+      const index = page.visuals.findIndex(item => item.id === id);
+      if (index < 0 || !isEditable(page)) return;
+      page.visuals.splice(index, 1);
+      page.visuals.forEach((visual, visualIndex) => visual.id = pad(visualIndex + 1));
+      state.selectedVisualId = page.visuals[Math.min(index, page.visuals.length - 1)]?.id || null;
+      record('delete_manual_capture', { visual: id });
+      renderAll();
+      toast(`截图对象 ${id} 已删除`);
+    }
+
+    function moveVisual(id, direction) {
+      const list = currentPage().visuals;
+      const index = list.findIndex(item => item.id === id);
+      const target = index + direction;
+      if (target < 0 || target >= list.length) return;
+      [list[index], list[target]] = [list[target], list[index]];
+      list.forEach((visual, idx) => visual.id = pad(idx + 1));
+      state.selectedVisualId = list[target].id;
+      record('reorder_visuals');
+      renderAll();
+    }
+
+    function sortVisuals() {
+      currentPage().visuals.sort((a, b) => (a.bbox.y - b.bbox.y) || (a.bbox.x - b.bbox.x));
+      currentPage().visuals.forEach((visual, idx) => visual.id = pad(idx + 1));
+      state.selectedVisualId = currentPage().visuals[0]?.id || null;
+      record('sort_visuals_by_page_position');
+      renderAll();
+    }
+
+    function generateDraft() {
+      const visual = currentVisual();
+      if (!visual) { toast('请先创建并选择一个截图对象'); return; }
+      if (visual.generating) return;
+      visual.generating = true;
+      record('request_vlm_draft', { visual: visual.id });
+      renderInspector();
+      window.setTimeout(() => {
+        visual.generating = false;
+        visual.draft = '该截图展示本期指标相较上期整体提升，其中新增客户与复购率增幅最为明显。';
+        visual.draftConfirmed = false;
+        record('receive_vlm_draft', { visual: visual.id });
+        renderInspector();
+        toast('VLM 草稿已生成，必须确认或丢弃');
+      }, 900);
+    }
+
+    function finishTiming(page, outcome) {
+      const seconds = Math.max(1, Math.round(elapsedForPage(page.id)));
+      state.reviewedDurations.push({ page: page.id, seconds, outcome });
+      state.pageElapsedSecondsById[page.id] = 0;
+      state.pageStartedAt = null;
+    }
+
+    function approvePage() {
+      const page = currentPage();
+      const blockers = blockersFor(page);
+      if (blockers.length) {
+        el('auditGate')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        toast(`无法批准：还有 ${blockers.length} 项硬阻塞`);
+        record('approval_blocked', { blockers });
+        return;
+      }
+      page.status = 'approved';
+      finishTiming(page, 'approved');
+      record('approve_page');
+      toast(`第 ${page.id} 页已批准`);
+      goToNextPending();
+    }
+
+    function excludePage() {
+      const page = currentPage();
+      if (!page.pageExclusionReason) {
+        el('pageExclusionReason')?.focus();
+        el('auditGate')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        toast('排除整页前必须选择原因');
+        record('page_exclusion_blocked');
+        return;
+      }
+      page.status = 'excluded';
+      finishTiming(page, 'excluded');
+      record('exclude_page', { reason: page.pageExclusionReason });
+      toast(`第 ${page.id} 页已排除`);
+      goToNextPending();
+    }
+
+    function reopenPage() {
+      const page = currentPage();
+      if (page.status === 'pending' || page.status === 'hidden') return;
+      page.status = 'pending';
+      state.pageElapsedSecondsById[page.id] = 0;
+      beginPageTiming(page.id);
+      record('reopen_page');
+      toast(`第 ${page.id} 页已重新打开`);
+      renderAll();
+    }
+
+    function enableHiddenPage() {
+      const page = currentPage();
+      page.hidden = false;
+      page.status = 'pending';
+      page.sourceReviewConfirmed = false;
+      page.visuals = [];
+      state.selectedVisualId = null;
+      state.inspectorTab = 'source';
+      record('enable_hidden_page');
+      toast('隐藏页已启用并进入 pending');
+      renderAll();
+    }
+
+    function goToNextPending() {
+      const pending = pages.find(page => page.status === 'pending');
+      if (pending) switchPage(pending.id);
+      else { state.filter = 'all'; renderAll(); toast('待处理队列已清空'); }
+    }
+
+    function switchPage(id) {
+      const page = pages.find(item => item.id === id);
+      if (!page) { toast(`没有找到第 ${id} 页`); return; }
+      pausePageTiming();
+      state.currentPageId = id;
+      state.selectedVisualId = page.visuals[0]?.id || null;
+      state.inspectorTab = 'source';
+      beginPageTiming(id);
+      state.drawing = false;
+      record('open_page', { target: id });
+      renderAll();
+    }
+
+    function navigate(direction) {
+      const list = visiblePages();
+      const index = list.findIndex(page => page.id === state.currentPageId);
+      const target = list[index + direction] || (direction > 0 ? list[0] : list[list.length - 1]);
+      if (target) switchPage(target.id);
+    }
+
+    function mergeWithNext() {
+      const page = currentPage();
+      if (!isEditable(page)) return;
+      const index = page.visuals.findIndex(item => item.id === state.selectedVisualId);
+      if (index < 0 || index >= page.visuals.length - 1) { toast('当前对象后面没有可合并项'); return; }
+      const a = page.visuals[index], b = page.visuals[index + 1];
+      const x = Math.min(a.bbox.x, b.bbox.x), y = Math.min(a.bbox.y, b.bbox.y);
+      const right = Math.max(a.bbox.x + a.bbox.w, b.bbox.x + b.bbox.w);
+      const bottom = Math.max(a.bbox.y + a.bbox.h, b.bbox.y + b.bbox.h);
+      a.bbox = { x, y, w: right - x, h: bottom - y };
+      a.type = '组合截图';
+      a.summary = [a.summary, b.summary].filter(Boolean).join('；');
+      a.disposition = 'include';
+      a.confirmed = true;
+      page.visuals.splice(index + 1, 1);
+      page.visuals.forEach((visual, idx) => visual.id = pad(idx + 1));
+      state.selectedVisualId = page.visuals[index].id;
+      record('merge_visuals');
+      renderAll();
+    }
+
+    function beginDrawMode(forceStart = false) {
+      const page = currentPage();
+      if (!isEditable(page)) { toast('请先重新打开此页'); return; }
+      if (!page.sourceReviewConfirmed) { state.inspectorTab = 'source'; renderAll(); toast('请先完成 AnyDoc 来源审核'); return; }
+      state.drawing = forceStart ? true : !state.drawing;
+      state.inspectorTab = 'screenshots';
+      record(state.drawing ? 'start_manual_capture' : 'cancel_manual_capture');
+      renderAll();
+    }
+
+    el('slideCanvas').addEventListener('pointerdown', event => {
+      if (!state.drawing || event.target.closest('.visual-box')) return;
+      const rect = el('slideCanvas').getBoundingClientRect();
+      const startX = Math.max(0, Math.min(100, (event.clientX - rect.left) / rect.width * 100));
+      const startY = Math.max(0, Math.min(100, (event.clientY - rect.top) / rect.height * 100));
+      const preview = document.createElement('div');
+      preview.className = 'draw-preview';
+      el('slideCanvas').appendChild(preview);
+      const move = moveEvent => {
+        const endX = Math.max(0, Math.min(100, (moveEvent.clientX - rect.left) / rect.width * 100));
+        const endY = Math.max(0, Math.min(100, (moveEvent.clientY - rect.top) / rect.height * 100));
+        preview.style.left = `${Math.min(startX, endX)}%`;
+        preview.style.top = `${Math.min(startY, endY)}%`;
+        preview.style.width = `${Math.abs(endX - startX)}%`;
+        preview.style.height = `${Math.abs(endY - startY)}%`;
+      };
+      const up = upEvent => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        const endX = Math.max(0, Math.min(100, (upEvent.clientX - rect.left) / rect.width * 100));
+        const endY = Math.max(0, Math.min(100, (upEvent.clientY - rect.top) / rect.height * 100));
+        preview.remove();
+        const bbox = { x: Math.min(startX, endX), y: Math.min(startY, endY), w: Math.abs(endX - startX), h: Math.abs(endY - startY) };
+        if (bbox.w < 3 || bbox.h < 3) { toast('范围太小，未创建截图'); return; }
+        const id = pad(currentPage().visuals.length + 1);
+        currentPage().visuals.push({ id, type: '画框截图', disposition: 'include', summary: '', visualType: '', confirmed: true, bbox });
+        state.selectedVisualId = id;
+        state.drawing = false;
+        record('draw_manual_capture', { visual: id, bbox });
+        renderAll();
+        toast(`已创建截图对象 ${id}，请补充 summary`);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up, { once: true });
+    });
+
+    function batchExclude() {
+      const selected = pages.filter(page => state.selectedPageIds.includes(page.id) && page.status === 'pending');
+      if (!selected.length) { toast('所选页中没有 pending 页'); return; }
+      const reason = el('batchReason').value;
+      if (!reason) { el('batchReason').focus(); toast('批量排除前必须选择统一原因'); return; }
+      pausePageTiming();
+      selected.forEach(page => {
+        const seconds = Math.max(1, Math.round(state.pageElapsedSecondsById[page.id] || 0));
+        page.status = 'excluded';
+        page.pageExclusionReason = reason;
+        state.reviewedDurations.push({ page: page.id, seconds, outcome: 'excluded', mode: 'batch' });
+        state.pageElapsedSecondsById[page.id] = 0;
+      });
+      record('batch_exclude_pages', { pages: selected.map(page => page.id), reason });
+      state.selectedPageIds = [];
+      el('batchReason').value = '';
+      if (selected.some(page => page.id === state.currentPageId)) goToNextPending();
+      else { beginPageTiming(state.currentPageId); renderAll(); }
+      toast(`已批量排除 ${selected.length} 页`);
+    }
+
+    function renderStateDump() {
+      el('stateDump').textContent = JSON.stringify({ ...state, sessionElapsedSeconds: Math.round((Date.now() - state.sessionStartedAt) / 1000), currentPage: currentPage(), pages }, null, 2);
+    }
+
+    function renderAll() {
+      const page = currentPage();
+      renderPageRail();
+      renderSlide();
+      renderInspector();
+      document.querySelectorAll('.filter-tab').forEach(button => button.classList.toggle('active', button.dataset.filter === state.filter));
+      document.querySelectorAll('.inspector-tab').forEach(button => {
+        const selected = button.dataset.tab === state.inspectorTab;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+      });
+      el('drawObjectButton').classList.toggle('active', state.drawing);
+      el('drawObjectButton').disabled = !isEditable(page) || !page.sourceReviewConfirmed;
+      el('drawObjectButton').textContent = state.drawing ? '取消画框' : '画框截图';
+      el('mergeButton').disabled = !isEditable(page) || !page.sourceReviewConfirmed || page.visuals.length < 2;
+      el('screenshotCount').textContent = page.visuals.length;
+      el('stageMode').textContent = state.drawing
+        ? '在页面上拖拽，截取 AnyDoc 源文件未覆盖的组合视觉'
+        : !page.sourceReviewConfirmed
+          ? '先审核右侧 AnyDoc 文字与源图片；确认后可按需画框截图'
+          : page.visuals.length
+            ? '拖动截图框定位；右下角裁剪；Shift+方向键移动，Alt+方向键缩放'
+            : 'AnyDoc 来源已确认；只有源文件不足时才画框截图';
+      el('mappingButton').innerHTML = `页对应 <strong>${state.mappingRemaining}</strong>`;
+      el('mappingButton').disabled = state.mappingRemaining === 0;
+      el('mappingRemainingLabel').textContent = `剩余 ${state.mappingRemaining} 项`;
+      el('fitButton').textContent = state.actualSize ? '适合窗口' : '100% 显示';
+      el('ackWarningButton').disabled = state.renderWarningAcknowledged;
+      el('ackWarningButton').textContent = state.renderWarningAcknowledged ? '渲染警告已确认' : '确认渲染警告';
+    }
+
+    document.querySelectorAll('.filter-tab').forEach(button => button.addEventListener('click', () => { state.filter = button.dataset.filter; renderAll(); }));
+    function selectInspectorTab(tabName, moveFocus = false) {
+      state.inspectorTab = tabName;
+      renderAll();
+      if (moveFocus) document.querySelector(`.inspector-tab[data-tab="${tabName}"]`)?.focus();
+    }
+
+    document.querySelectorAll('.inspector-tab').forEach(button => {
+      button.addEventListener('click', () => selectInspectorTab(button.dataset.tab));
+      button.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        selectInspectorTab(button.dataset.tab === 'source' ? 'screenshots' : 'source', true);
+      });
+    });
+    el('jumpForm').addEventListener('submit', event => { event.preventDefault(); switchPage(Number(el('jumpInput').value)); });
+    el('drawObjectButton').addEventListener('click', beginDrawMode);
+    el('mergeButton').addEventListener('click', mergeWithNext);
+    el('fitButton').addEventListener('click', () => { state.actualSize = !state.actualSize; record('toggle_page_scale', { mode: state.actualSize ? 'actual_size' : 'fit' }); renderAll(); toast(state.actualSize ? '已切换为 100% 页面尺寸' : '页面已适合可用窗口'); });
+    el('ackWarningButton').addEventListener('click', () => { state.renderWarningAcknowledged = true; el('renderWarning').className = 'status-chip approved'; el('renderWarning').textContent = '渲染警告已确认'; record('ack_render_warning'); renderInspector(); });
+    el('batchExcludeButton').addEventListener('click', batchExclude);
+    function openStateDrawer() {
+      focusBeforeOverlay = document.activeElement;
+      const drawer = el('stateDrawer');
+      drawer.hidden = false;
+      drawer.setAttribute('aria-hidden', 'false');
+      el('appShell').setAttribute('inert', '');
+      renderStateDump();
+      requestAnimationFrame(() => { drawer.classList.add('open'); el('closeStateButton').focus(); });
+    }
+
+    function closeStateDrawer() {
+      const drawer = el('stateDrawer');
+      drawer.classList.remove('open');
+      drawer.setAttribute('aria-hidden', 'true');
+      drawer.hidden = true;
+      el('appShell').removeAttribute('inert');
+      focusBeforeOverlay?.focus?.();
+      focusBeforeOverlay = null;
+    }
+
+    function openMappingMode() {
+      if (!state.mappingRemaining) { toast('页对应已经全部确认'); return; }
+      focusBeforeOverlay = document.activeElement;
+      el('mappingMode').classList.add('open');
+      el('appShell').setAttribute('inert', '');
+      document.querySelector('input[name="mapping"]:checked')?.focus();
+    }
+
+    function closeMappingMode() {
+      el('mappingMode').classList.remove('open');
+      el('appShell').removeAttribute('inert');
+      focusBeforeOverlay?.focus?.();
+      focusBeforeOverlay = null;
+    }
+
+    el('stateButton').addEventListener('click', openStateDrawer);
+    el('closeStateButton').addEventListener('click', closeStateDrawer);
+    el('mappingButton').addEventListener('click', openMappingMode);
+    el('confirmMappingButton').addEventListener('click', () => {
+      if (state.mappingRemaining > 0) state.mappingRemaining -= 1;
+      record('confirm_page_mapping', { choice: document.querySelector('input[name="mapping"]:checked')?.value });
+      toast(state.mappingRemaining ? `对应已确认，还剩 ${state.mappingRemaining} 项` : '全部对应已确认，版本可以进入 ready');
+      renderAll();
+      if (!state.mappingRemaining) closeMappingMode();
+      else document.querySelector('input[name="mapping"]:checked')?.focus();
+    });
+    el('loadLocalButton').addEventListener('click', () => el('localFileInput').click());
+    el('localFileInput').addEventListener('change', event => {
+      const files = [...event.target.files];
+      if (!files.length) return;
+      files.forEach((file, index) => {
+        const url = URL.createObjectURL(file);
+        if (index === 0) currentPage().localImage = url;
+        else pages.push({ id: Math.max(...pages.map(page => page.id)) + 1, title: `本地页 ${index + 1}`, status: 'pending', inherited: false, changed: false, overview: '', notes: '', localImage: url, pageExclusionReason: '', sourceReviewConfirmed: false, anydoc: { textConfirmed: false, extractedText: '静态原型未连接 AnyDoc；此处用合成来源数据验证审核顺序。', images: [] }, visuals: [] });
+      });
+      record('load_local_images', { count: files.length, mediaTypes: [...new Set(files.map(file => file.type))] });
+      renderAll();
+      toast(`已在本机载入 ${files.length} 张页图；不会上传`);
+    });
+
+    window.addEventListener('keydown', event => {
+      const active = document.activeElement;
+      if (el('mappingMode').classList.contains('open')) return;
+      if (el('stateDrawer').classList.contains('open')) {
+        if (event.key === 'Escape') { event.preventDefault(); closeStateDrawer(); }
+        return;
+      }
+      if (active && (active.matches('input, textarea, select') || active.isContentEditable)) return;
+      if ((event.shiftKey || event.altKey) && event.key.startsWith('Arrow')) {
+        const visual = currentVisual();
+        if (!visual || !isEditable(currentPage())) return;
+        event.preventDefault();
+        if (event.shiftKey) {
+          if (event.key === 'ArrowLeft') visual.bbox.x = Math.max(0, visual.bbox.x - 1);
+          if (event.key === 'ArrowRight') visual.bbox.x = Math.min(100 - visual.bbox.w, visual.bbox.x + 1);
+          if (event.key === 'ArrowUp') visual.bbox.y = Math.max(0, visual.bbox.y - 1);
+          if (event.key === 'ArrowDown') visual.bbox.y = Math.min(100 - visual.bbox.h, visual.bbox.y + 1);
+          record('nudge_visual', { visual: visual.id, bbox: visual.bbox });
+        } else {
+          if (event.key === 'ArrowLeft') visual.bbox.w = Math.max(6, visual.bbox.w - 1);
+          if (event.key === 'ArrowRight') visual.bbox.w = Math.min(100 - visual.bbox.x, visual.bbox.w + 1);
+          if (event.key === 'ArrowUp') visual.bbox.h = Math.max(6, visual.bbox.h - 1);
+          if (event.key === 'ArrowDown') visual.bbox.h = Math.min(100 - visual.bbox.y, visual.bbox.h + 1);
+          record('resize_visual_with_keyboard', { visual: visual.id, bbox: visual.bbox });
+        }
+        renderSlide();
+        return;
+      }
+      if (event.key === 'ArrowRight') { event.preventDefault(); navigate(1); }
+      if (event.key === 'ArrowLeft') { event.preventDefault(); navigate(-1); }
+      if (event.key.toLowerCase() === 'a') { event.preventDefault(); approvePage(); }
+      if (event.key.toLowerCase() === 'x') { event.preventDefault(); excludePage(); }
+      if (event.key.toLowerCase() === 'r') { event.preventDefault(); reopenPage(); }
+      if (event.key.toLowerCase() === 'v') { event.preventDefault(); generateDraft(); }
+      if (event.key === 'Escape') { state.drawing = false; renderAll(); }
+    });
+
+    window.setInterval(() => {
+      const sessionSeconds = Math.round((Date.now() - state.sessionStartedAt) / 1000);
+      const pageSeconds = Math.round(elapsedForPage(state.currentPageId));
+      el('sessionTimer').textContent = formatSeconds(sessionSeconds);
+      const average = state.reviewedDurations.length ? Math.round(state.reviewedDurations.reduce((sum, item) => sum + item.seconds, 0) / state.reviewedDurations.length) : null;
+      el('averageMetric').textContent = average ? `均值 ${average}s/页` : '均值 —';
+      document.querySelectorAll('.page-timer').forEach(pageTimer => pageTimer.textContent = formatSeconds(pageSeconds));
+    }, 1000);
+
+    renderAll();
+    record('prototype_started');
+  </script>
+</body>
+</html>

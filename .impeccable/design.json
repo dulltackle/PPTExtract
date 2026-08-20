@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-20T03:59:40Z",
+  "title": "Design System: PPTExtract",
+  "extensions": {
+    "colorMeta": {
+      "monitor-black": {
+        "role": "neutral",
+        "displayName": "监看器黑",
+        "tonalRamp": ["oklch(15% 0.012 250)", "oklch(25% 0.012 250)", "oklch(35% 0.012 250)", "oklch(47% 0.012 250)", "oklch(59% 0.012 250)", "oklch(71% 0.012 250)", "oklch(83% 0.012 250)", "oklch(95% 0.012 250)"]
+      },
+      "monitor-raised": {
+        "role": "neutral",
+        "displayName": "抬升监看面",
+        "tonalRamp": ["oklch(15% 0.014 245)", "oklch(25% 0.014 245)", "oklch(35% 0.014 245)", "oklch(47% 0.014 245)", "oklch(59% 0.014 245)", "oklch(71% 0.014 245)", "oklch(83% 0.014 245)", "oklch(95% 0.014 245)"]
+      },
+      "monitor-active": {
+        "role": "neutral",
+        "displayName": "激活监看面",
+        "tonalRamp": ["oklch(15% 0.018 240)", "oklch(25% 0.018 240)", "oklch(35% 0.018 240)", "oklch(47% 0.018 240)", "oklch(59% 0.018 240)", "oklch(71% 0.018 240)", "oklch(83% 0.018 240)", "oklch(95% 0.018 240)"]
+      },
+      "slate-paper": {
+        "role": "neutral",
+        "displayName": "冷灰场记纸",
+        "tonalRamp": ["oklch(15% 0.006 220)", "oklch(25% 0.006 220)", "oklch(35% 0.006 220)", "oklch(47% 0.006 220)", "oklch(59% 0.006 220)", "oklch(71% 0.006 220)", "oklch(83% 0.006 220)", "oklch(95% 0.006 220)"]
+      },
+      "bright-log-paper": {
+        "role": "neutral",
+        "displayName": "明亮日志纸",
+        "tonalRamp": ["oklch(15% 0.003 220)", "oklch(25% 0.003 220)", "oklch(35% 0.003 220)", "oklch(47% 0.003 220)", "oklch(59% 0.003 220)", "oklch(71% 0.003 220)", "oklch(83% 0.003 220)", "oklch(95% 0.003 220)"]
+      },
+      "log-ink": {
+        "role": "neutral",
+        "displayName": "日志墨色",
+        "tonalRamp": ["oklch(15% 0.018 225)", "oklch(25% 0.018 225)", "oklch(35% 0.018 225)", "oklch(47% 0.018 225)", "oklch(59% 0.018 225)", "oklch(71% 0.018 225)", "oklch(83% 0.018 225)", "oklch(95% 0.018 225)"]
+      },
+      "muted-ink": {
+        "role": "neutral",
+        "displayName": "弱日志墨色",
+        "tonalRamp": ["oklch(15% 0.015 225)", "oklch(25% 0.015 225)", "oklch(35% 0.015 225)", "oklch(47% 0.015 225)", "oklch(59% 0.015 225)", "oklch(71% 0.015 225)", "oklch(83% 0.015 225)", "oklch(95% 0.015 225)"]
+      },
+      "dark-hairline": {
+        "role": "neutral",
+        "displayName": "暗面发丝线",
+        "tonalRamp": ["oklch(15% 0.014 235)", "oklch(25% 0.014 235)", "oklch(35% 0.014 235)", "oklch(47% 0.014 235)", "oklch(59% 0.014 235)", "oklch(71% 0.014 235)", "oklch(83% 0.014 235)", "oklch(95% 0.014 235)"]
+      },
+      "light-hairline": {
+        "role": "neutral",
+        "displayName": "纸面发丝线",
+        "tonalRamp": ["oklch(15% 0.008 220)", "oklch(25% 0.008 220)", "oklch(35% 0.008 220)", "oklch(47% 0.008 220)", "oklch(59% 0.008 220)", "oklch(71% 0.008 220)", "oklch(83% 0.008 220)", "oklch(95% 0.008 220)"]
+      },
+      "selection-teal": {
+        "role": "primary",
+        "displayName": "选择青绿",
+        "tonalRamp": ["oklch(15% 0.07 193)", "oklch(25% 0.07 193)", "oklch(35% 0.07 193)", "oklch(47% 0.07 193)", "oklch(59% 0.07 193)", "oklch(71% 0.07 193)", "oklch(83% 0.07 193)", "oklch(95% 0.07 193)"]
+      },
+      "selection-teal-deep": {
+        "role": "primary",
+        "displayName": "深选择青绿",
+        "tonalRamp": ["oklch(15% 0.075 193)", "oklch(25% 0.075 193)", "oklch(35% 0.075 193)", "oklch(47% 0.075 193)", "oklch(59% 0.075 193)", "oklch(71% 0.075 193)", "oklch(83% 0.075 193)", "oklch(95% 0.075 193)"]
+      },
+      "pending-amber": {
+        "role": "secondary",
+        "displayName": "待确认琥珀",
+        "tonalRamp": ["oklch(15% 0.13 78)", "oklch(25% 0.13 78)", "oklch(35% 0.13 78)", "oklch(47% 0.13 78)", "oklch(59% 0.13 78)", "oklch(71% 0.13 78)", "oklch(83% 0.13 78)", "oklch(95% 0.13 78)"]
+      },
+      "pending-amber-deep": {
+        "role": "secondary",
+        "displayName": "深待确认琥珀",
+        "tonalRamp": ["oklch(15% 0.105 75)", "oklch(25% 0.105 75)", "oklch(35% 0.105 75)", "oklch(47% 0.105 75)", "oklch(59% 0.105 75)", "oklch(71% 0.105 75)", "oklch(83% 0.105 75)", "oklch(95% 0.105 75)"]
+      },
+      "exclusion-red": {
+        "role": "tertiary",
+        "displayName": "排除红",
+        "tonalRamp": ["oklch(15% 0.14 29)", "oklch(25% 0.14 29)", "oklch(35% 0.14 29)", "oklch(47% 0.14 29)", "oklch(59% 0.14 29)", "oklch(71% 0.14 29)", "oklch(83% 0.14 29)", "oklch(95% 0.14 29)"]
+      },
+      "exclusion-red-deep": {
+        "role": "tertiary",
+        "displayName": "深排除红",
+        "tonalRamp": ["oklch(15% 0.13 29)", "oklch(25% 0.13 29)", "oklch(35% 0.13 29)", "oklch(47% 0.13 29)", "oklch(59% 0.13 29)", "oklch(71% 0.13 29)", "oklch(83% 0.13 29)", "oklch(95% 0.13 29)"]
+      },
+      "approved-green": {
+        "role": "tertiary",
+        "displayName": "批准绿",
+        "tonalRamp": ["oklch(15% 0.09 154)", "oklch(25% 0.09 154)", "oklch(35% 0.09 154)", "oklch(47% 0.09 154)", "oklch(59% 0.09 154)", "oklch(71% 0.09 154)", "oklch(83% 0.09 154)", "oklch(95% 0.09 154)"]
+      },
+      "focus-cyan": {
+        "role": "primary",
+        "displayName": "键盘焦点青",
+        "tonalRamp": ["oklch(15% 0.075 190)", "oklch(25% 0.075 190)", "oklch(35% 0.075 190)", "oklch(47% 0.075 190)", "oklch(59% 0.075 190)", "oklch(71% 0.075 190)", "oklch(83% 0.075 190)", "oklch(95% 0.075 190)"]
+      }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "模式标题", "purpose": "覆盖层与关键模式标题，不用于营销式首屏。" },
+      "title": { "displayName": "区域标题", "purpose": "品牌、栏标题和高层级区域名。" },
+      "body": { "displayName": "工作台正文", "purpose": "说明、字段内容与连续阅读。" },
+      "label": { "displayName": "控件标签", "purpose": "按钮、页签、状态、元数据与字段标签。" },
+      "data": { "displayName": "传输数据", "purpose": "页码、计时、对象编号、快捷键、JSON 与表格数值。" }
+    },
+    "shadows": [
+      { "name": "floating-tools", "value": "0 10px 28px rgba(0, 0, 0, .32)", "purpose": "来源画面上的悬浮工具条和 toast。" },
+      { "name": "current-queue-item", "value": "0 5px 16px rgba(0, 0, 0, .25)", "purpose": "辅助标明页队列中的当前页。" },
+      { "name": "source-canvas", "value": "0 18px 42px rgba(0, 0, 0, .38)", "purpose": "把标准页渲染从监看器背景抬起。" },
+      { "name": "current-log-entry", "value": "0 6px 16px rgba(36, 50, 58, .12)", "purpose": "辅助标明明亮日志中的当前来源文件或人工截图。" },
+      { "name": "gate-dock", "value": "0 -10px 24px rgba(23, 32, 38, .12)", "purpose": "表达审核闸门固定于日志底部。" },
+      { "name": "right-drawer", "value": "-12px 0 30px rgba(0, 0, 0, .38)", "purpose": "表达从右边缘进入的状态抽屉。" }
+    ],
+    "motion": [
+      { "name": "toast-reveal", "value": "160ms ease-out", "purpose": "提示的透明度与短距离位移。" },
+      { "name": "drawer-entry", "value": "180ms cubic-bezier(.16, 1, .3, 1)", "purpose": "右侧状态抽屉进入与退出。" },
+      { "name": "reduced-motion", "value": ".001ms", "purpose": "prefers-reduced-motion 下近乎即时完成全部过渡与动画。" }
+    ],
+    "breakpoints": [
+      { "name": "compact-desktop", "value": "1350px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "确认、批准等正向提交动作。",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">确认并继续</button>",
+      "css": ".ds-btn-primary { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:34px; border:1px solid #4fa8a5; border-radius:7px; background:var(--teal-deep, #276f70); color:#fff; padding:6px 10px; font:650 12px/1.45 var(--font-ui, sans-serif); cursor:pointer; transition:background 160ms ease-out; } .ds-btn-primary:hover { background:#328184; } .ds-btn-primary:active { background:#276f70; } .ds-btn-primary:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Quiet Button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "暗面工具与次级动作，静止时不制造额外块面。",
+      "html": "<button class=\"ds-btn-quiet\" type=\"button\">载入本地页</button>",
+      "css": ".ds-btn-quiet { display:inline-flex; align-items:center; justify-content:center; min-height:34px; border:1px solid var(--line-dark, #3a444d); border-radius:7px; background:transparent; color:#f4f6f7; padding:6px 10px; font:650 12px/1.45 var(--font-ui, sans-serif); cursor:pointer; transition:background 160ms ease-out; } .ds-btn-quiet:hover { background:#2a3239; } .ds-btn-quiet:active { background:#20262c; } .ds-btn-quiet:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "明确的排除或危险动作。",
+      "html": "<button class=\"ds-btn-danger\" type=\"button\">排除</button>",
+      "css": ".ds-btn-danger { display:inline-flex; align-items:center; justify-content:center; min-height:34px; border:1px solid #d35c4d; border-radius:7px; background:var(--red-deep, #8d3027); color:#fff; padding:6px 10px; font:650 12px/1.45 var(--font-ui, sans-serif); cursor:pointer; transition:background 160ms ease-out; } .ds-btn-danger:hover { background:#a33b31; } .ds-btn-danger:active { background:#8d3027; } .ds-btn-danger:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Pending Status Chip",
+      "kind": "chip",
+      "refersTo": "status-pending",
+      "description": "纸面上的待确认状态，文字与颜色共同传达语义。",
+      "html": "<span class=\"ds-chip-pending\" tabindex=\"0\"><span class=\"ds-chip-pending-dot\" aria-hidden=\"true\"></span>待确认</span>",
+      "css": ".ds-chip-pending { display:inline-flex; align-items:center; gap:6px; border:1px solid #936500; border-radius:999px; background:#fff0c9; color:#5c4000; padding:3px 8px; font:650 12px/1.45 var(--font-ui, sans-serif); } .ds-chip-pending-dot { width:8px; height:8px; border:1px solid currentColor; border-radius:50%; background:var(--amber, #f2b84b); } .ds-chip-pending:hover { background:#ffe8ad; } .ds-chip-pending:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Light Log Field",
+      "kind": "input",
+      "refersTo": "field-light",
+      "description": "明亮场记纸上的策展摘要输入。",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">summary（必填）</span><textarea class=\"ds-field-control\" rows=\"3\">展示季度营收与增长率的变化趋势。</textarea></label>",
+      "css": ".ds-field { display:grid; gap:5px; color:var(--ink, #172026); font-family:var(--font-ui, sans-serif); } .ds-field-label { color:#465159; font-size:12px; font-weight:680; } .ds-field-control { width:100%; min-height:70px; border:1px solid #aeb7bb; border-radius:6px; background:#fbfcfc; color:var(--ink, #172026); padding:8px 9px; font:14px/1.45 var(--font-ui, sans-serif); resize:vertical; caret-color:var(--teal-deep, #276f70); } .ds-field-control:hover { border-color:#7f8a90; } .ds-field-control:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Filter Navigation",
+      "kind": "nav",
+      "refersTo": "button-quiet",
+      "description": "暗面页队列的紧凑筛选导航。",
+      "html": "<nav class=\"ds-filter-nav\" aria-label=\"页队列筛选\"><button class=\"ds-filter-tab ds-filter-tab-active\" type=\"button\">待处理</button><button class=\"ds-filter-tab\" type=\"button\">全部</button><button class=\"ds-filter-tab\" type=\"button\">已继承</button></nav>",
+      "css": ".ds-filter-nav { display:grid; grid-template-columns:repeat(3, 1fr); gap:4px; background:var(--monitor, #171b20); padding:9px; } .ds-filter-tab { min-width:0; border:1px solid #3e4952; border-radius:6px; background:transparent; color:#bfc7cb; padding:6px 4px; font:650 12px/1.45 var(--font-ui, sans-serif); cursor:pointer; } .ds-filter-tab:hover { background:#2a3239; } .ds-filter-tab:active, .ds-filter-tab-active { border-color:var(--teal, #64bbb8); background:#1d3435; color:#dcfffd; } .ds-filter-tab:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Current Page Item",
+      "kind": "card",
+      "refersTo": "button-quiet",
+      "description": "暗面页队列中带缩略证据、页码和文字状态的当前页。",
+      "html": "<button class=\"ds-page-item\" type=\"button\" aria-current=\"page\"><span class=\"ds-page-index\">18</span><span class=\"ds-page-thumb\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i></span><strong class=\"ds-page-title\">第一季度运营概览</strong><span class=\"ds-page-state\"><i></i>待审核 · 已变化</span></button>",
+      "css": ".ds-page-item { display:grid; grid-template-columns:22px 1fr; gap:6px 8px; width:190px; border:1px solid var(--teal, #64bbb8); border-radius:8px; background:#191f24; color:#eef1f2; padding:8px; text-align:left; box-shadow:0 5px 16px rgba(0,0,0,.25); cursor:pointer; } .ds-page-index { grid-row:1 / 4; color:#cdd4d7; font:12px/1.55 var(--font-data, monospace); } .ds-page-thumb { display:flex; align-items:end; gap:4px; height:46px; border:1px solid #747e84; background:#f4f5f3; padding:8px; } .ds-page-thumb i { flex:1; height:45%; background:#438f92; } .ds-page-thumb i:nth-child(2) { height:70%; } .ds-page-thumb i:nth-child(3) { height:55%; } .ds-page-thumb i:nth-child(4) { height:82%; } .ds-page-title { overflow:hidden; color:#eef1f2; font:650 12px/1.45 var(--font-ui, sans-serif); text-overflow:ellipsis; white-space:nowrap; } .ds-page-state { display:flex; align-items:center; gap:5px; color:#aeb7bc; font:11px/1.45 var(--font-ui, sans-serif); } .ds-page-state i { width:8px; height:8px; border:1px solid var(--amber, #f2b84b); border-radius:50%; background:var(--amber, #f2b84b); } .ds-page-item:hover { border-color:#9ee9e5; background:#20262c; } .ds-page-item:active { background:#171b20; } .ds-page-item:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "AnyDoc Source Asset",
+      "kind": "custom",
+      "refersTo": "field-light",
+      "description": "先于截图出现的 AnyDoc 原始图片文件审核条目，持续保留文件身份与人工处置。",
+      "html": "<article class=\"ds-source-asset\"><header class=\"ds-source-head\"><span class=\"ds-source-preview\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span><strong>SRC-01 · image-001.png</strong><small>image/png · 1180 × 620 · 待审核</small></span></header><div class=\"ds-decision-row\"><button class=\"ds-decision ds-decision-active\" type=\"button\">保留源文件</button><button class=\"ds-decision ds-decision-exclude\" type=\"button\">忽略</button></div></article>",
+      "css": ".ds-source-asset { width:340px; overflow:hidden; border:1px solid #c8ced1; border-radius:9px; background:var(--paper-2, #f6f7f7); color:var(--ink, #172026); font-family:var(--font-ui, sans-serif); } .ds-source-head { display:grid; grid-template-columns:78px minmax(0,1fr); align-items:center; gap:10px; padding:10px; } .ds-source-head strong,.ds-source-head small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .ds-source-head strong { font-size:12px; } .ds-source-head small { margin-top:4px; color:#657078; font-size:11px; } .ds-source-preview { display:flex; align-items:end; gap:4px; height:44px; border:1px solid #aeb7bb; background:#eef1ef; padding:7px; } .ds-source-preview i { flex:1; height:38%; background:#438f92; } .ds-source-preview i:nth-child(2) { height:76%; } .ds-source-preview i:nth-child(3) { height:56%; } .ds-decision-row { display:flex; gap:7px; border-top:1px solid #ccd2d5; padding:10px; } .ds-decision { flex:1; min-height:34px; border:1px solid #aeb7bb; border-radius:7px; background:var(--paper-2, #f6f7f7); color:var(--ink, #172026); cursor:pointer; } .ds-decision:hover { background:#e0e5e6; } .ds-decision-active { border-color:var(--teal-deep, #276f70); background:var(--teal-deep, #276f70); color:#fff; } .ds-decision-exclude:hover { border-color:var(--red-deep, #8d3027); color:var(--red-deep, #8d3027); } .ds-decision:active { transform:translateY(1px); } .ds-decision:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    },
+    {
+      "name": "Command Key",
+      "kind": "custom",
+      "refersTo": "button-quiet",
+      "description": "始终可见的传输键与动作标签。",
+      "html": "<span class=\"ds-key-command\"><kbd class=\"ds-kbd\" tabindex=\"0\">A</kbd><span>批准</span></span>",
+      "css": ".ds-key-command { display:inline-flex; align-items:center; gap:8px; background:#11161a; color:#d3d9dc; padding:8px; font:14px/1.45 var(--font-ui, sans-serif); } .ds-kbd { min-width:28px; border:1px solid #6a757d; border-bottom-width:2px; border-radius:5px; background:#1d2429; color:#fff; padding:4px 7px; font:12px/1.45 var(--font-data, monospace); text-align:center; transition:background 160ms ease-out, transform 160ms ease-out; } .ds-key-command:hover .ds-kbd { background:#293139; } .ds-key-command:active .ds-kbd { transform:translateY(1px); border-bottom-width:1px; } .ds-kbd:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "样片审看室",
+    "overview": "PPTExtract 像一间为连续判断而布置的样片审看室：中性监看器黑让来源证据保持视觉主权，明亮场记纸让策展日志、继承关系与审核结论可被快速书写和复核。界面不追求展示性，而以克制、精确、可追溯的操作氛围支撑内部专家长时间工作。\n\n系统以高密度、细分隔和明确状态建立秩序。证据区与决策区应始终并置，编号、焦点和状态在两者之间保持对应；桌面布局优先，并在 1280px 级宽度仍保住来源内容的可读性。具体页面可以采用不同构图，不应把某一张工作台的单页比例提升为全局模板。",
+    "keyCharacteristics": [
+      "监看器黑与场记纸形成证据、决策双表面。",
+      "teal 表示当前选择，amber 表示待确认，red 表示排除；状态同时使用文字、图形或线型。",
+      "发丝线、紧凑控件和可见传输键支持高频桌面审看。",
+      "来源证据、当前编辑值与继承来源保持可对照。",
+      "视觉表达克制，不使用无依据装饰争夺注意力。"
+    ],
+    "rules": [
+      { "name": "The 状态不独唱 Rule", "body": "teal、amber、red 和 green 从不单独传达结果；至少搭配文字、图标、边框样式或位置关系。", "section": "colors" },
+      { "name": "The 稀释红色 Rule", "body": "red 只用于排除、错误与硬阻塞，普通强调和当前选择不得借用它。", "section": "colors" },
+      { "name": "The 数据有轨 Rule", "body": "会变化的数字和机器状态使用等宽数据字体；解释与判断仍使用 UI 字体。", "section": "typography" },
+      { "name": "The 证据不退场 Rule", "body": "编辑与结论界面必须让来源证据保持可见或可立即对照，不能把关键判断拆进失去上下文的通用卡片流程。", "section": "layout" },
+      { "name": "The 构图非模板 Rule", "body": "复用证据与决策并置、桌面高密度及 1280px 级可用性，不复制某张已批准页面的固定栏宽。", "section": "layout" },
+      { "name": "The 平面优先 Rule", "body": "容器默认依靠表面色与发丝线分组；只有真实叠层、固定层或当前焦点才获得阴影。", "section": "elevation" },
+      { "name": "The 紧角 Rule", "body": "高频控件保持紧凑小圆角；大胶囊只留给短状态，不将面板和卡片做成松软的 SaaS 气泡。", "section": "shapes" }
+    ],
+    "dos": [
+      "Do 让来源证据和当前决策同时可见，并用一致编号维持对应。",
+      "Do 先呈现可追溯的原始提取文件，确认不足后再提供截图工具。",
+      "Do 为状态提供颜色之外的文字、图形、边框或位置线索。",
+      "Do 保持桌面高密度，在 1280px 级宽度优先保护来源内容可读性。",
+      "Do 把键盘路径、焦点轮廓和当前操作状态持续呈现给专家用户。",
+      "Do 使用发丝线、紧凑间距与有限阴影建立层级。"
+    ],
+    "donts": [
+      "Don't 把工作台退化成通用 SaaS 卡片后台，或让证据离开判断上下文。",
+      "Don't 在进入页面时默认生成或展示检测框，迫使用户先处置截图对象。",
+      "Don't 使用营销 hero、渐变、玻璃拟态或无依据装饰。",
+      "Don't 把 teal、amber、red 或 green 当作唯一状态线索。",
+      "Don't 把单个已批准页面的栏宽与比例提升为全局唯一布局。",
+      "Don't 让大圆角、厚重阴影或宽松留白降低连续策展的信息密度。"
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "title": "选择样片审看室的工作台构图",
+  "question": "视觉世界已固定。请选择最适合连续逐页策展的布局；也可以回到对话中要求合并、修订或拒绝。",
+  "options": [
+    {
+      "id": "option-a",
+      "label": "A · 舞台与场记日志",
+      "kicker": "已选方向的原始构图",
+      "lineage": "大画面、全高日志、底部样片条",
+      "thesis": "把当前页与完整编辑日志并列，底部样片条让上下页始终处在视野中。",
+      "palette": ["#171B20", "#E8EBEC", "#7CC8C5", "#F2B84B", "#E05D4D"],
+      "materials": ["中性监看器黑", "明亮场记纸", "油性铅笔标记"],
+      "viewport": "左侧大画面约三分之二，右侧全高对象日志，底部是五页样片条与快捷键。",
+      "risk": "样片条持续占用高度；视觉对象较多时右侧日志需要长滚动。",
+      "comp": ".impeccable/mocks/decision/model-pick.webp"
+    },
+    {
+      "id": "option-b",
+      "label": "B · 聚焦屏与横向日志桌",
+      "kicker": "最大化来源证据",
+      "lineage": "全宽画面、底部三段日志、左侧页深度",
+      "thesis": "让标准页渲染占据几乎整个上半屏，处置、编辑和审核闸门在底部并排完成。",
+      "palette": ["#171B20", "#E8EBEC", "#7CC8C5", "#F2B84B", "#E05D4D"],
+      "materials": ["中性监看器黑", "横向场记桌", "油性铅笔标记"],
+      "viewport": "页面证据横跨上方约三分之二；底部依次是对象列表、当前对象编辑和审核闸门。",
+      "risk": "长 summary 与窄屏会让底部工作台拥挤，对象间切换也离画面较远。",
+      "comp": ".impeccable/mocks/review-workbench-option-b.webp"
+    },
+    {
+      "id": "option-c",
+      "label": "C · 页列、画面与纵向日志",
+      "kicker": "连续吞吐优先",
+      "lineage": "页队列、主画面、折叠对象日志",
+      "thesis": "把文档队列、当前证据和对象处置稳定分成三列，让下一步与阻塞项一眼可见。",
+      "palette": ["#171B20", "#E8EBEC", "#7CC8C5", "#F2B84B", "#E05D4D"],
+      "materials": ["中性监看器黑", "纵向场记纸", "油性铅笔标记"],
+      "viewport": "左侧紧凑页列，中间主画面，右侧折叠对象日志与审核闸门；底部只留快捷键。",
+      "risk": "结构最熟悉，也最可能退回普通三栏工具；1280px 下主画面宽度必须受严格保护。",
+      "comp": ".impeccable/mocks/review-workbench-option-c.webp"
+    }
+  ],
+  "reroll": false,
+  "canon": false,
+  "steer": false
+}
