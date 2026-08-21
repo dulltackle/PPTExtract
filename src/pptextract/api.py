@@ -15,6 +15,7 @@ from pptextract.config import Settings
 from pptextract.db import connect, database_path_is_local, initialize_database
 from pptextract.ingest_workflow import (
     IngestionRequestError,
+    accept_document_version,
     accept_first_upload,
     read_job,
 )
@@ -108,7 +109,38 @@ def create_app(
                 "document_id": accepted.document_id,
                 "version_id": accepted.version_id,
                 "job_id": accepted.job_id,
-                "status": "accepted",
+                "status": accepted.status,
+            },
+        )
+
+    @app.post("/api/v1/documents/{document_id}/versions")
+    async def create_document_version(
+        document_id: str,
+        request: Request,
+        file: Annotated[UploadFile, File()],
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            accepted = accept_document_version(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                filename=file.filename or "",
+                media_type=file.content_type or "",
+                stream=file.file,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        finally:
+            await file.close()
+        return JSONResponse(
+            status_code=200 if accepted.status == "no_change" else 202,
+            content={
+                "document_id": accepted.document_id,
+                "version_id": accepted.version_id,
+                "job_id": accepted.job_id,
+                "status": accepted.status,
             },
         )
 

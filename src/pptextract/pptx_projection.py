@@ -11,6 +11,20 @@ from zipfile import BadZipFile, ZipFile
 PRESENTATION_NAMESPACE = "http://schemas.openxmlformats.org/presentationml/2006/main"
 OFFICE_REL_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE_REL_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
+CONTENT_TYPES_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/content-types"
+OFFICE_DOCUMENT_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+)
+SLIDE_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+)
+PRESENTATION_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+)
+SLIDE_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
+)
+RELATIONSHIPS_CONTENT_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
 MAX_PACKAGE_ENTRIES = 10_000
 MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_ENTRY_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
@@ -39,6 +53,7 @@ def list_source_pages(pptx_bytes: bytes) -> tuple[SourcePage, ...]:
     try:
         with ZipFile(BytesIO(pptx_bytes)) as package:
             _validate_package_limits(package)
+            content_type_overrides = _validate_presentation_package(package)
             presentation = ElementTree.fromstring(package.read("ppt/presentation.xml"))
             relationships = _presentation_relationships(package)
             pages: list[SourcePage] = []
@@ -46,6 +61,8 @@ def list_source_pages(pptx_bytes: bytes) -> tuple[SourcePage, ...]:
             for page_number, slide_id in enumerate(slide_ids, start=1):
                 relationship_id = slide_id.attrib[f"{{{OFFICE_REL_NAMESPACE}}}id"]
                 source_part = relationships[relationship_id]
+                if content_type_overrides.get(f"/{source_part}") != SLIDE_CONTENT_TYPE:
+                    raise ValueError("PPTX 页部件缺少正确的内容类型")
                 slide = ElementTree.fromstring(package.read(source_part))
                 pages.append(
                     SourcePage(
@@ -100,11 +117,58 @@ def _presentation_relationships(package: ZipFile) -> dict[str, str]:
     for relationship in root.findall(f"{{{PACKAGE_REL_NAMESPACE}}}Relationship"):
         if relationship.attrib.get("TargetMode") == "External":
             continue
+        if relationship.attrib.get("Type") != SLIDE_REL_TYPE:
+            continue
         target = relationship.attrib["Target"]
         relationships[relationship.attrib["Id"]] = _resolve_part_uri(
             "ppt/presentation.xml", target
         )
     return relationships
+
+
+def _validate_presentation_package(package: ZipFile) -> dict[str, str]:
+    content_types = ElementTree.fromstring(package.read("[Content_Types].xml"))
+    defaults: dict[str, str] = {}
+    for content_type_entry in content_types.findall(
+        f"{{{CONTENT_TYPES_NAMESPACE}}}Default"
+    ):
+        extension = content_type_entry.attrib["Extension"].lower()
+        if extension in defaults:
+            raise ValueError("PPTX 包含重复的默认内容类型")
+        defaults[extension] = content_type_entry.attrib["ContentType"]
+    overrides: dict[str, str] = {}
+    for content_type_entry in content_types.findall(
+        f"{{{CONTENT_TYPES_NAMESPACE}}}Override"
+    ):
+        part_name = content_type_entry.attrib["PartName"]
+        if not part_name.startswith("/") or part_name in overrides:
+            raise ValueError("PPTX 包含无效的部件内容类型")
+        overrides[part_name] = content_type_entry.attrib["ContentType"]
+
+    if defaults.get("rels") != RELATIONSHIPS_CONTENT_TYPE:
+        raise ValueError("PPTX 缺少关系部件内容类型")
+    if overrides.get("/ppt/presentation.xml") != PRESENTATION_CONTENT_TYPE:
+        raise ValueError("PPTX 缺少演示文稿主部件内容类型")
+    for package_entry in package.infolist():
+        if package_entry.is_dir() or package_entry.filename == "[Content_Types].xml":
+            continue
+        extension = package_entry.filename.rpartition(".")[2].lower()
+        if f"/{package_entry.filename}" not in overrides and extension not in defaults:
+            raise ValueError(f"PPTX 部件缺少内容类型：{package_entry.filename}")
+
+    root_relationships = ElementTree.fromstring(package.read("_rels/.rels"))
+    office_document_targets = []
+    for relationship in root_relationships.findall(
+        f"{{{PACKAGE_REL_NAMESPACE}}}Relationship"
+    ):
+        if relationship.attrib.get("Type") != OFFICE_DOCUMENT_REL_TYPE:
+            continue
+        if relationship.attrib.get("TargetMode") == "External":
+            raise ValueError("PPTX 主部件不能使用外部关系")
+        office_document_targets.append(_resolve_part_uri("", relationship.attrib["Target"]))
+    if office_document_targets != ["ppt/presentation.xml"]:
+        raise ValueError("PPTX 缺少唯一的演示文稿主部件关系")
+    return overrides
 
 
 def _validate_package_limits(package: ZipFile) -> None:
@@ -115,6 +179,17 @@ def _validate_package_limits(package: ZipFile) -> None:
         raise PackageLimitError("PPTX contains duplicate package parts")
     total_size = 0
     for entry in entries:
+        normalized_name = posixpath.normpath(entry.filename)
+        if (
+            entry.filename.startswith("/")
+            or "\\" in entry.filename
+            or "\x00" in entry.filename
+            or normalized_name in {"", ".", ".."}
+            or normalized_name.startswith("../")
+        ):
+            raise ValueError("PPTX 包含无效部件路径")
+        if entry.flag_bits & 0x1:
+            raise ValueError("PPTX 不接受加密部件")
         total_size += entry.file_size
         if entry.file_size > MAX_ENTRY_UNCOMPRESSED_BYTES:
             raise PackageLimitError("PPTX part exceeds the fixed size limit")
@@ -124,6 +199,8 @@ def _validate_package_limits(package: ZipFile) -> None:
             raise PackageLimitError("PPTX XML part exceeds the fixed size limit")
     if total_size > MAX_TOTAL_UNCOMPRESSED_BYTES:
         raise PackageLimitError("PPTX expanded size exceeds the fixed total limit")
+    if package.testzip() is not None:
+        raise ValueError("PPTX 包含校验失败的 ZIP 部件")
 
 
 def _resolve_part_uri(source_part: str, target: str) -> str:

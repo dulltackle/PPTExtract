@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -32,9 +33,7 @@ def initialize_database(settings: Settings) -> None:
     with connect(settings) as connection:
         existing_version = connection.execute("PRAGMA user_version").fetchone()[0]
         if existing_version > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"数据库版本 {existing_version} 高于应用支持版本 {SCHEMA_VERSION}"
-            )
+            raise RuntimeError(f"数据库版本 {existing_version} 高于应用支持版本 {SCHEMA_VERSION}")
         journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
         if journal_mode is None or journal_mode[0].lower() != "wal":
             raise RuntimeError("SQLite 无法启用 WAL 模式")
@@ -54,6 +53,8 @@ def initialize_database(settings: Settings) -> None:
                     CHECK (status IN ('pending', 'running', 'completed', 'failed')),
                 actor_id TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL,
+                document_id TEXT,
+                version_id TEXT,
                 lease_owner TEXT,
                 lease_expires_at TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -83,7 +84,9 @@ def initialize_database(settings: Settings) -> None:
                 source_filename TEXT NOT NULL,
                 source_size_bytes INTEGER NOT NULL,
                 status TEXT NOT NULL
-                    CHECK (status IN ('processing', 'ready', 'failed')),
+                    CHECK (status IN (
+                        'processing', 'awaiting_mapping', 'ready', 'failed', 'voided'
+                    )),
                 created_at TEXT NOT NULL,
                 ready_at TEXT,
                 UNIQUE (document_id, version_id)
@@ -142,14 +145,103 @@ def initialize_database(settings: Settings) -> None:
 
             CREATE INDEX IF NOT EXISTS page_versions_review_queue
                 ON page_versions(review_status, document_id, page_number);
+
+            CREATE TABLE IF NOT EXISTS idempotency_records (
+                actor_id TEXT NOT NULL,
+                command_scope TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                response_status TEXT NOT NULL
+                    CHECK (response_status IN ('accepted', 'coalesced', 'no_change')),
+                document_id TEXT NOT NULL REFERENCES documents(document_id),
+                version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                job_id TEXT REFERENCES jobs(job_id),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (actor_id, command_scope, idempotency_key)
+            );
             """
         )
-        job_columns = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)")
-        }
+        if 0 < existing_version < 3:
+            _migrate_document_version_states(connection)
+        job_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)")}
         if "error_json" not in job_columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN error_json TEXT")
+        if "document_id" not in job_columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN document_id TEXT")
+        if "version_id" not in job_columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN version_id TEXT")
+        for row in connection.execute(
+            "SELECT job_id, payload_json FROM jobs WHERE kind = 'document.ingest'"
+        ):
+            payload = json.loads(row["payload_json"])
+            connection.execute(
+                """
+                UPDATE jobs SET document_id = ?, version_id = ?
+                WHERE job_id = ? AND document_id IS NULL AND version_id IS NULL
+                """,
+                (payload.get("document_id"), payload.get("version_id"), row["job_id"]),
+            )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_ingestion_job_per_document
+            ON jobs(document_id)
+            WHERE kind = 'document.ingest' AND status IN ('pending', 'running')
+            """
+        )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _migrate_document_version_states(connection: sqlite3.Connection) -> None:
+    table_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'document_versions'"
+    ).fetchone()
+    if table_sql is None or "awaiting_mapping" in str(table_sql["sql"]):
+        return
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE TABLE document_versions_v3 (
+                version_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(document_id),
+                source_sha256 TEXT NOT NULL REFERENCES stored_objects(sha256),
+                source_filename TEXT NOT NULL,
+                source_size_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (status IN (
+                    'processing', 'awaiting_mapping', 'ready', 'failed', 'voided'
+                )),
+                created_at TEXT NOT NULL,
+                ready_at TEXT,
+                UNIQUE (document_id, version_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO document_versions_v3 (
+                version_id, document_id, source_sha256, source_filename,
+                source_size_bytes, status, created_at, ready_at
+            )
+            SELECT version_id, document_id, source_sha256, source_filename,
+                   source_size_bytes, status, created_at, ready_at
+            FROM document_versions
+            """
+        )
+        connection.execute("DROP TABLE document_versions")
+        connection.execute("ALTER TABLE document_versions_v3 RENAME TO document_versions")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError("数据库 v3 迁移后外键校验失败")
 
 
 @contextmanager

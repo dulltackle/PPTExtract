@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import uuid
 from dataclasses import asdict, dataclass
@@ -17,13 +18,10 @@ from pptextract.object_store import (
     ObjectTooLargeError,
     StoredObject,
 )
-from pptextract.pptx_projection import list_source_pages
+from pptextract.pptx_projection import PackageLimitError, list_source_pages
 from pptextract.rendering import DockerRenderingToolchain, render_standard_pages
 
-PPTX_MEDIA_TYPE = (
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-)
-MAX_SOURCE_UPLOAD_BYTES = 128 * 1024 * 1024
+PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
 class IngestionRequestError(ValueError):
@@ -38,7 +36,16 @@ class IngestionRequestError(ValueError):
 class AcceptedIngestion:
     document_id: str
     version_id: str
-    job_id: str
+    job_id: str | None
+    status: str = "accepted"
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedSource:
+    stored: StoredObject
+    filename: str
+    request_fingerprint: str
+    total_pages: int
 
 
 def accept_first_upload(
@@ -51,6 +58,216 @@ def accept_first_upload(
     stream: BinaryIO,
 ) -> AcceptedIngestion:
     """可靠持久化首个源文件，并以一个事务接受对应领域身份与任务。"""
+    source = _validate_and_store_source(
+        settings,
+        idempotency_key=idempotency_key,
+        filename=filename,
+        media_type=media_type,
+        stream=stream,
+    )
+    command_scope = "POST /api/v1/documents"
+    now = timestamp()
+    with transaction(settings) as connection:
+        replay = _read_idempotency_record(
+            connection,
+            actor_id=actor_id,
+            command_scope=command_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=source.request_fingerprint,
+        )
+        if replay is not None:
+            return replay
+
+        legacy = connection.execute(
+            """
+            SELECT kind, payload_json
+            FROM jobs
+            WHERE actor_id = ? AND idempotency_key = ?
+            """,
+            (actor_id, idempotency_key),
+        ).fetchone()
+        if legacy is not None and legacy["kind"] == "document.ingest":
+            payload = json.loads(legacy["payload_json"])
+            existing_fingerprint = payload.get("request_fingerprint")
+            if existing_fingerprint is None:
+                version = connection.execute(
+                    "SELECT source_filename FROM document_versions WHERE version_id = ?",
+                    (payload.get("version_id"),),
+                ).fetchone()
+                if version is not None:
+                    existing_fingerprint = _request_fingerprint(
+                        source_sha256=str(payload["source_sha256"]),
+                        filename=str(version["source_filename"]),
+                        media_type=PPTX_MEDIA_TYPE,
+                    )
+            if existing_fingerprint != source.request_fingerprint:
+                _raise_idempotency_conflict()
+            accepted = AcceptedIngestion(
+                document_id=str(payload["document_id"]),
+                version_id=str(payload["version_id"]),
+                job_id=str(payload["job_id"]),
+            )
+            _record_idempotency(
+                connection,
+                actor_id=actor_id,
+                command_scope=command_scope,
+                idempotency_key=idempotency_key,
+                request_fingerprint=source.request_fingerprint,
+                accepted=accepted,
+                now=now,
+            )
+            return accepted
+
+        document_id = uuid.uuid4().hex
+        accepted = _create_ingestion(
+            connection,
+            source=source,
+            actor_id=actor_id,
+            internal_idempotency_key=_job_idempotency_key(command_scope, idempotency_key),
+            document_id=document_id,
+            create_document=True,
+            now=now,
+        )
+        _record_idempotency(
+            connection,
+            actor_id=actor_id,
+            command_scope=command_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=source.request_fingerprint,
+            accepted=accepted,
+            now=now,
+        )
+        return accepted
+
+
+def accept_document_version(
+    settings: Settings,
+    *,
+    actor_id: str,
+    document_id: str,
+    idempotency_key: str,
+    filename: str,
+    media_type: str,
+    stream: BinaryIO,
+) -> AcceptedIngestion:
+    """在同一事务内处理命令重放、内容合并与逐文档串行。"""
+    source = _validate_and_store_source(
+        settings,
+        idempotency_key=idempotency_key,
+        filename=filename,
+        media_type=media_type,
+        stream=stream,
+    )
+    command_scope = f"POST /api/v1/documents/{document_id}/versions"
+    now = timestamp()
+    with transaction(settings) as connection:
+        replay = _read_idempotency_record(
+            connection,
+            actor_id=actor_id,
+            command_scope=command_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=source.request_fingerprint,
+        )
+        if replay is not None:
+            return replay
+
+        document = connection.execute(
+            "SELECT current_version_id FROM documents WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        if document is None:
+            raise IngestionRequestError(404, "not_found", "未找到请求的资源。")
+
+        active = connection.execute(
+            """
+            SELECT versions.version_id, versions.source_sha256, jobs.job_id
+            FROM document_versions AS versions
+            JOIN jobs ON jobs.version_id = versions.version_id
+            WHERE versions.document_id = ?
+              AND versions.status IN ('processing', 'awaiting_mapping')
+              AND jobs.kind = 'document.ingest'
+            ORDER BY versions.created_at, versions.version_id
+            LIMIT 1
+            """,
+            (document_id,),
+        ).fetchone()
+        if active is not None:
+            if active["source_sha256"] != source.stored.sha256:
+                raise IngestionRequestError(409, "document_busy", "该文档已有正在处理的摄取任务。")
+            accepted = AcceptedIngestion(
+                document_id=document_id,
+                version_id=str(active["version_id"]),
+                job_id=str(active["job_id"]),
+                status="coalesced",
+            )
+            _record_idempotency(
+                connection,
+                actor_id=actor_id,
+                command_scope=command_scope,
+                idempotency_key=idempotency_key,
+                request_fingerprint=source.request_fingerprint,
+                accepted=accepted,
+                now=now,
+            )
+            return accepted
+
+        current_version_id = document["current_version_id"]
+        if current_version_id is not None:
+            current = connection.execute(
+                """
+                SELECT version_id, source_sha256
+                FROM document_versions
+                WHERE document_id = ? AND version_id = ? AND status = 'ready'
+                """,
+                (document_id, current_version_id),
+            ).fetchone()
+            if current is not None and current["source_sha256"] == source.stored.sha256:
+                accepted = AcceptedIngestion(
+                    document_id=document_id,
+                    version_id=str(current["version_id"]),
+                    job_id=None,
+                    status="no_change",
+                )
+                _record_idempotency(
+                    connection,
+                    actor_id=actor_id,
+                    command_scope=command_scope,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=source.request_fingerprint,
+                    accepted=accepted,
+                    now=now,
+                )
+                return accepted
+
+        accepted = _create_ingestion(
+            connection,
+            source=source,
+            actor_id=actor_id,
+            internal_idempotency_key=_job_idempotency_key(command_scope, idempotency_key),
+            document_id=document_id,
+            create_document=False,
+            now=now,
+        )
+        _record_idempotency(
+            connection,
+            actor_id=actor_id,
+            command_scope=command_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=source.request_fingerprint,
+            accepted=accepted,
+            now=now,
+        )
+        return accepted
+
+
+def _validate_and_store_source(
+    settings: Settings,
+    *,
+    idempotency_key: str,
+    filename: str,
+    media_type: str,
+    stream: BinaryIO,
+) -> ValidatedSource:
     if not idempotency_key or len(idempotency_key) > 200:
         raise IngestionRequestError(400, "invalid_idempotency_key", "缺少有效的幂等键。")
     safe_filename = Path(filename).name
@@ -59,89 +276,172 @@ def accept_first_upload(
 
     store = LocalObjectStore(settings.object_store_path)
     try:
-        stored = store.put_stream(stream, max_bytes=MAX_SOURCE_UPLOAD_BYTES)
+        stored = store.put_stream(stream, max_bytes=settings.max_source_upload_bytes)
     except ObjectTooLargeError as error:
         raise IngestionRequestError(
-            413, "source_too_large", "PPTX 超过允许的 128 MiB 上限。"
+            413, "source_too_large", "PPTX 超过部署允许的上传上限。"
         ) from error
     try:
         source_pages = list_source_pages(stored.path.read_bytes())
+    except PackageLimitError as error:
+        raise IngestionRequestError(
+            413, "source_too_large", "PPTX 超过部署允许的资源上限。"
+        ) from error
     except (OSError, ValueError) as error:
         raise IngestionRequestError(422, "invalid_pptx", "上传内容不是有效的 PPTX。") from error
     if not source_pages:
         raise IngestionRequestError(422, "empty_presentation", "PPTX 至少需要一页。")
 
-    now = timestamp()
-    with transaction(settings) as connection:
-        existing = connection.execute(
-            """
-            SELECT kind, payload_json
-            FROM jobs
-            WHERE actor_id = ? AND idempotency_key = ?
-            """,
-            (actor_id, idempotency_key),
-        ).fetchone()
-        if existing is not None:
-            payload = json.loads(existing["payload_json"])
-            if existing["kind"] != "document.ingest" or payload["source_sha256"] != stored.sha256:
-                raise IngestionRequestError(
-                    409,
-                    "idempotency_conflict",
-                    "同一幂等键已用于不同请求。",
-                )
-            return AcceptedIngestion(
-                document_id=str(payload["document_id"]),
-                version_id=str(payload["version_id"]),
-                job_id=str(payload["job_id"]),
-            )
+    return ValidatedSource(
+        stored=stored,
+        filename=safe_filename,
+        request_fingerprint=_request_fingerprint(
+            source_sha256=stored.sha256,
+            filename=safe_filename,
+            media_type=media_type,
+        ),
+        total_pages=len(source_pages),
+    )
 
-        document_id = uuid.uuid4().hex
-        version_id = uuid.uuid4().hex
-        job_id = uuid.uuid4().hex
-        payload = {
-            "document_id": document_id,
-            "job_id": job_id,
-            "source_sha256": stored.sha256,
-            "version_id": version_id,
-        }
-        _record_object(connection, stored, PPTX_MEDIA_TYPE, now)
+
+def _create_ingestion(
+    connection: Any,
+    *,
+    source: ValidatedSource,
+    actor_id: str,
+    internal_idempotency_key: str,
+    document_id: str,
+    create_document: bool,
+    now: str,
+) -> AcceptedIngestion:
+    version_id = uuid.uuid4().hex
+    job_id = uuid.uuid4().hex
+    payload = {
+        "document_id": document_id,
+        "job_id": job_id,
+        "request_fingerprint": source.request_fingerprint,
+        "source_sha256": source.stored.sha256,
+        "version_id": version_id,
+    }
+    _record_object(connection, source.stored, PPTX_MEDIA_TYPE, now)
+    if create_document:
         connection.execute(
             "INSERT INTO documents (document_id, created_at) VALUES (?, ?)",
             (document_id, now),
         )
-        connection.execute(
-            """
-            INSERT INTO document_versions (
-                version_id, document_id, source_sha256, source_filename,
-                source_size_bytes, status, created_at
-            ) VALUES (?, ?, ?, ?, ?, 'processing', ?)
-            """,
-            (version_id, document_id, stored.sha256, safe_filename, stored.size_bytes, now),
-        )
-        connection.execute(
-            """
-            INSERT INTO jobs (
-                job_id, kind, payload_json, status, actor_id, idempotency_key,
-                checkpoint_json, created_at, updated_at
-            ) VALUES (?, 'document.ingest', ?, 'pending', ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                _json(payload),
-                actor_id,
-                idempotency_key,
-                _json(
-                    {
-                        "phase": "source_manifest",
-                        "completed_pages": 0,
-                        "total_pages": len(source_pages),
-                    }
-                ),
-                now,
-                now,
+    connection.execute(
+        """
+        INSERT INTO document_versions (
+            version_id, document_id, source_sha256, source_filename,
+            source_size_bytes, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'processing', ?)
+        """,
+        (
+            version_id,
+            document_id,
+            source.stored.sha256,
+            source.filename,
+            source.stored.size_bytes,
+            now,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO jobs (
+            job_id, kind, payload_json, status, actor_id, idempotency_key,
+            document_id, version_id, checkpoint_json, created_at, updated_at
+        ) VALUES (?, 'document.ingest', ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            _json(payload),
+            actor_id,
+            internal_idempotency_key,
+            document_id,
+            version_id,
+            _json(
+                {
+                    "phase": "source_manifest",
+                    "completed_pages": 0,
+                    "total_pages": source.total_pages,
+                }
             ),
-        )
+            now,
+            now,
+        ),
+    )
     return AcceptedIngestion(document_id=document_id, version_id=version_id, job_id=job_id)
+
+
+def _read_idempotency_record(
+    connection: Any,
+    *,
+    actor_id: str,
+    command_scope: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> AcceptedIngestion | None:
+    row = connection.execute(
+        """
+        SELECT request_fingerprint, response_status, document_id, version_id, job_id
+        FROM idempotency_records
+        WHERE actor_id = ? AND command_scope = ? AND idempotency_key = ?
+        """,
+        (actor_id, command_scope, idempotency_key),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["request_fingerprint"] != request_fingerprint:
+        _raise_idempotency_conflict()
+    return AcceptedIngestion(
+        document_id=str(row["document_id"]),
+        version_id=str(row["version_id"]),
+        job_id=None if row["job_id"] is None else str(row["job_id"]),
+        status=str(row["response_status"]),
+    )
+
+
+def _record_idempotency(
+    connection: Any,
+    *,
+    actor_id: str,
+    command_scope: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    accepted: AcceptedIngestion,
+    now: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO idempotency_records (
+            actor_id, command_scope, idempotency_key, request_fingerprint,
+            response_status, document_id, version_id, job_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            actor_id,
+            command_scope,
+            idempotency_key,
+            request_fingerprint,
+            accepted.status,
+            accepted.document_id,
+            accepted.version_id,
+            accepted.job_id,
+            now,
+        ),
+    )
+
+
+def _raise_idempotency_conflict() -> None:
+    raise IngestionRequestError(
+        409,
+        "idempotency_conflict",
+        "同一幂等键已用于不同请求。",
+    )
+
+
+def _job_idempotency_key(command_scope: str, idempotency_key: str) -> str:
+    return hashlib.sha256(f"{command_scope}\0{idempotency_key}".encode()).hexdigest()
 
 
 def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
@@ -430,6 +730,17 @@ def _content_json(content: NormalizedPageContent) -> str:
 
 def _json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _request_fingerprint(*, source_sha256: str, filename: str, media_type: str) -> str:
+    canonical = _json(
+        {
+            "filename": filename,
+            "media_type": media_type,
+            "source_sha256": source_sha256,
+        }
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def read_job(settings: Settings, job_id: str) -> dict[str, Any] | None:

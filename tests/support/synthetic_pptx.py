@@ -30,15 +30,19 @@ def build_minimal_presentation() -> bytes:
     return stream.getvalue()
 
 
-def build_plain_text_presentation() -> bytes:
+def build_plain_text_presentation(
+    *,
+    title: str = "公开首次摄取",
+    body_text: str = "这是可公开验证的单页纯文字内容。",
+) -> bytes:
     """构造 Issue #20 首次摄取快乐路径使用的单页纯文字 PPTX。"""
     presentation = Presentation()
     presentation.slide_width = Inches(13.333333)
     presentation.slide_height = Inches(7.5)
     slide = presentation.slides.add_slide(presentation.slide_layouts[5])
-    slide.shapes.title.text = "公开首次摄取"
+    slide.shapes.title.text = title
     body = slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(8), Inches(1))
-    body.text = "这是可公开验证的单页纯文字内容。"
+    body.text = body_text
 
     stream = BytesIO()
     presentation.save(stream)
