@@ -1,0 +1,38 @@
+name: 文档工具链契约
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  document-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 安装锁定依赖
+        run: uv sync --locked --dev
+      - name: 构建锁定渲染工具链
+        run: >-
+          docker build
+          --provenance=false
+          --platform=linux/amd64
+          --file docker/document-toolchain.Dockerfile
+          --tag pptextract/document-toolchain:1
+          .
+      - name: 阻止第三方构建或配置漂移
+        run: >-
+          uv run python -m pptextract.toolchain
+          --render-image pptextract/document-toolchain:1
+      - name: 执行完整测试（含真实转换与渲染契约）
+        run: uv run pytest

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "anydoc_distribution": "firecrawl-anydoc",
+  "anydoc_version": "0.1.9",
+  "rendering_image_id": "sha256:96333270f446993a9f228606ca83d42dc5f082b402f8e674916f248cbc8f9501",
+  "libreoffice_version": "24.2.7.2 420(Build:2)",
+  "poppler_version": "24.02.0",
+  "fontconfig_version": "2.15.0",
+  "font_packages": {
+    "fonts-liberation2": "1:2.1.5-3",
+    "fonts-noto-cjk": "1:20230817+repack1-3"
+  },
+  "system_packages": {
+    "libreoffice-core-nogui": "4:24.2.7-0ubuntu0.24.04.6",
+    "libreoffice-impress-nogui": "4:24.2.7-0ubuntu0.24.04.6",
+    "poppler-utils": "24.02.0-1ubuntu9.9"
+  },
+  "render_dpi": 144,
+  "render_format": "png",
+  "pdf_export_filter": "pdf:impress_pdf_Export:{\"ExportHiddenSlides\":{\"type\":\"boolean\",\"value\":\"false\"},\"ExportNotes\":{\"type\":\"boolean\",\"value\":\"false\"}}"
+}

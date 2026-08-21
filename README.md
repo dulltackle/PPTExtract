@@ -38,3 +38,24 @@ uv run mypy src/pptextract
 uv run ruff check src tests
 cd web && npm test && npm run typecheck && npm run build
 ```
+
+### 文档工具链契约门禁
+
+AnyDoc 作为 Python 依赖精确锁定；LibreOffice、Poppler 与字体包由仓库内的容器构建文件固定。构建并验证实际工具链：
+
+```bash
+docker build \
+  --provenance=false \
+  --platform=linux/amd64 \
+  --file docker/document-toolchain.Dockerfile \
+  --tag pptextract/document-toolchain:1 \
+  .
+
+uv run python -m pptextract.toolchain \
+  --render-image pptextract/document-toolchain:1
+uv run pytest tests/test_rendering_contract.py tests/test_toolchain_gate.py
+```
+
+门禁会探测实际加载的 `firecrawl-anydoc`、LibreOffice、Poppler、fontconfig、字体包、容器内容地址及 144 DPI/PDF 导出配置，并与 `src/pptextract/document_toolchain.json` 逐项比较。任一版本或配置变化都会失败；升级时必须先用公开合成夹具和获授权的本地样本完成人工视觉验证，再显式更新契约。
+
+公开契约测试只在内存中生成虚构 `.pptx`，覆盖纯文字、重复与跨页复用图片、图表、组合形状、复杂合并表格、演讲者备注、隐藏页、重复页、页序变更和缺失字体。真实样本仍按 `fixtures/README.md` 的规则只在本地使用。
