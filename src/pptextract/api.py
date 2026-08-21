@@ -16,10 +16,14 @@ from pptextract.config import Settings
 from pptextract.db import connect, database_path_is_local, initialize_database
 from pptextract.ingest_workflow import (
     IngestionRequestError,
+    MappingPreconditionError,
     accept_document_version,
     accept_first_upload,
     accept_hidden_page_enablement,
+    confirm_page_mapping,
     read_job,
+    read_page_mapping,
+    save_page_mapping_decision,
 )
 from pptextract.lifecycle import (
     read_lifecycle_events,
@@ -44,6 +48,11 @@ def error_response(
 
 class LifecycleCommand(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
+
+
+class PageMappingDecision(BaseModel):
+    decision: str
+    page_id: str | None = None
 
 
 def _read_curation_snapshot(
@@ -139,11 +148,54 @@ def create_app(
     @app.get("/api/v1/app/bootstrap")
     async def bootstrap(request: Request) -> dict[str, Any]:
         actor = actors.resolve(request)
+        with connect(resolved) as connection:
+            active_versions = connection.execute(
+                """
+                SELECT versions.document_id, versions.version_id,
+                       versions.source_filename, versions.status AS version_status,
+                       jobs.status AS job_status
+                FROM document_versions AS versions
+                JOIN documents ON documents.document_id = versions.document_id
+                JOIN jobs ON jobs.version_id = versions.version_id
+                         AND jobs.kind = 'document.ingest'
+                WHERE documents.deleted_at IS NULL
+                  AND versions.status IN ('processing', 'awaiting_mapping')
+                  AND jobs.status IN ('queued', 'running', 'requires_action')
+                ORDER BY versions.created_at, versions.version_id
+                """
+            ).fetchall()
+        processing_documents = []
+        for version in active_versions:
+            requires_mapping = version["job_status"] == "requires_action"
+            processing_documents.append(
+                {
+                    "document_id": version["document_id"],
+                    "version_id": version["version_id"],
+                    "title": version["source_filename"],
+                    "status": version["job_status"],
+                    "status_label": "需要页对应" if requires_mapping else "正在处理",
+                    "action": (
+                        {
+                            "label": "处理页对应",
+                            "href": (
+                                f"/documents/{version['document_id']}/versions/"
+                                f"{version['version_id']}/page-mapping"
+                            ),
+                        }
+                        if requires_mapping
+                        else None
+                    ),
+                }
+            )
         return {
             "actor": {"actor_id": actor.actor_id, "display_name": actor.display_name},
             "runways": [
                 {"id": "pending", "label": "待处理", "documents": []},
-                {"id": "processing", "label": "处理中", "documents": []},
+                {
+                    "id": "processing",
+                    "label": "处理中",
+                    "documents": processing_documents,
+                },
                 {"id": "curatable", "label": "可策展", "documents": []},
             ],
         }
@@ -213,6 +265,98 @@ def create_app(
         if job is None:
             return error_response(404, "not_found", "未找到请求的资源。")
         return JSONResponse(content=job)
+
+    @app.get(
+        "/api/v1/documents/{document_id}/versions/{version_id}/page-mapping"
+    )
+    async def get_page_mapping(document_id: str, version_id: str) -> JSONResponse:
+        result = read_page_mapping(
+            resolved, document_id=document_id, version_id=version_id
+        )
+        if result is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        payload, etag = result
+        return JSONResponse(content=payload, headers={"ETag": etag})
+
+    @app.put(
+        "/api/v1/documents/{document_id}/versions/{version_id}"
+        "/page-mapping/cases/{case_id}"
+    )
+    async def put_page_mapping_decision(
+        document_id: str,
+        version_id: str,
+        case_id: str,
+        command: PageMappingDecision,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            payload, etag = save_page_mapping_decision(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                version_id=version_id,
+                case_id=case_id,
+                if_match=request.headers.get("If-Match", ""),
+                decision=command.decision,
+                page_id=command.page_id,
+            )
+        except MappingPreconditionError as error:
+            response = error_response(error.status_code, error.code, error.message)
+            response.headers["ETag"] = error.current_etag
+            return response
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=payload, headers={"ETag": etag})
+
+    @app.post(
+        "/api/v1/documents/{document_id}/versions/{version_id}/page-mapping/confirm"
+    )
+    async def post_page_mapping_confirmation(
+        document_id: str, version_id: str, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            payload, etag = confirm_page_mapping(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                version_id=version_id,
+                if_match=request.headers.get("If-Match", ""),
+            )
+        except MappingPreconditionError as error:
+            response = error_response(error.status_code, error.code, error.message)
+            response.headers["ETag"] = error.current_etag
+            return response
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=payload, headers={"ETag": etag})
+
+    @app.get(
+        "/api/v1/documents/{document_id}/versions/{version_id}"
+        "/source-pages/{page_number}/render",
+        response_model=None,
+    )
+    async def get_version_source_page_render(
+        document_id: str, version_id: str, page_number: int
+    ) -> FileResponse | JSONResponse:
+        with connect(resolved) as connection:
+            row = connection.execute(
+                """
+                SELECT results.render_sha256, results.render_media_type
+                FROM ingestion_page_results AS results
+                JOIN document_versions AS versions ON versions.version_id = results.version_id
+                WHERE versions.document_id = ? AND results.version_id = ?
+                  AND results.page_number = ? AND results.render_sha256 IS NOT NULL
+                """,
+                (document_id, version_id, page_number),
+            ).fetchone()
+        if row is None:
+            return error_response(404, "not_found", "未找到标准页渲染结果。")
+        path = LocalObjectStore(resolved.object_store_path).path_for(row["render_sha256"])
+        if not path.is_file():
+            return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")
+        return FileResponse(path, media_type=row["render_media_type"])
 
     @app.post("/api/v1/documents/{document_id}/versions/{version_id}/retry")
     async def retry_version(

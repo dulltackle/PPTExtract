@@ -5,7 +5,11 @@ export interface Actor {
 
 export interface DocumentSummary {
   document_id: string;
+  version_id?: string;
   title: string;
+  status?: JobStatus;
+  status_label?: string;
+  action?: { label: string; href: string } | null;
 }
 
 export interface Runway {
@@ -88,6 +92,75 @@ export interface PageDetail {
   };
 }
 
+export interface MappingAdjacentPage {
+  source_page_number: number;
+  page_id: string;
+}
+
+export interface PageMappingCandidate {
+  page_id: string;
+  chunk_id: string;
+  version_id: string;
+  page_number: number;
+  slide_id: number;
+  review_status: "pending" | "approved" | "excluded";
+  fingerprint_relation: "same" | "changed";
+  adjacent_confirmed: {
+    before: MappingAdjacentPage | null;
+    after: MappingAdjacentPage | null;
+  };
+  relative_order: {
+    source_page_number: number;
+    candidate_page_number: number;
+    delta: number;
+  };
+  occupied_by_case_id: string | null;
+  standard_render: { url: string };
+}
+
+export interface PageMappingCase {
+  case_id: string;
+  kind: "duplicate_fingerprint" | "slide_id_conflict" | "multiple_candidates";
+  status: "unresolved" | "saved";
+  source_page: {
+    page_number: number;
+    slide_id: number;
+    fingerprint: { version: number; sha256: string };
+    standard_render: { url: string };
+  };
+  candidates: PageMappingCandidate[];
+  decision: { kind: "reuse" | "new"; page_id: string | null } | null;
+  decided_by: string | null;
+  decided_at: string | null;
+}
+
+export interface PageMappingWorkspace {
+  document_id: string;
+  version_id: string;
+  source_filename: string;
+  status: "awaiting_mapping" | "ready" | "voided";
+  revision: number;
+  remaining_cases: number;
+  current_version: { version_id: string | null; still_serving: boolean };
+  cases: PageMappingCase[];
+  can_confirm: boolean;
+  confirmed_at: string | null;
+  confirmed_by: string | null;
+  impact_summary: {
+    reused_unchanged: number;
+    reused_changed: number;
+    created_new: number;
+    soft_deleted: number;
+    unresolved: number;
+    save_conflicts: number;
+    evidence_errors: number;
+  };
+}
+
+export type PageMappingDraft =
+  | { kind: "reuse"; page_id: string }
+  | { kind: "new"; page_id?: null };
+
 interface ErrorEnvelope {
   error?: {
     code?: string;
@@ -99,6 +172,13 @@ export class OperatorError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "OperatorError";
+  }
+}
+
+export class PageMappingConflictError extends OperatorError {
+  constructor() {
+    super("页对应决定已被其他会话更新，请比较后重新确认。");
+    this.name = "PageMappingConflictError";
   }
 }
 
@@ -129,6 +209,77 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
     throw new OperatorError(payload.error?.message ?? fallback);
   }
   return payload;
+}
+
+async function readMappingResponse(
+  response: Response,
+): Promise<{ data: PageMappingWorkspace; etag: string }> {
+  const payload = (await response.json().catch(() => ({}))) as
+    | PageMappingWorkspace
+    | ErrorEnvelope;
+  if (response.status === 412) throw new PageMappingConflictError();
+  if (!response.ok) {
+    const error = payload as ErrorEnvelope;
+    throw new OperatorError(error.error?.message ?? "页对应工作面暂时不可用。");
+  }
+  const etag = response.headers.get("ETag");
+  if (!etag) throw new OperatorError("页对应工作面缺少并发版本信息，请重新加载。");
+  return { data: payload as PageMappingWorkspace, etag };
+}
+
+function mappingRoute(documentId: string, versionId: string): string {
+  return `/api/v1/documents/${documentId}/versions/${versionId}/page-mapping`;
+}
+
+export async function loadPageMapping(
+  documentId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<{ data: PageMappingWorkspace; etag: string }> {
+  const response = await fetch(mappingRoute(documentId, versionId), {
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  return readMappingResponse(response);
+}
+
+export async function savePageMappingDecision(
+  workspace: PageMappingWorkspace,
+  caseId: string,
+  draft: PageMappingDraft,
+  etag: string,
+): Promise<{ data: PageMappingWorkspace; etag: string }> {
+  const response = await fetch(
+    `${mappingRoute(workspace.document_id, workspace.version_id)}/cases/${caseId}`,
+    {
+      method: "PUT",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "If-Match": etag,
+      },
+      body: JSON.stringify({
+        decision: draft.kind,
+        page_id: draft.kind === "reuse" ? draft.page_id : undefined,
+      }),
+    },
+  );
+  return readMappingResponse(response);
+}
+
+export async function confirmPageMapping(
+  workspace: PageMappingWorkspace,
+  etag: string,
+): Promise<void> {
+  const response = await fetch(
+    `${mappingRoute(workspace.document_id, workspace.version_id)}/confirm`,
+    { method: "POST", headers: { Accept: "application/json", "If-Match": etag } },
+  );
+  if (response.status === 412) throw new PageMappingConflictError();
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as ErrorEnvelope;
+    throw new OperatorError(payload.error?.message ?? "最终确认未完成，请重新检查。");
+  }
 }
 
 export async function loadCurationPages(

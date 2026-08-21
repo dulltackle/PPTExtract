@@ -10,6 +10,7 @@ import {
 
 import { type BootstrapData, loadBootstrap, OperatorError, type Runway } from "./api";
 import { CurationWorkbench } from "./CurationWorkbench";
+import { PageMappingWorkbench } from "./PageMappingWorkbench";
 import "./styles.css";
 
 type LoadState =
@@ -87,7 +88,9 @@ function StageRunway({ runway }: { runway: Runway }) {
           </span>
         </div>
         <p>{copy.description}</p>
-        <span className="runway-state">当前 · 空</span>
+        <span className="runway-state">
+          当前 · {runway.documents.length === 0 ? "空" : `${runway.documents.length} 项`}
+        </span>
       </header>
       <div className="runway-content">
         <div className="column-guide" aria-hidden="true">
@@ -96,13 +99,34 @@ function StageRunway({ runway }: { runway: Runway }) {
           <span>最近活动</span>
           <span>状态</span>
         </div>
-        <div className="empty-slot">
-          <EmptyDocumentIcon />
-          <div>
-            <strong>{copy.empty}</strong>
-            <p>{copy.next}</p>
+        {runway.documents.length === 0 ? (
+          <div className="empty-slot">
+            <EmptyDocumentIcon />
+            <div>
+              <strong>{copy.empty}</strong>
+              <p>{copy.next}</p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="runway-documents">
+            {runway.documents.map((document) => (
+              <article className="runway-document-row" key={`${document.document_id}-${document.version_id ?? "current"}`}>
+                <div>
+                  <strong>{document.title}</strong>
+                  <code>{document.document_id.slice(0, 10)}</code>
+                </div>
+                <code>{document.version_id?.slice(0, 10) ?? "当前"}</code>
+                <span>{document.status === "requires_action" ? "等待人工决定" : "摄取任务进行中"}</span>
+                <div>
+                  <span className={document.status === "requires_action" ? "runway-status-chip is-action" : "runway-status-chip"}>
+                    {document.status_label ?? "处理中"}
+                  </span>
+                  {document.action ? <a href={document.action.href}>{document.action.label}</a> : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );
@@ -140,6 +164,10 @@ function ErrorWorkspace({ message, retry }: { message: string; retry: () => void
 }
 
 export function App() {
+  const mappingMatch = window.location.pathname.match(
+    /^\/documents\/([^/]+)\/versions\/([^/]+)\/page-mapping\/?$/,
+  );
+  const isMapping = mappingMatch !== null;
   const isCuration = window.location.pathname.startsWith("/curation");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [showUploadBoundary, setShowUploadBoundary] = useState(false);
@@ -178,21 +206,25 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
-    document.title = isCuration ? "PPTExtract · 逐页策展" : "PPTExtract · 文档";
-  }, [isCuration]);
+    document.title = isMapping
+      ? "PPTExtract · 页对应"
+      : isCuration
+        ? "PPTExtract · 逐页策展"
+        : "PPTExtract · 文档";
+  }, [isCuration, isMapping]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
-      if (event.key.toLowerCase() === "r") {
+      if (!isMapping && event.key.toLowerCase() === "r") {
         event.preventDefault();
         refresh();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [refresh]);
+  }, [isMapping, refresh]);
 
   const actor = state.kind === "ready" ? state.data.actor : null;
 
@@ -214,7 +246,7 @@ export function App() {
             <UserIcon />
             <span>{actor?.display_name ?? "正在识别操作者"}</span>
           </div>
-          {!isCuration ? (
+          {!isCuration && !isMapping ? (
             <div className="upload-boundary">
               <button
                 type="button"
@@ -243,7 +275,10 @@ export function App() {
       {state.kind === "loading" ? <LoadingRunways /> : null}
       {state.kind === "error" ? <ErrorWorkspace message={state.message} retry={refresh} /> : null}
       {state.kind === "ready" && isCuration ? <CurationWorkbench /> : null}
-      {state.kind === "ready" && !isCuration ? (
+      {state.kind === "ready" && isMapping && mappingMatch ? (
+        <PageMappingWorkbench documentId={mappingMatch[1]} versionId={mappingMatch[2]} />
+      ) : null}
+      {state.kind === "ready" && !isCuration && !isMapping ? (
         <main className="workspace" aria-label="文档阶段跑道">
           <div className="runway-stack">
             {state.data.runways.map((runway) => (
@@ -260,11 +295,13 @@ export function App() {
           <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
         </span>
         <span>
-          <kbd>R</kbd> {isCuration ? "刷新工作位" : "刷新入口"}
+          <kbd>R</kbd> {isMapping ? "刷新证据" : isCuration ? "刷新工作位" : "刷新入口"}
         </span>
         <span className="command-status">
           {state.kind === "ready"
-            ? isCuration
+            ? isMapping
+              ? "页对应工作位就绪"
+              : isCuration
               ? "策展工作位就绪"
               : "入口就绪"
             : state.kind === "error"

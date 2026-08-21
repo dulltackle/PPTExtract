@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -104,6 +104,9 @@ def initialize_database(settings: Settings) -> None:
                 voided_at TEXT,
                 voided_by TEXT,
                 void_reason TEXT,
+                mapping_revision INTEGER NOT NULL DEFAULT 0,
+                mapping_confirmed_at TEXT,
+                mapping_confirmed_by TEXT,
                 UNIQUE (document_id, version_id)
             );
 
@@ -239,6 +242,30 @@ def initialize_database(settings: Settings) -> None:
                 PRIMARY KEY (actor_id, command_scope, idempotency_key)
             );
 
+            CREATE TABLE IF NOT EXISTS page_mapping_cases (
+                case_id TEXT PRIMARY KEY,
+                version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                page_number INTEGER NOT NULL CHECK (page_number > 0),
+                case_kind TEXT NOT NULL CHECK (case_kind IN (
+                    'duplicate_fingerprint', 'slide_id_conflict', 'multiple_candidates'
+                )),
+                candidate_page_ids_json TEXT NOT NULL,
+                decision TEXT CHECK (decision IS NULL OR decision IN ('reuse', 'new')),
+                selected_page_id TEXT REFERENCES pages(page_id),
+                decided_by TEXT,
+                decided_at TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (version_id, page_number),
+                CHECK (
+                    (decision IS NULL AND selected_page_id IS NULL)
+                    OR (decision = 'new' AND selected_page_id IS NULL)
+                    OR (decision = 'reuse' AND selected_page_id IS NOT NULL)
+                )
+            );
+
+            CREATE INDEX IF NOT EXISTS page_mapping_cases_version
+                ON page_mapping_cases(version_id, page_number);
+
             CREATE TABLE IF NOT EXISTS lifecycle_events (
                 event_id TEXT PRIMARY KEY,
                 document_id TEXT NOT NULL REFERENCES documents(document_id),
@@ -314,6 +341,20 @@ def initialize_database(settings: Settings) -> None:
                 "source_version_id TEXT REFERENCES document_versions(version_id)"
             )
         for column in ("voided_at", "voided_by", "void_reason"):
+            if column not in version_columns:
+                connection.execute(
+                    f"ALTER TABLE document_versions ADD COLUMN {column} TEXT"
+                )
+        version_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(document_versions)")
+        }
+        if "mapping_revision" not in version_columns:
+            connection.execute(
+                "ALTER TABLE document_versions ADD COLUMN "
+                "mapping_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        for column in ("mapping_confirmed_at", "mapping_confirmed_by"):
             if column not in version_columns:
                 connection.execute(
                     f"ALTER TABLE document_versions ADD COLUMN {column} TEXT"

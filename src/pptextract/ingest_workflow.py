@@ -67,6 +67,16 @@ class IngestionStageError(RuntimeError):
         self.message = message
 
 
+class MappingPreconditionError(IngestionRequestError):
+    def __init__(self, current_etag: str) -> None:
+        super().__init__(
+            412,
+            "mapping_precondition_failed",
+            "页对应决定已被其他会话更新，请比较后重新确认。",
+        )
+        self.current_etag = current_etag
+
+
 @dataclass(frozen=True, slots=True)
 class AcceptedIngestion:
     document_id: str
@@ -91,6 +101,19 @@ class ValidatedSource:
     filename: str
     request_fingerprint: str
     total_pages: int
+
+
+@dataclass(frozen=True, slots=True)
+class PageMappingCasePlan:
+    page_number: int
+    kind: str
+    candidate_page_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PageMappingPlan:
+    automatic_matches: dict[int, tuple[str, str]]
+    cases: tuple[PageMappingCasePlan, ...]
 
 
 def accept_first_upload(
@@ -1391,103 +1414,77 @@ def _activate_first_version(
         ).fetchall()
         if len(rows) != enabled_pages:
             raise RuntimeError("启用页的处理检查点数量不完整")
-        identities = _match_page_identities(
+        plan = _build_page_mapping_plan(
             connection,
             document_id=document_id,
             current_version_id=_current_version_id(connection, document_id),
             target_version_id=version_id,
             incoming_rows=rows,
         )
-        active_page_ids: set[str] = set()
-        for row in rows:
-            required = (
-                "source_content_json",
-                "fingerprint_version",
-                "fingerprint_sha256",
-                "render_sha256",
-                "render_media_type",
-                "render_dpi",
-                "render_width_px",
-                "render_height_px",
-            )
-            if any(row[field] is None for field in required):
-                raise RuntimeError(f"第 {row['page_number']} 页处理结果不完整")
-            page_number = int(row["page_number"])
-            identity = identities.get(page_number)
-            page_id = uuid.uuid4().hex if identity is None else identity[0]
-            page_version_id = uuid.uuid4().hex
-            if identity is None:
+        if plan.cases:
+            for case in plan.cases:
                 connection.execute(
                     """
-                    INSERT INTO pages (page_id, document_id, chunk_id, created_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO page_mapping_cases (
+                        case_id, version_id, page_number, case_kind,
+                        candidate_page_ids_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(version_id, page_number) DO NOTHING
                     """,
-                    (page_id, document_id, uuid.uuid4().hex, now),
+                    (
+                        uuid.uuid4().hex,
+                        version_id,
+                        case.page_number,
+                        case.kind,
+                        _json(list(case.candidate_page_ids)),
+                        now,
+                    ),
                 )
-            else:
-                connection.execute(
-                    """
-                    UPDATE pages
-                    SET deleted_at = NULL, deleted_in_version_id = NULL
-                    WHERE page_id = ? AND document_id = ?
-                    """,
-                    (page_id, document_id),
-                )
-            active_page_ids.add(page_id)
-            connection.execute(
+            awaiting = connection.execute(
                 """
-                INSERT INTO page_versions (
-                    page_version_id, page_id, document_id, version_id, page_number,
-                    fingerprint_version, fingerprint_sha256, source_content_json,
-                    render_sha256, render_media_type, render_dpi, render_width_px,
-                    render_height_px, review_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                UPDATE document_versions SET status = 'awaiting_mapping'
+                WHERE version_id = ? AND status = 'processing'
+                """,
+                (version_id,),
+            )
+            if awaiting.rowcount != 1:
+                raise RuntimeError("版本不再处于可暂停的 processing 状态")
+            action_required = connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'requires_action', lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, next_attempt_at = NULL,
+                    checkpoint_json = ?, error_json = NULL, updated_at = ?
+                WHERE job_id = ? AND status = 'running'
+                  AND lease_owner = ? AND lease_token = ? AND lease_expires_at > ?
                 """,
                 (
-                    page_version_id,
-                    page_id,
-                    document_id,
-                    version_id,
-                    row["page_number"],
-                    row["fingerprint_version"],
-                    row["fingerprint_sha256"],
-                    row["source_content_json"],
-                    row["render_sha256"],
-                    row["render_media_type"],
-                    row["render_dpi"],
-                    row["render_width_px"],
-                    row["render_height_px"],
+                    _json(
+                        {
+                            "phase": "page_mapping",
+                            "completed_pages": total_pages - len(plan.cases),
+                            "total_pages": total_pages,
+                        }
+                    ),
+                    now,
+                    job.job_id,
+                    settings.worker_id,
+                    job.lease_token,
                     now,
                 ),
             )
-            _materialize_review_inheritance(
-                connection,
-                page_version_id=page_version_id,
-                page_id=page_id,
-                fingerprint_version=int(row["fingerprint_version"]),
-                fingerprint_sha256=str(row["fingerprint_sha256"]),
-                now=now,
-            )
-        if active_page_ids:
-            placeholders = ", ".join("?" for _ in active_page_ids)
-            connection.execute(
-                f"""
-                UPDATE pages
-                SET deleted_at = ?, deleted_in_version_id = ?
-                WHERE document_id = ? AND page_id NOT IN ({placeholders})
-                  AND deleted_at IS NULL
-                """,
-                (now, version_id, document_id, *sorted(active_page_ids)),
-            )
-        else:
-            connection.execute(
-                """
-                UPDATE pages
-                SET deleted_at = ?, deleted_in_version_id = ?
-                WHERE document_id = ? AND deleted_at IS NULL
-                """,
-                (now, version_id, document_id),
-            )
+            if action_required.rowcount != 1:
+                raise RuntimeError("worker 在暂停页对应前失去任务租约")
+            return
+
+        _materialize_page_versions(
+            connection,
+            document_id=document_id,
+            version_id=version_id,
+            rows=rows,
+            identities=plan.automatic_matches,
+            now=now,
+        )
         activated = connection.execute(
             """
             UPDATE document_versions SET status = 'ready', ready_at = ?
@@ -1530,6 +1527,140 @@ def _activate_first_version(
         )
         if updated.rowcount != 1:
             raise RuntimeError("worker 在版本生效前失去任务租约")
+
+
+def _materialize_page_versions(
+    connection: Any,
+    *,
+    document_id: str,
+    version_id: str,
+    rows: list[Any],
+    identities: dict[int, tuple[str, str]],
+    now: str,
+) -> dict[str, int]:
+    summary = {
+        "reused_unchanged": 0,
+        "reused_changed": 0,
+        "created_new": 0,
+        "soft_deleted": 0,
+    }
+    active_before = {
+        str(row["page_id"])
+        for row in connection.execute(
+            "SELECT page_id FROM pages WHERE document_id = ? AND deleted_at IS NULL",
+            (document_id,),
+        )
+    }
+    active_page_ids: set[str] = set()
+    for row in rows:
+        required = (
+            "source_content_json",
+            "fingerprint_version",
+            "fingerprint_sha256",
+            "render_sha256",
+            "render_media_type",
+            "render_dpi",
+            "render_width_px",
+            "render_height_px",
+        )
+        if any(row[field] is None for field in required):
+            raise RuntimeError(f"第 {row['page_number']} 页处理结果不完整")
+        page_number = int(row["page_number"])
+        identity = identities.get(page_number)
+        page_id = uuid.uuid4().hex if identity is None else identity[0]
+        page_version_id = uuid.uuid4().hex
+        if identity is None:
+            summary["created_new"] += 1
+            connection.execute(
+                """
+                INSERT INTO pages (page_id, document_id, chunk_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (page_id, document_id, uuid.uuid4().hex, now),
+            )
+        else:
+            previous = connection.execute(
+                """
+                SELECT fingerprint_version, fingerprint_sha256
+                FROM page_versions AS pv
+                JOIN document_versions AS versions ON versions.version_id = pv.version_id
+                WHERE pv.page_id = ? AND versions.status = 'ready'
+                ORDER BY versions.ready_at DESC, pv.created_at DESC
+                LIMIT 1
+                """,
+                (page_id,),
+            ).fetchone()
+            unchanged = (
+                previous is not None
+                and int(previous["fingerprint_version"]) == int(row["fingerprint_version"])
+                and str(previous["fingerprint_sha256"]) == str(row["fingerprint_sha256"])
+            )
+            summary["reused_unchanged" if unchanged else "reused_changed"] += 1
+            connection.execute(
+                """
+                UPDATE pages
+                SET deleted_at = NULL, deleted_in_version_id = NULL
+                WHERE page_id = ? AND document_id = ?
+                """,
+                (page_id, document_id),
+            )
+        active_page_ids.add(page_id)
+        connection.execute(
+            """
+            INSERT INTO page_versions (
+                page_version_id, page_id, document_id, version_id, page_number,
+                fingerprint_version, fingerprint_sha256, source_content_json,
+                render_sha256, render_media_type, render_dpi, render_width_px,
+                render_height_px, review_status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                page_version_id,
+                page_id,
+                document_id,
+                version_id,
+                row["page_number"],
+                row["fingerprint_version"],
+                row["fingerprint_sha256"],
+                row["source_content_json"],
+                row["render_sha256"],
+                row["render_media_type"],
+                row["render_dpi"],
+                row["render_width_px"],
+                row["render_height_px"],
+                now,
+            ),
+        )
+        _materialize_review_inheritance(
+            connection,
+            page_version_id=page_version_id,
+            page_id=page_id,
+            fingerprint_version=int(row["fingerprint_version"]),
+            fingerprint_sha256=str(row["fingerprint_sha256"]),
+            now=now,
+        )
+    summary["soft_deleted"] = len(active_before - active_page_ids)
+    if active_page_ids:
+        placeholders = ", ".join("?" for _ in active_page_ids)
+        connection.execute(
+            f"""
+            UPDATE pages
+            SET deleted_at = ?, deleted_in_version_id = ?
+            WHERE document_id = ? AND page_id NOT IN ({placeholders})
+              AND deleted_at IS NULL
+            """,
+            (now, version_id, document_id, *sorted(active_page_ids)),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE pages
+            SET deleted_at = ?, deleted_in_version_id = ?
+            WHERE document_id = ? AND deleted_at IS NULL
+            """,
+            (now, version_id, document_id),
+        )
+    return summary
 
 
 def _materialize_review_inheritance(
@@ -1767,11 +1898,30 @@ def _match_page_identities(
     target_version_id: str,
     incoming_rows: list[Any],
 ) -> dict[int, tuple[str, str]]:
-    """保守匹配可唯一证明的页；返回 page_number 到稳定身份。"""
+    """保守匹配可唯一证明的页；人工页对应由版本级工作面处理。"""
+    return _build_page_mapping_plan(
+        connection,
+        document_id=document_id,
+        current_version_id=current_version_id,
+        target_version_id=target_version_id,
+        incoming_rows=incoming_rows,
+    ).automatic_matches
+
+
+def _build_page_mapping_plan(
+    connection: Any,
+    *,
+    document_id: str,
+    current_version_id: str | None,
+    target_version_id: str,
+    incoming_rows: list[Any],
+) -> PageMappingPlan:
+    """把确定性对应与必须由人决定的歧义 case 分离。"""
     history = connection.execute(
         """
         SELECT pv.page_id, p.chunk_id, pv.fingerprint_version,
-               pv.fingerprint_sha256, pv.version_id, results.source_slide_id
+               pv.fingerprint_sha256, pv.version_id, pv.page_number,
+               results.source_slide_id
         FROM page_versions AS pv
         JOIN pages AS p ON p.page_id = pv.page_id
         JOIN document_versions AS versions ON versions.version_id = pv.version_id
@@ -1805,16 +1955,59 @@ def _match_page_identities(
         )
 
     matches: dict[int, tuple[str, str]] = {}
-    matched_page_ids: set[str] = set()
+    cases: dict[int, PageMappingCasePlan] = {}
     for fingerprint, incoming in incoming_by_fingerprint.items():
         fingerprint_candidates = historical_by_fingerprint.get(fingerprint, {})
-        if len(incoming) == 1 and len(fingerprint_candidates) == 1:
+        if current_version_id is not None and len(incoming) > 1:
+            candidate_ids = tuple(sorted(fingerprint_candidates))
+            for row in incoming:
+                cases[int(row["page_number"])] = PageMappingCasePlan(
+                    page_number=int(row["page_number"]),
+                    kind="duplicate_fingerprint",
+                    candidate_page_ids=candidate_ids,
+                )
+        elif len(incoming) == 1 and len(fingerprint_candidates) == 1:
             identity = next(iter(fingerprint_candidates.values()))
             matches[int(incoming[0]["page_number"])] = identity
-            matched_page_ids.add(identity[0])
+        elif fingerprint_candidates and (len(incoming) > 1 or len(fingerprint_candidates) > 1):
+            candidate_ids = tuple(sorted(fingerprint_candidates))
+            for row in incoming:
+                cases[int(row["page_number"])] = PageMappingCasePlan(
+                    page_number=int(row["page_number"]),
+                    kind=(
+                        "duplicate_fingerprint"
+                        if len(incoming) > 1
+                        else "multiple_candidates"
+                    ),
+                    candidate_page_ids=candidate_ids,
+                )
+
+    # 同一个稳定身份可能在历史上出现过多个内容版本。若这些内容同时回到新版本，
+    # 每个指纹各自看似唯一，但仍不能让两个源页自动复用同一个 page_id。
+    candidate_usage: dict[str, set[int]] = {}
+    for page_number, identity in matches.items():
+        candidate_usage.setdefault(identity[0], set()).add(page_number)
+    for page_number, case in cases.items():
+        for candidate_page_id in case.candidate_page_ids:
+            candidate_usage.setdefault(candidate_page_id, set()).add(page_number)
+    for candidate_page_id, page_numbers in candidate_usage.items():
+        if len(page_numbers) <= 1:
+            continue
+        for page_number in page_numbers:
+            matches.pop(page_number, None)
+            existing = cases.get(page_number)
+            candidates = set(() if existing is None else existing.candidate_page_ids)
+            candidates.add(candidate_page_id)
+            cases[page_number] = PageMappingCasePlan(
+                page_number=page_number,
+                kind="multiple_candidates" if existing is None else existing.kind,
+                candidate_page_ids=tuple(sorted(candidates)),
+            )
+
+    matched_page_ids = {identity[0] for identity in matches.values()}
 
     if current_version_id is None:
-        return matches
+        return PageMappingPlan(matches, tuple(cases.values()))
     current_by_slide_id: dict[int, list[tuple[str, str]]] = {}
     for row in history:
         if row["version_id"] != current_version_id or row["page_id"] in matched_page_ids:
@@ -1824,7 +2017,7 @@ def _match_page_identities(
         )
     remaining_by_slide_id: dict[int, list[Any]] = {}
     for row in incoming_rows:
-        if int(row["page_number"]) not in matches:
+        if int(row["page_number"]) not in matches and int(row["page_number"]) not in cases:
             remaining_by_slide_id.setdefault(int(row["source_slide_id"]), []).append(row)
     for slide_id, incoming in remaining_by_slide_id.items():
         slide_candidates = current_by_slide_id.get(slide_id, [])
@@ -1832,7 +2025,575 @@ def _match_page_identities(
             identity = slide_candidates[0]
             matches[int(incoming[0]["page_number"])] = identity
             matched_page_ids.add(identity[0])
-    return matches
+        elif slide_candidates and (len(incoming) > 1 or len(slide_candidates) > 1):
+            candidate_ids = tuple(sorted(identity[0] for identity in slide_candidates))
+            for row in incoming:
+                cases[int(row["page_number"])] = PageMappingCasePlan(
+                    page_number=int(row["page_number"]),
+                    kind="slide_id_conflict",
+                    candidate_page_ids=candidate_ids,
+                )
+
+    # 重复指纹 case 也保留各自 SlideID 指向的身份，供人比较而不静默采用。
+    for page_number, case in tuple(cases.items()):
+        row = next(row for row in incoming_rows if int(row["page_number"]) == page_number)
+        slide_candidates = current_by_slide_id.get(int(row["source_slide_id"]), [])
+        combined = tuple(
+            sorted({*case.candidate_page_ids, *(identity[0] for identity in slide_candidates)})
+        )
+        cases[page_number] = PageMappingCasePlan(
+            page_number=case.page_number,
+            kind=case.kind if len(combined) <= 1 else case.kind,
+            candidate_page_ids=combined,
+        )
+    return PageMappingPlan(matches, tuple(cases[number] for number in sorted(cases)))
+
+
+def read_page_mapping(
+    settings: Settings, *, document_id: str, version_id: str
+) -> tuple[dict[str, Any], str] | None:
+    connection = connect(settings)
+    try:
+        connection.execute("BEGIN")
+        version = _mapping_version(connection, document_id, version_id)
+        if version is None:
+            return None
+        workspace = _page_mapping_workspace(connection, settings, version)
+        etag = _mapping_etag(
+            version_id, int(version["mapping_revision"])
+        )
+        connection.commit()
+        return workspace, etag
+    finally:
+        connection.close()
+
+
+def save_page_mapping_decision(
+    settings: Settings,
+    *,
+    actor_id: str,
+    document_id: str,
+    version_id: str,
+    case_id: str,
+    if_match: str,
+    decision: str,
+    page_id: str | None,
+) -> tuple[dict[str, Any], str]:
+    now = timestamp()
+    with transaction(settings) as connection:
+        version = _mapping_version(connection, document_id, version_id)
+        if version is None:
+            raise IngestionRequestError(404, "not_found", "未找到请求的资源。")
+        if version["status"] == "ready" and version["mapping_confirmed_at"] is not None:
+            raise IngestionRequestError(
+                409, "mapping_frozen", "页对应关系已经冻结，不能直接改写。"
+            )
+        if version["status"] != "awaiting_mapping":
+            raise IngestionRequestError(
+                409, "mapping_unavailable", "该版本当前不接受页对应决定。"
+            )
+        current_etag = _mapping_etag(version_id, int(version["mapping_revision"]))
+        _assert_mapping_precondition(if_match, current_etag)
+        case = connection.execute(
+            "SELECT * FROM page_mapping_cases WHERE version_id = ? AND case_id = ?",
+            (version_id, case_id),
+        ).fetchone()
+        if case is None:
+            raise IngestionRequestError(404, "not_found", "未找到请求的页对应项。")
+        if decision not in {"reuse", "new"}:
+            raise IngestionRequestError(422, "invalid_mapping_decision", "页对应决定无效。")
+        selected_page_id = page_id if decision == "reuse" else None
+        if decision == "reuse":
+            candidates = set(json.loads(str(case["candidate_page_ids_json"])))
+            if page_id is None or page_id not in candidates:
+                raise IngestionRequestError(
+                    422, "invalid_mapping_candidate", "所选历史页不属于该项候选。"
+                )
+            occupied = connection.execute(
+                """
+                SELECT case_id FROM page_mapping_cases
+                WHERE version_id = ? AND selected_page_id = ? AND case_id <> ?
+                """,
+                (version_id, page_id, case_id),
+            ).fetchone()
+            if occupied is not None:
+                raise IngestionRequestError(
+                    409,
+                    "mapping_candidate_occupied",
+                    "该历史页已被另一页对应项占用，请先修改原决定。",
+                )
+            rows = connection.execute(
+                """
+                SELECT * FROM ingestion_page_results
+                WHERE version_id = ? AND enabled = 1 ORDER BY page_number
+                """,
+                (version_id,),
+            ).fetchall()
+            plan = _build_page_mapping_plan(
+                connection,
+                document_id=document_id,
+                current_version_id=version["current_version_id"],
+                target_version_id=version_id,
+                incoming_rows=rows,
+            )
+            if page_id in {identity[0] for identity in plan.automatic_matches.values()}:
+                raise IngestionRequestError(
+                    409,
+                    "mapping_candidate_occupied",
+                    "该历史页已被确定性页对应占用。",
+                )
+        connection.execute(
+            """
+            UPDATE page_mapping_cases
+            SET decision = ?, selected_page_id = ?, decided_by = ?, decided_at = ?
+            WHERE case_id = ? AND version_id = ?
+            """,
+            (decision, selected_page_id, actor_id, now, case_id, version_id),
+        )
+        connection.execute(
+            "UPDATE document_versions SET mapping_revision = mapping_revision + 1 "
+            "WHERE version_id = ?",
+            (version_id,),
+        )
+        refreshed = _mapping_version(connection, document_id, version_id)
+        assert refreshed is not None
+        workspace = _page_mapping_workspace(connection, settings, refreshed)
+        etag = _mapping_etag(version_id, int(refreshed["mapping_revision"]))
+    return workspace, etag
+
+
+def confirm_page_mapping(
+    settings: Settings,
+    *,
+    actor_id: str,
+    document_id: str,
+    version_id: str,
+    if_match: str,
+) -> tuple[dict[str, Any], str]:
+    now = timestamp()
+    with transaction(settings) as connection:
+        version = _mapping_version(connection, document_id, version_id)
+        if version is None:
+            raise IngestionRequestError(404, "not_found", "未找到请求的资源。")
+        if version["status"] == "ready" and version["mapping_confirmed_at"] is not None:
+            raise IngestionRequestError(
+                409, "mapping_frozen", "页对应关系已经冻结，不能直接改写。"
+            )
+        if version["status"] != "awaiting_mapping":
+            raise IngestionRequestError(
+                409, "mapping_unavailable", "该版本当前不能确认页对应。"
+            )
+        current_etag = _mapping_etag(version_id, int(version["mapping_revision"]))
+        _assert_mapping_precondition(if_match, current_etag)
+        cases = connection.execute(
+            "SELECT * FROM page_mapping_cases WHERE version_id = ? ORDER BY page_number",
+            (version_id,),
+        ).fetchall()
+        if not cases or any(case["decision"] is None for case in cases):
+            raise IngestionRequestError(
+                409, "mapping_incomplete", "仍有未决定的页对应项，不能启用版本。"
+            )
+        if _mapping_evidence_error_count(connection, settings, version_id) > 0:
+            raise IngestionRequestError(
+                409,
+                "mapping_evidence_unavailable",
+                "页对应证据暂不可用，恢复后才能启用版本。",
+            )
+        rows = connection.execute(
+            """
+            SELECT * FROM ingestion_page_results
+            WHERE version_id = ? AND enabled = 1 ORDER BY page_number
+            """,
+            (version_id,),
+        ).fetchall()
+        plan = _build_page_mapping_plan(
+            connection,
+            document_id=document_id,
+            current_version_id=version["current_version_id"],
+            target_version_id=version_id,
+            incoming_rows=rows,
+        )
+        identities = dict(plan.automatic_matches)
+        used_page_ids = {identity[0] for identity in identities.values()}
+        for case in cases:
+            if case["decision"] != "reuse":
+                continue
+            selected_page_id = str(case["selected_page_id"])
+            if selected_page_id in used_page_ids:
+                raise IngestionRequestError(
+                    409, "mapping_candidate_occupied", "同一历史页不能对应多个新版本页。"
+                )
+            page = connection.execute(
+                "SELECT page_id, chunk_id FROM pages WHERE document_id = ? AND page_id = ?",
+                (document_id, selected_page_id),
+            ).fetchone()
+            if page is None:
+                raise IngestionRequestError(
+                    409, "mapping_candidate_unavailable", "历史候选页已不可用。"
+                )
+            identities[int(case["page_number"])] = (
+                str(page["page_id"]),
+                str(page["chunk_id"]),
+            )
+            used_page_ids.add(selected_page_id)
+        summary = _materialize_page_versions(
+            connection,
+            document_id=document_id,
+            version_id=version_id,
+            rows=rows,
+            identities=identities,
+            now=now,
+        )
+        activated = connection.execute(
+            """
+            UPDATE document_versions
+            SET status = 'ready', ready_at = ?, mapping_revision = mapping_revision + 1,
+                mapping_confirmed_at = ?, mapping_confirmed_by = ?
+            WHERE version_id = ? AND status = 'awaiting_mapping'
+            """,
+            (now, now, actor_id, version_id),
+        )
+        if activated.rowcount != 1:
+            raise IngestionRequestError(
+                409, "mapping_state_changed", "版本状态已经变化，请重新加载。"
+            )
+        switched = connection.execute(
+            "UPDATE documents SET current_version_id = ? WHERE document_id = ?",
+            (version_id, document_id),
+        )
+        if switched.rowcount != 1:
+            raise RuntimeError("版本所属文档不存在")
+        completed = connection.execute(
+            """
+            UPDATE jobs
+            SET status = 'succeeded', checkpoint_json = ?, updated_at = ?
+            WHERE version_id = ? AND kind = 'document.ingest'
+              AND status = 'requires_action'
+            """,
+            (
+                _json(
+                    {
+                        "phase": "activation",
+                        "completed_pages": len(rows),
+                        "total_pages": len(rows),
+                    }
+                ),
+                now,
+                version_id,
+            ),
+        )
+        if completed.rowcount != 1:
+            raise RuntimeError("等待页对应的摄取任务不存在")
+        refreshed = _mapping_version(connection, document_id, version_id)
+        assert refreshed is not None
+        etag = _mapping_etag(version_id, int(refreshed["mapping_revision"]))
+    return {
+        "document_id": document_id,
+        "version_id": version_id,
+        "status": "ready",
+        "summary": summary,
+    }, etag
+
+
+def _mapping_version(connection: Any, document_id: str, version_id: str) -> Any | None:
+    return connection.execute(
+        """
+        SELECT versions.*, documents.current_version_id
+        FROM document_versions AS versions
+        JOIN documents ON documents.document_id = versions.document_id
+        WHERE versions.document_id = ? AND versions.version_id = ?
+        """,
+        (document_id, version_id),
+    ).fetchone()
+
+
+def _page_mapping_workspace(
+    connection: Any, settings: Settings, version: Any
+) -> dict[str, Any]:
+    version_id = str(version["version_id"])
+    document_id = str(version["document_id"])
+    rows = connection.execute(
+        """
+        SELECT * FROM ingestion_page_results
+        WHERE version_id = ? AND enabled = 1 ORDER BY page_number
+        """,
+        (version_id,),
+    ).fetchall()
+    plan = _build_page_mapping_plan(
+        connection,
+        document_id=document_id,
+        current_version_id=version["current_version_id"],
+        target_version_id=version_id,
+        incoming_rows=rows,
+    )
+    automatic = plan.automatic_matches
+    cases = connection.execute(
+        "SELECT * FROM page_mapping_cases WHERE version_id = ? ORDER BY page_number",
+        (version_id,),
+    ).fetchall()
+    decisions_by_page_id = {
+        str(case["selected_page_id"]): str(case["case_id"])
+        for case in cases
+        if case["selected_page_id"] is not None
+    }
+    decisions_by_page_id.update(
+        {
+            identity[0]: f"source-page-{page_number}"
+            for page_number, identity in automatic.items()
+        }
+    )
+
+    def adjacent(page_number: int) -> dict[str, Any]:
+        before = max((number for number in automatic if number < page_number), default=None)
+        after = min((number for number in automatic if number > page_number), default=None)
+
+        def item(number: int | None) -> dict[str, Any] | None:
+            if number is None:
+                return None
+            return {"source_page_number": number, "page_id": automatic[number][0]}
+
+        return {"before": item(before), "after": item(after)}
+
+    payload_cases = []
+    for case in cases:
+        page_number = int(case["page_number"])
+        source = next(row for row in rows if int(row["page_number"]) == page_number)
+        candidates = []
+        for candidate_page_id in json.loads(str(case["candidate_page_ids_json"])):
+            candidate = connection.execute(
+                """
+                SELECT pv.page_id, p.chunk_id, pv.page_number, pv.review_status,
+                       pv.fingerprint_version, pv.fingerprint_sha256,
+                       results.source_slide_id, versions.version_id
+                FROM page_versions AS pv
+                JOIN pages AS p ON p.page_id = pv.page_id
+                JOIN document_versions AS versions ON versions.version_id = pv.version_id
+                JOIN ingestion_page_results AS results
+                  ON results.version_id = pv.version_id
+                 AND results.page_number = pv.page_number
+                WHERE pv.page_id = ? AND versions.status = 'ready'
+                ORDER BY CASE WHEN versions.version_id = ? THEN 0 ELSE 1 END,
+                         versions.ready_at DESC, pv.created_at DESC
+                LIMIT 1
+                """,
+                (candidate_page_id, version["current_version_id"]),
+            ).fetchone()
+            if candidate is None:
+                continue
+            candidates.append(
+                {
+                    "page_id": candidate["page_id"],
+                    "chunk_id": candidate["chunk_id"],
+                    "version_id": candidate["version_id"],
+                    "page_number": candidate["page_number"],
+                    "slide_id": candidate["source_slide_id"],
+                    "review_status": candidate["review_status"],
+                    "fingerprint_relation": (
+                        "same"
+                        if int(candidate["fingerprint_version"])
+                        == int(source["fingerprint_version"])
+                        and str(candidate["fingerprint_sha256"])
+                        == str(source["fingerprint_sha256"])
+                        else "changed"
+                    ),
+                    "adjacent_confirmed": adjacent(page_number),
+                    "relative_order": {
+                        "source_page_number": page_number,
+                        "candidate_page_number": candidate["page_number"],
+                        "delta": page_number - int(candidate["page_number"]),
+                    },
+                    "occupied_by_case_id": decisions_by_page_id.get(str(candidate["page_id"])),
+                    "standard_render": {
+                        "url": (
+                            f"/api/v1/documents/{document_id}/versions/"
+                            f"{candidate['version_id']}/source-pages/"
+                            f"{candidate['page_number']}/render"
+                        )
+                    },
+                }
+            )
+        payload_cases.append(
+            {
+                "case_id": case["case_id"],
+                "kind": case["case_kind"],
+                "status": "saved" if case["decision"] is not None else "unresolved",
+                "source_page": {
+                    "page_number": page_number,
+                    "slide_id": source["source_slide_id"],
+                    "fingerprint": {
+                        "version": source["fingerprint_version"],
+                        "sha256": source["fingerprint_sha256"],
+                    },
+                    "standard_render": {
+                        "url": (
+                            f"/api/v1/documents/{document_id}/versions/{version_id}"
+                            f"/source-pages/{page_number}/render"
+                        )
+                    },
+                },
+                "candidates": candidates,
+                "decision": (
+                    None
+                    if case["decision"] is None
+                    else {"kind": case["decision"], "page_id": case["selected_page_id"]}
+                ),
+                "decided_by": case["decided_by"],
+                "decided_at": case["decided_at"],
+            }
+        )
+    remaining = sum(case["decision"] is None for case in cases)
+    resolved_identities = dict(automatic)
+    case_by_page = {int(case["page_number"]): case for case in cases}
+    for case in cases:
+        if case["decision"] != "reuse":
+            continue
+        page = connection.execute(
+            "SELECT page_id, chunk_id FROM pages WHERE page_id = ?",
+            (case["selected_page_id"],),
+        ).fetchone()
+        if page is not None:
+            resolved_identities[int(case["page_number"])] = (
+                str(page["page_id"]),
+                str(page["chunk_id"]),
+            )
+    impact = {
+        "reused_unchanged": 0,
+        "reused_changed": 0,
+        "created_new": 0,
+        "soft_deleted": 0,
+        "unresolved": remaining,
+        "save_conflicts": 0,
+        "evidence_errors": _mapping_evidence_error_count(
+            connection, settings, version_id
+        ),
+    }
+    for row in rows:
+        page_number = int(row["page_number"])
+        case = case_by_page.get(page_number)
+        if case is not None and case["decision"] is None:
+            continue
+        identity = resolved_identities.get(page_number)
+        if identity is None:
+            impact["created_new"] += 1
+            continue
+        historical = connection.execute(
+            """
+            SELECT pv.fingerprint_version, pv.fingerprint_sha256
+            FROM page_versions AS pv
+            JOIN document_versions AS versions ON versions.version_id = pv.version_id
+            WHERE pv.page_id = ? AND versions.status = 'ready'
+            ORDER BY versions.ready_at DESC, pv.created_at DESC LIMIT 1
+            """,
+            (identity[0],),
+        ).fetchone()
+        unchanged = (
+            historical is not None
+            and int(historical["fingerprint_version"]) == int(row["fingerprint_version"])
+            and str(historical["fingerprint_sha256"]) == str(row["fingerprint_sha256"])
+        )
+        impact["reused_unchanged" if unchanged else "reused_changed"] += 1
+    if remaining == 0:
+        current_page_ids = {
+            str(row["page_id"])
+            for row in connection.execute(
+                "SELECT page_id FROM page_versions WHERE version_id = ?",
+                (version["current_version_id"],),
+            )
+        }
+        impact["soft_deleted"] = len(
+            current_page_ids - {identity[0] for identity in resolved_identities.values()}
+        )
+    return {
+        "document_id": document_id,
+        "version_id": version_id,
+        "source_filename": version["source_filename"],
+        "status": version["status"],
+        "revision": version["mapping_revision"],
+        "remaining_cases": remaining,
+        "current_version": {
+            "version_id": version["current_version_id"],
+            "still_serving": (
+                version["status"] == "awaiting_mapping"
+                and version["current_version_id"] is not None
+            ),
+        },
+        "cases": payload_cases,
+        "can_confirm": (
+            bool(cases)
+            and remaining == 0
+            and version["status"] == "awaiting_mapping"
+            and impact["evidence_errors"] == 0
+        ),
+        "impact_summary": impact,
+        "confirmed_at": version["mapping_confirmed_at"],
+        "confirmed_by": version["mapping_confirmed_by"],
+    }
+
+
+def _mapping_evidence_error_count(
+    connection: Any, settings: Settings, version_id: str
+) -> int:
+    """统计工作面必须展示但对象存储中不可用的标准页证据。"""
+    store = LocalObjectStore(settings.object_store_path)
+    evidence: set[tuple[str, str]] = set()
+    incoming = connection.execute(
+        """
+        SELECT results.page_number, results.render_sha256
+        FROM ingestion_page_results AS results
+        JOIN page_mapping_cases AS cases
+          ON cases.version_id = results.version_id
+         AND cases.page_number = results.page_number
+        WHERE results.version_id = ?
+        """,
+        (version_id,),
+    ).fetchall()
+    for row in incoming:
+        evidence.add((f"source:{row['page_number']}", str(row["render_sha256"] or "")))
+
+    cases = connection.execute(
+        "SELECT candidate_page_ids_json FROM page_mapping_cases WHERE version_id = ?",
+        (version_id,),
+    ).fetchall()
+    candidate_page_ids = {
+        str(page_id)
+        for case in cases
+        for page_id in json.loads(str(case["candidate_page_ids_json"]))
+    }
+    for page_id in candidate_page_ids:
+        row = connection.execute(
+            """
+            SELECT pv.render_sha256
+            FROM page_versions AS pv
+            JOIN document_versions AS versions ON versions.version_id = pv.version_id
+            WHERE pv.page_id = ? AND versions.status = 'ready'
+            ORDER BY versions.ready_at DESC, pv.created_at DESC
+            LIMIT 1
+            """,
+            (page_id,),
+        ).fetchone()
+        evidence.add(
+            (
+                f"candidate:{page_id}",
+                "" if row is None else str(row["render_sha256"] or ""),
+            )
+        )
+    return sum(
+        not sha256 or not store.path_for(sha256).is_file()
+        for _, sha256 in evidence
+    )
+
+
+def _mapping_etag(version_id: str, revision: int) -> str:
+    return f'"mapping-{version_id}-{revision}"'
+
+
+def _assert_mapping_precondition(if_match: str, current_etag: str) -> None:
+    if not if_match:
+        raise IngestionRequestError(
+            428, "mapping_precondition_required", "保存页对应决定必须携带 If-Match。"
+        )
+    if if_match != current_etag:
+        raise MappingPreconditionError(current_etag)
 
 
 def _checkpoint(
