@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -80,7 +80,10 @@ def initialize_database(settings: Settings) -> None:
             CREATE TABLE IF NOT EXISTS documents (
                 document_id TEXT PRIMARY KEY,
                 current_version_id TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by TEXT,
+                deletion_reason TEXT
             );
 
             CREATE TABLE IF NOT EXISTS document_versions (
@@ -95,6 +98,12 @@ def initialize_database(settings: Settings) -> None:
                     )),
                 created_at TEXT NOT NULL,
                 ready_at TEXT,
+                source_operation TEXT NOT NULL DEFAULT 'upload'
+                    CHECK (source_operation IN ('upload', 'retry', 'rollback')),
+                source_version_id TEXT REFERENCES document_versions(version_id),
+                voided_at TEXT,
+                voided_by TEXT,
+                void_reason TEXT,
                 UNIQUE (document_id, version_id)
             );
 
@@ -169,6 +178,25 @@ def initialize_database(settings: Settings) -> None:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (actor_id, command_scope, idempotency_key)
             );
+
+            CREATE TABLE IF NOT EXISTS lifecycle_events (
+                event_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(document_id),
+                version_id TEXT REFERENCES document_versions(version_id),
+                event_type TEXT NOT NULL CHECK (event_type IN (
+                    'version_retried', 'version_voided', 'version_rolled_back',
+                    'document_deleted', 'document_restored'
+                )),
+                actor_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                source_version_id TEXT REFERENCES document_versions(version_id),
+                command_scope TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (actor_id, command_scope, idempotency_key)
+            );
             """
         )
         if 0 < existing_version < 3:
@@ -197,6 +225,33 @@ def initialize_database(settings: Settings) -> None:
             if column not in page_result_columns:
                 connection.execute(
                     f"ALTER TABLE ingestion_page_results ADD COLUMN {column} TEXT"
+                )
+        document_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        for column in ("deleted_at", "deleted_by", "deletion_reason"):
+            if column not in document_columns:
+                connection.execute(f"ALTER TABLE documents ADD COLUMN {column} TEXT")
+        version_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(document_versions)")
+        }
+        if "source_operation" not in version_columns:
+            connection.execute(
+                "ALTER TABLE document_versions ADD COLUMN "
+                "source_operation TEXT NOT NULL DEFAULT 'upload' "
+                "CHECK (source_operation IN ('upload', 'retry', 'rollback'))"
+            )
+        if "source_version_id" not in version_columns:
+            connection.execute(
+                "ALTER TABLE document_versions ADD COLUMN "
+                "source_version_id TEXT REFERENCES document_versions(version_id)"
+            )
+        for column in ("voided_at", "voided_by", "void_reason"):
+            if column not in version_columns:
+                connection.execute(
+                    f"ALTER TABLE document_versions ADD COLUMN {column} TEXT"
                 )
         for row in connection.execute(
             "SELECT job_id, payload_json FROM jobs WHERE kind = 'document.ingest'"

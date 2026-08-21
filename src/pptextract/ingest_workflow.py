@@ -207,11 +207,13 @@ def accept_document_version(
             return replay
 
         document = connection.execute(
-            "SELECT current_version_id FROM documents WHERE document_id = ?",
+            "SELECT current_version_id, deleted_at FROM documents WHERE document_id = ?",
             (document_id,),
         ).fetchone()
         if document is None:
             raise IngestionRequestError(404, "not_found", "未找到请求的资源。")
+        if document["deleted_at"] is not None:
+            raise IngestionRequestError(409, "document_deleted", "软删文档不能接受新上传。")
 
         active = connection.execute(
             """

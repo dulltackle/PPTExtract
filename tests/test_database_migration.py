@@ -157,6 +157,11 @@ def test_v2_database_migrates_version_states_and_active_job_targets(tmp_path: Pa
         )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
+                "UPDATE document_versions SET source_operation = 'unknown' "
+                "WHERE version_id = 'version'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
                 """
                 INSERT INTO jobs (
                     job_id, kind, payload_json, status, actor_id, idempotency_key,
@@ -190,8 +195,12 @@ def test_v3_job_table_migrates_states_index_and_idempotency_foreign_key(
                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                 1, 'application/test', 'now'
             );
-            INSERT INTO documents VALUES ('document', NULL, 'now');
-            INSERT INTO document_versions VALUES (
+            INSERT INTO documents (document_id, current_version_id, created_at)
+            VALUES ('document', NULL, 'now');
+            INSERT INTO document_versions (
+                version_id, document_id, source_sha256, source_filename,
+                source_size_bytes, status, created_at, ready_at
+            ) VALUES (
                 'version', 'document',
                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                 'source.pptx', 1, 'processing', 'now', NULL
@@ -280,3 +289,28 @@ def test_v3_job_table_migrates_states_index_and_idempotency_foreign_key(
             """
         ).fetchone()[0]
         assert "requires_action" in index_sql
+        assert {"deleted_at", "deleted_by", "deletion_reason"} <= {
+            row["name"] for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        assert {
+            "source_operation",
+            "source_version_id",
+            "voided_at",
+            "voided_by",
+            "void_reason",
+        } <= {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(document_versions)")
+        }
+        source_version_foreign_keys = {
+            (row["from"], row["table"], row["to"])
+            for row in connection.execute("PRAGMA foreign_key_list(document_versions)")
+        }
+        assert (
+            "source_version_id",
+            "document_versions",
+            "version_id",
+        ) in source_version_foreign_keys
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lifecycle_events'"
+        ).fetchone() is not None

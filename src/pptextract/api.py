@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
 from pptextract.auth import ActorProvider, HeaderActorProvider
@@ -18,6 +19,14 @@ from pptextract.ingest_workflow import (
     accept_document_version,
     accept_first_upload,
     read_job,
+)
+from pptextract.lifecycle import (
+    read_lifecycle_events,
+    restore_document,
+    retry_failed_version,
+    rollback_to_version,
+    soft_delete_document,
+    void_version,
 )
 from pptextract.object_store import LocalObjectStore
 from pptextract.worker import worker_is_fresh
@@ -30,6 +39,10 @@ def error_response(
     if details is not None:
         error["details"] = details
     return JSONResponse(status_code=status_code, content={"error": error})
+
+
+class LifecycleCommand(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
 
 
 def create_app(
@@ -151,12 +164,117 @@ def create_app(
             return error_response(404, "not_found", "未找到请求的资源。")
         return JSONResponse(content=job)
 
+    @app.post("/api/v1/documents/{document_id}/versions/{version_id}/retry")
+    async def retry_version(
+        document_id: str,
+        version_id: str,
+        command: LifecycleCommand,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = retry_failed_version(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                version_id=version_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                reason=command.reason,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=202, content=result)
+
+    @app.get("/api/v1/documents/{document_id}/events")
+    async def get_document_events(document_id: str) -> JSONResponse:
+        events = read_lifecycle_events(resolved, document_id)
+        if events is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        return JSONResponse(content={"events": events})
+
+    @app.post("/api/v1/documents/{document_id}/versions/{version_id}/void")
+    async def void_document_version(
+        document_id: str,
+        version_id: str,
+        command: LifecycleCommand,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = void_version(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                version_id=version_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                reason=command.reason,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=result)
+
+    @app.post("/api/v1/documents/{document_id}/versions/{version_id}/rollback")
+    async def rollback_document_version(
+        document_id: str,
+        version_id: str,
+        command: LifecycleCommand,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = rollback_to_version(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                version_id=version_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                reason=command.reason,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=202, content=result)
+
+    @app.delete("/api/v1/documents/{document_id}")
+    async def delete_document(
+        document_id: str, command: LifecycleCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = soft_delete_document(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                reason=command.reason,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=result)
+
+    @app.post("/api/v1/documents/{document_id}/restore")
+    async def restore_deleted_document(
+        document_id: str, command: LifecycleCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = restore_document(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                reason=command.reason,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=result)
+
     @app.get("/api/v1/documents/{document_id}")
     async def get_document(document_id: str) -> JSONResponse:
         with connect(resolved) as connection:
             row = connection.execute(
                 """
-                SELECT document_id, current_version_id, created_at
+                SELECT document_id, current_version_id, created_at,
+                       deleted_at, deleted_by, deletion_reason
                 FROM documents WHERE document_id = ?
                 """,
                 (document_id,),
@@ -171,7 +289,9 @@ def create_app(
             row = connection.execute(
                 """
                 SELECT version_id, document_id, status, source_sha256,
-                       source_filename, source_size_bytes, created_at, ready_at
+                       source_filename, source_size_bytes, created_at, ready_at,
+                       source_operation, source_version_id,
+                       voided_at, voided_by, void_reason
                 FROM document_versions
                 WHERE document_id = ? AND version_id = ?
                 """,
@@ -191,6 +311,17 @@ def create_app(
                 },
                 "created_at": row["created_at"],
                 "ready_at": row["ready_at"],
+                "source_relation": (
+                    None
+                    if row["source_version_id"] is None
+                    else {
+                        "operation": row["source_operation"],
+                        "source_version_id": row["source_version_id"],
+                    }
+                ),
+                "voided_at": row["voided_at"],
+                "voided_by": row["voided_by"],
+                "void_reason": row["void_reason"],
             }
         )
 
@@ -208,7 +339,7 @@ def create_app(
                 JOIN documents AS d
                   ON d.document_id = pv.document_id
                  AND d.current_version_id = pv.version_id
-                WHERE pv.review_status = ?
+                WHERE d.deleted_at IS NULL AND pv.review_status = ?
                 ORDER BY pv.document_id, pv.page_number, pv.page_id
                 """,
                 (review_status,),
@@ -230,7 +361,7 @@ def create_app(
                 JOIN documents AS d
                   ON d.document_id = pv.document_id
                  AND d.current_version_id = pv.version_id
-                WHERE pv.page_id = ?
+                WHERE d.deleted_at IS NULL AND pv.page_id = ?
                 """,
                 (page_id,),
             ).fetchone()
@@ -270,7 +401,7 @@ def create_app(
                 JOIN documents AS d
                   ON d.document_id = pv.document_id
                  AND d.current_version_id = pv.version_id
-                WHERE pv.page_id = ?
+                WHERE d.deleted_at IS NULL AND pv.page_id = ?
                 """,
                 (page_id,),
             ).fetchone()
