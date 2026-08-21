@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -127,6 +127,7 @@ def initialize_database(settings: Settings) -> None:
                 render_width_px INTEGER,
                 render_height_px INTEGER,
                 render_key TEXT,
+                enable_job_id TEXT REFERENCES jobs(job_id),
                 PRIMARY KEY (version_id, page_number)
             );
 
@@ -226,6 +227,11 @@ def initialize_database(settings: Settings) -> None:
                 connection.execute(
                     f"ALTER TABLE ingestion_page_results ADD COLUMN {column} TEXT"
                 )
+        if "enable_job_id" not in page_result_columns:
+            connection.execute(
+                "ALTER TABLE ingestion_page_results "
+                "ADD COLUMN enable_job_id TEXT REFERENCES jobs(job_id)"
+            )
         document_columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(documents)")

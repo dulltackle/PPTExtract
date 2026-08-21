@@ -13,7 +13,7 @@ from pptx.util import Inches
 from pptextract.api import create_app
 from pptextract.config import Settings
 from pptextract.conversion import NormalizedPageContent
-from pptextract.db import initialize_database, transaction
+from pptextract.db import connect, initialize_database, transaction
 from pptextract.jobs import claim_next_job, enqueue_job, finish_job
 from pptextract.object_store import LocalObjectStore
 from pptextract.pptx_projection import SourcePage
@@ -457,3 +457,286 @@ def test_hidden_page_is_reported_as_skipped_without_blocking_activation(
         {"page_number": 2, "phase": "source_manifest", "status": "skipped"},
     ]
     assert [page["page_number"] for page in pages] == [1]
+
+
+def test_hidden_page_can_be_enabled_once_through_the_public_api(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    accepted = client.post(
+        "/api/v1/documents",
+        headers={"Idempotency-Key": "hidden-page-enable-source"},
+        files={"file": ("hidden.pptx", build_minimal_presentation(), PPTX_MEDIA_TYPE)},
+    ).json()
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.convert_page",
+        lambda *_args, **_kwargs: NormalizedPageContent(
+            ("公开合成页",), ("公开正文",), (), ()
+        ),
+    )
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.render_standard_pages",
+        lambda *_args, pages, **_kwargs: (
+            StandardPageRender(
+                page_number=pages[0].page_number,
+                media_type="image/png",
+                dpi=144,
+                width_px=10,
+                height_px=10,
+                data=f"render-{pages[0].page_number}".encode(),
+            ),
+        ),
+    )
+    assert run_once(settings) is True
+
+    all_pages = client.get(
+        "/api/v1/curation/pages", params={"review_status": "all"}
+    ).json()["pages"]
+    hidden = all_pages[1]
+    assert hidden == {
+        "page_id": None,
+        "chunk_id": None,
+        "document_id": accepted["document_id"],
+        "version_id": accepted["version_id"],
+        "page_number": 2,
+        "review_status": None,
+        "title": None,
+        "hidden": True,
+        "enabled": False,
+        "source_reference": {
+            "slide_id": hidden["source_reference"]["slide_id"],
+            "relationship_id": hidden["source_reference"]["relationship_id"],
+            "part": "ppt/slides/slide2.xml",
+        },
+        "enablement": {"status": "not_started", "job_id": None, "error": None},
+    }
+    with connect(settings) as connection:
+        unprocessed = connection.execute(
+            """
+            SELECT source_content_json, fingerprint_sha256, render_sha256
+            FROM ingestion_page_results
+            WHERE version_id = ? AND page_number = 2
+            """,
+            (accepted["version_id"],),
+        ).fetchone()
+    assert tuple(unprocessed) == (None, None, None)
+
+    path = (
+        f"/api/v1/documents/{accepted['document_id']}"
+        f"/versions/{accepted['version_id']}/source-pages/2/enable"
+    )
+    first = client.post(
+        path,
+        headers={"X-Actor-ID": "curator-one", "Idempotency-Key": "enable-hidden-page"},
+    )
+    replay = client.post(
+        path,
+        headers={"X-Actor-ID": "curator-one", "Idempotency-Key": "enable-hidden-page"},
+    )
+    other_session = client.post(
+        path,
+        headers={"X-Actor-ID": "curator-two", "Idempotency-Key": "other-session"},
+    )
+
+    assert first.status_code == replay.status_code == other_session.status_code == 202
+    assert replay.json() == first.json()
+    assert other_session.json()["status"] == "coalesced"
+    assert other_session.json()["job_id"] == first.json()["job_id"]
+    queued_hidden = client.get(
+        "/api/v1/curation/pages", params={"review_status": "all"}
+    ).json()["pages"][1]
+    assert queued_hidden["enablement"] == {
+        "status": "queued",
+        "job_id": first.json()["job_id"],
+        "error": None,
+    }
+    queued_task = client.get(f"/api/v1/jobs/{first.json()['job_id']}").json()
+    assert queued_task["progress"] == {
+        "phase": "queued",
+        "completed_pages": 0,
+        "total_pages": 1,
+        "pages": [{"page_number": 2, "phase": "queued", "status": "pending"}],
+    }
+
+    assert run_once(settings) is True
+
+    pending_pages = client.get("/api/v1/curation/pages").json()["pages"]
+    assert [page["page_number"] for page in pending_pages] == [1, 2]
+    enabled_page = pending_pages[1]
+    assert enabled_page["hidden"] is True
+    assert enabled_page["enabled"] is True
+    assert enabled_page["review_status"] == "pending"
+    detail = client.get(f"/api/v1/pages/{enabled_page['page_id']}")
+    assert detail.status_code == 200
+    assert detail.json()["page_number"] == 2
+    assert detail.json()["source_content"]["titles"] == ["公开合成页"]
+
+    already_enabled = client.post(
+        path,
+        headers={"X-Actor-ID": "curator-two", "Idempotency-Key": "already-enabled"},
+    )
+    assert already_enabled.status_code == 200
+    assert already_enabled.json()["status"] == "no_change"
+    assert already_enabled.json()["page_id"] == enabled_page["page_id"]
+    with connect(settings) as connection:
+        counts = connection.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM pages WHERE document_id = ?) AS pages,
+              (SELECT COUNT(*) FROM page_versions WHERE version_id = ?) AS page_versions
+            """,
+            (accepted["document_id"], accepted["version_id"]),
+        ).fetchone()
+    assert dict(counts) == {"pages": 2, "page_versions": 2}
+
+
+def test_failed_hidden_page_enablement_is_retryable_without_partial_page_facts(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    accepted = client.post(
+        "/api/v1/documents",
+        headers={"Idempotency-Key": "hidden-page-failure-source"},
+        files={"file": ("hidden.pptx", build_minimal_presentation(), PPTX_MEDIA_TYPE)},
+    ).json()
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.convert_page",
+        lambda *_args, **_kwargs: NormalizedPageContent((), (), (), ()),
+    )
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.render_standard_pages",
+        lambda *_args, pages, **_kwargs: (
+            StandardPageRender(
+                page_number=pages[0].page_number,
+                media_type="image/png",
+                dpi=144,
+                width_px=10,
+                height_px=10,
+                data=b"render",
+            ),
+        ),
+    )
+    assert run_once(settings) is True
+    path = (
+        f"/api/v1/documents/{accepted['document_id']}"
+        f"/versions/{accepted['version_id']}/source-pages/2/enable"
+    )
+    started = client.post(path, headers={"Idempotency-Key": "enable-that-fails"}).json()
+
+    def unavailable_conversion(*_args: object, **_kwargs: object) -> object:
+        raise OSError("converter remains unavailable")
+
+    monkeypatch.setattr("pptextract.ingest_workflow.convert_page", unavailable_conversion)
+    assert [run_once(settings) for _ in range(3)] == [True, True, True]
+
+    failed = client.get(f"/api/v1/jobs/{started['job_id']}").json()
+    assert failed["status"] == "failed"
+    all_pages = client.get(
+        "/api/v1/curation/pages", params={"review_status": "all"}
+    ).json()["pages"]
+    hidden = all_pages[1]
+    assert hidden["enabled"] is False
+    assert hidden["enablement"]["status"] == "failed"
+    assert hidden["enablement"]["error"]["phase"] == "conversion"
+    with connect(settings) as connection:
+        partial = connection.execute(
+            """
+            SELECT enabled, source_content_json, fingerprint_sha256, render_sha256,
+                   (SELECT COUNT(*) FROM page_versions
+                    WHERE version_id = ? AND page_number = 2) AS page_versions
+            FROM ingestion_page_results
+            WHERE version_id = ? AND page_number = 2
+            """,
+            (accepted["version_id"], accepted["version_id"]),
+        ).fetchone()
+    assert dict(partial) == {
+        "enabled": 0,
+        "source_content_json": None,
+        "fingerprint_sha256": None,
+        "render_sha256": None,
+        "page_versions": 0,
+    }
+
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.convert_page",
+        lambda *_args, **_kwargs: NormalizedPageContent(("重试成功",), (), (), ()),
+    )
+    retried = client.post(path, headers={"Idempotency-Key": "retry-hidden-page"})
+    assert retried.status_code == 202
+    assert retried.json()["job_id"] != started["job_id"]
+    assert run_once(settings) is True
+    pending_pages = client.get("/api/v1/curation/pages").json()["pages"]
+    assert [page["page_number"] for page in pending_pages] == [1, 2]
+
+
+def test_expired_hidden_page_lease_clears_partial_page_facts(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    accepted = client.post(
+        "/api/v1/documents",
+        headers={"Idempotency-Key": "hidden-page-expired-source"},
+        files={"file": ("hidden.pptx", build_minimal_presentation(), PPTX_MEDIA_TYPE)},
+    ).json()
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.convert_page",
+        lambda *_args, **_kwargs: NormalizedPageContent((), (), (), ()),
+    )
+    monkeypatch.setattr(
+        "pptextract.ingest_workflow.render_standard_pages",
+        lambda *_args, pages, **_kwargs: (
+            StandardPageRender(
+                page_number=pages[0].page_number,
+                media_type="image/png",
+                dpi=144,
+                width_px=10,
+                height_px=10,
+                data=b"render",
+            ),
+        ),
+    )
+    assert run_once(settings) is True
+    path = (
+        f"/api/v1/documents/{accepted['document_id']}"
+        f"/versions/{accepted['version_id']}/source-pages/2/enable"
+    )
+    started = client.post(path, headers={"Idempotency-Key": "expired-hidden-page"}).json()
+
+    for expected_attempt in (1, 2, 3):
+        claim = claim_next_job(settings)
+        assert claim is not None
+        assert claim.attempts == expected_attempt
+        with transaction(settings) as connection:
+            connection.execute(
+                """
+                UPDATE jobs SET lease_expires_at = '2000-01-01T00:00:00+00:00'
+                WHERE job_id = ?
+                """,
+                (started["job_id"],),
+            )
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET source_content_json = '{}', fingerprint_version = 1,
+                    fingerprint_sha256 = 'partial'
+                WHERE version_id = ? AND page_number = 2
+                """,
+                (accepted["version_id"],),
+            )
+
+    assert claim_next_job(settings) is None
+    with connect(settings) as connection:
+        page_result = connection.execute(
+            """
+            SELECT enabled, source_content_json, fingerprint_version, fingerprint_sha256
+            FROM ingestion_page_results
+            WHERE version_id = ? AND page_number = 2
+            """,
+            (accepted["version_id"],),
+        ).fetchone()
+    assert dict(page_result) == {
+        "enabled": 0,
+        "source_content_json": None,
+        "fingerprint_version": None,
+        "fingerprint_sha256": None,
+    }

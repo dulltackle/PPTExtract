@@ -6,7 +6,12 @@ from datetime import UTC, datetime, timedelta
 
 from pptextract.config import Settings
 from pptextract.db import connect, initialize_database, transaction
-from pptextract.ingest_workflow import fail_ingestion_job, process_ingestion_job
+from pptextract.ingest_workflow import (
+    fail_hidden_page_job,
+    fail_ingestion_job,
+    process_hidden_page_job,
+    process_ingestion_job,
+)
 from pptextract.jobs import claim_next_job, finish_job
 from pptextract.object_store import LocalObjectStore
 
@@ -61,6 +66,11 @@ def run_once(settings: Settings) -> bool:
             process_ingestion_job(settings, job)
         except Exception as error:
             fail_ingestion_job(settings, job, error)
+    elif job.kind == "page.enable":
+        try:
+            process_hidden_page_job(settings, job)
+        except Exception as error:
+            fail_hidden_page_job(settings, job, error)
     else:
         finish_job(settings, job, succeeded=False)
     return True

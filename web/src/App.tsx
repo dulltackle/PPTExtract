@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import { type BootstrapData, loadBootstrap, OperatorError, type Runway } from "./api";
+import { CurationWorkbench } from "./CurationWorkbench";
 import "./styles.css";
 
 type LoadState =
@@ -139,6 +140,7 @@ function ErrorWorkspace({ message, retry }: { message: string; retry: () => void
 }
 
 export function App() {
+  const isCuration = window.location.pathname.startsWith("/curation");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [showUploadBoundary, setShowUploadBoundary] = useState(false);
   const activeRequest = useRef<{ controller: AbortController; requestId: number } | null>(null);
@@ -176,6 +178,10 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
+    document.title = isCuration ? "PPTExtract · 逐页策展" : "PPTExtract · 文档";
+  }, [isCuration]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
@@ -196,8 +202,11 @@ export function App() {
         <ProductMark />
         <span className="topbar-divider" aria-hidden="true" />
         <nav aria-label="主要区域">
-          <a href="/documents" aria-current="page">
+          <a href="/documents" aria-current={isCuration ? undefined : "page"}>
             文档
+          </a>
+          <a href="/curation" aria-current={isCuration ? "page" : undefined}>
+            策展
           </a>
         </nav>
         <div className="topbar-actions">
@@ -205,33 +214,36 @@ export function App() {
             <UserIcon />
             <span>{actor?.display_name ?? "正在识别操作者"}</span>
           </div>
-          <div className="upload-boundary">
-            <button
-              type="button"
-              className="upload-button"
-              aria-describedby="upload-boundary-copy"
-              aria-expanded={showUploadBoundary}
-              onClick={() => setShowUploadBoundary((visible) => !visible)}
-            >
-              <UploadIcon />
-              上传 PPTX<span className="sr-only">（暂未开放）</span>
-            </button>
-            <span id="upload-boundary-copy" className="sr-only">
-              上传流程将在 #20 接入，本版本不会提交文件。
-            </span>
-            {showUploadBoundary ? (
-              <div className="upload-notice" role="status">
-                <strong>上传暂未开放</strong>
-                <span>上传流程将在 #20 接入；本版本不会提交文件。</span>
-              </div>
-            ) : null}
-          </div>
+          {!isCuration ? (
+            <div className="upload-boundary">
+              <button
+                type="button"
+                className="upload-button"
+                aria-describedby="upload-boundary-copy"
+                aria-expanded={showUploadBoundary}
+                onClick={() => setShowUploadBoundary((visible) => !visible)}
+              >
+                <UploadIcon />
+                上传 PPTX<span className="sr-only">（暂未开放）</span>
+              </button>
+              <span id="upload-boundary-copy" className="sr-only">
+                上传流程将在 #20 接入，本版本不会提交文件。
+              </span>
+              {showUploadBoundary ? (
+                <div className="upload-notice" role="status">
+                  <strong>上传暂未开放</strong>
+                  <span>上传流程将在 #20 接入；本版本不会提交文件。</span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </header>
 
       {state.kind === "loading" ? <LoadingRunways /> : null}
       {state.kind === "error" ? <ErrorWorkspace message={state.message} retry={refresh} /> : null}
-      {state.kind === "ready" ? (
+      {state.kind === "ready" && isCuration ? <CurationWorkbench /> : null}
+      {state.kind === "ready" && !isCuration ? (
         <main className="workspace" aria-label="文档阶段跑道">
           <div className="runway-stack">
             {state.data.runways.map((runway) => (
@@ -248,10 +260,16 @@ export function App() {
           <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
         </span>
         <span>
-          <kbd>R</kbd> 刷新入口
+          <kbd>R</kbd> {isCuration ? "刷新工作位" : "刷新入口"}
         </span>
         <span className="command-status">
-          {state.kind === "ready" ? "入口就绪" : state.kind === "error" ? "需要恢复" : "连接中"}
+          {state.kind === "ready"
+            ? isCuration
+              ? "策展工作位就绪"
+              : "入口就绪"
+            : state.kind === "error"
+              ? "需要恢复"
+              : "连接中"}
         </span>
       </footer>
     </div>

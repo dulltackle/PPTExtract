@@ -18,6 +18,7 @@ from pptextract.ingest_workflow import (
     IngestionRequestError,
     accept_document_version,
     accept_first_upload,
+    accept_hidden_page_enablement,
     read_job,
 )
 from pptextract.lifecycle import (
@@ -327,24 +328,104 @@ def create_app(
 
     @app.get("/api/v1/curation/pages")
     async def list_curation_pages(review_status: str = "pending") -> JSONResponse:
-        if review_status not in {"pending", "approved", "excluded"}:
+        if review_status not in {"pending", "approved", "excluded", "all"}:
             return error_response(422, "invalid_request", "审核状态无效。")
         with connect(resolved) as connection:
             rows = connection.execute(
                 """
-                SELECT pv.page_id, p.chunk_id, pv.document_id, pv.version_id,
-                       pv.page_number, pv.review_status
-                FROM page_versions AS pv
-                JOIN pages AS p ON p.page_id = pv.page_id
+                SELECT pv.page_id, p.chunk_id, results.version_id,
+                       versions.document_id, results.page_number, pv.review_status,
+                       pv.source_content_json, results.source_slide_id,
+                       results.relationship_id, results.source_part,
+                       results.hidden, results.enabled, jobs.job_id AS enable_job_id,
+                       jobs.status AS enable_status, jobs.error_json AS enable_error
+                FROM ingestion_page_results AS results
+                JOIN document_versions AS versions
+                  ON versions.version_id = results.version_id
                 JOIN documents AS d
-                  ON d.document_id = pv.document_id
-                 AND d.current_version_id = pv.version_id
-                WHERE d.deleted_at IS NULL AND pv.review_status = ?
-                ORDER BY pv.document_id, pv.page_number, pv.page_id
+                  ON d.document_id = versions.document_id
+                 AND d.current_version_id = versions.version_id
+                LEFT JOIN page_versions AS pv
+                  ON pv.version_id = results.version_id
+                 AND pv.page_number = results.page_number
+                LEFT JOIN pages AS p ON p.page_id = pv.page_id
+                LEFT JOIN jobs ON jobs.job_id = results.enable_job_id
+                WHERE d.deleted_at IS NULL AND versions.status = 'ready'
+                  AND (? = 'all' OR pv.review_status = ?)
+                ORDER BY versions.document_id, results.page_number, pv.page_id
                 """,
-                (review_status,),
+                (review_status, review_status),
             ).fetchall()
-        return JSONResponse(content={"pages": [dict(row) for row in rows]})
+        pages = []
+        for row in rows:
+            source_content = (
+                None
+                if row["source_content_json"] is None
+                else json.loads(row["source_content_json"])
+            )
+            titles = None if source_content is None else source_content.get("titles")
+            enablement = None
+            if bool(row["hidden"]):
+                enablement = {
+                    "status": row["enable_status"] or "not_started",
+                    "job_id": row["enable_job_id"],
+                    "error": (
+                        None
+                        if row["enable_error"] is None
+                        else json.loads(row["enable_error"])
+                    ),
+                }
+            pages.append(
+                {
+                    "page_id": row["page_id"],
+                    "chunk_id": row["chunk_id"],
+                    "document_id": row["document_id"],
+                    "version_id": row["version_id"],
+                    "page_number": row["page_number"],
+                    "review_status": row["review_status"],
+                    "title": titles[0] if titles else None,
+                    "hidden": bool(row["hidden"]),
+                    "enabled": bool(row["enabled"]),
+                    "source_reference": {
+                        "slide_id": row["source_slide_id"],
+                        "relationship_id": row["relationship_id"],
+                        "part": row["source_part"],
+                    },
+                    "enablement": enablement,
+                }
+            )
+        return JSONResponse(content={"pages": pages})
+
+    @app.post(
+        "/api/v1/documents/{document_id}/versions/{version_id}"
+        "/source-pages/{page_number}/enable"
+    )
+    async def enable_hidden_page(
+        document_id: str, version_id: str, page_number: int, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            accepted = accept_hidden_page_enablement(
+                resolved,
+                actor_id=actor.actor_id,
+                document_id=document_id,
+                version_id=version_id,
+                page_number=page_number,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(
+            status_code=200 if accepted.status == "no_change" else 202,
+            content={
+                "document_id": accepted.document_id,
+                "version_id": accepted.version_id,
+                "page_number": accepted.page_number,
+                "job_id": accepted.job_id,
+                "status": accepted.status,
+                "page_id": accepted.page_id,
+            },
+        )
 
     @app.get("/api/v1/pages/{page_id}")
     async def get_page(page_id: str) -> JSONResponse:

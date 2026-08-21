@@ -76,6 +76,16 @@ class AcceptedIngestion:
 
 
 @dataclass(frozen=True, slots=True)
+class AcceptedPageEnablement:
+    document_id: str
+    version_id: str
+    page_number: int
+    job_id: str | None
+    status: str
+    page_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ValidatedSource:
     stored: StoredObject
     filename: str
@@ -710,6 +720,563 @@ def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
     )
 
 
+def accept_hidden_page_enablement(
+    settings: Settings,
+    *,
+    actor_id: str,
+    document_id: str,
+    version_id: str,
+    page_number: int,
+    idempotency_key: str,
+) -> AcceptedPageEnablement:
+    """接受一个隐藏页启用命令，并在并发会话间合并同一源页任务。"""
+    if not idempotency_key or len(idempotency_key) > 200:
+        raise IngestionRequestError(400, "invalid_idempotency_key", "缺少有效的幂等键。")
+    command_scope = (
+        f"POST /api/v1/documents/{document_id}/versions/{version_id}"
+        f"/source-pages/{page_number}/enable"
+    )
+    request_fingerprint = hashlib.sha256(command_scope.encode("utf-8")).hexdigest()
+    now = timestamp()
+    with transaction(settings) as connection:
+        target = connection.execute(
+            """
+            SELECT results.hidden, results.enabled, results.enable_job_id,
+                   versions.source_sha256, versions.status AS version_status,
+                   documents.current_version_id, documents.deleted_at
+            FROM ingestion_page_results AS results
+            JOIN document_versions AS versions
+              ON versions.version_id = results.version_id
+             AND versions.document_id = ?
+            JOIN documents ON documents.document_id = versions.document_id
+            WHERE results.version_id = ? AND results.page_number = ?
+            """,
+            (document_id, version_id, page_number),
+        ).fetchone()
+        if target is None:
+            raise IngestionRequestError(404, "not_found", "未找到请求的源页登记。")
+        if target["deleted_at"] is not None:
+            raise IngestionRequestError(409, "document_deleted", "软删文档不能启用隐藏页。")
+        if target["version_status"] != "ready" or target["current_version_id"] != version_id:
+            raise IngestionRequestError(
+                409, "version_not_current", "只能启用当前 ready 版本的隐藏页。"
+            )
+        if not bool(target["hidden"]):
+            raise IngestionRequestError(409, "page_not_hidden", "该源页不是隐藏页。")
+
+        replay = connection.execute(
+            """
+            SELECT request_fingerprint, response_status, job_id
+            FROM idempotency_records
+            WHERE actor_id = ? AND command_scope = ? AND idempotency_key = ?
+            """,
+            (actor_id, command_scope, idempotency_key),
+        ).fetchone()
+        page_version = connection.execute(
+            """
+            SELECT page_id FROM page_versions
+            WHERE version_id = ? AND page_number = ?
+            """,
+            (version_id, page_number),
+        ).fetchone()
+        if replay is not None:
+            if replay["request_fingerprint"] != request_fingerprint:
+                _raise_idempotency_conflict()
+            return AcceptedPageEnablement(
+                document_id=document_id,
+                version_id=version_id,
+                page_number=page_number,
+                job_id=replay["job_id"],
+                status=str(replay["response_status"]),
+                page_id=None if page_version is None else str(page_version["page_id"]),
+            )
+
+        if bool(target["enabled"]) or page_version is not None:
+            accepted = AcceptedPageEnablement(
+                document_id=document_id,
+                version_id=version_id,
+                page_number=page_number,
+                job_id=target["enable_job_id"],
+                status="no_change",
+                page_id=None if page_version is None else str(page_version["page_id"]),
+            )
+            _record_page_enablement_idempotency(
+                connection,
+                accepted=accepted,
+                actor_id=actor_id,
+                command_scope=command_scope,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                now=now,
+            )
+            return accepted
+
+        active_job = None
+        if target["enable_job_id"] is not None:
+            active_job = connection.execute(
+                "SELECT job_id, status FROM jobs WHERE job_id = ?",
+                (target["enable_job_id"],),
+            ).fetchone()
+        if active_job is not None and active_job["status"] in {"queued", "running"}:
+            accepted = AcceptedPageEnablement(
+                document_id=document_id,
+                version_id=version_id,
+                page_number=page_number,
+                job_id=str(active_job["job_id"]),
+                status="coalesced",
+            )
+            _record_page_enablement_idempotency(
+                connection,
+                accepted=accepted,
+                actor_id=actor_id,
+                command_scope=command_scope,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                now=now,
+            )
+            return accepted
+
+        job_id = uuid.uuid4().hex
+        payload = {
+            "document_id": document_id,
+            "version_id": version_id,
+            "page_number": page_number,
+            "source_sha256": str(target["source_sha256"]),
+        }
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, kind, payload_json, status, actor_id, idempotency_key,
+                document_id, version_id, checkpoint_json, created_at, updated_at
+            ) VALUES (?, 'page.enable', ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                _json(payload),
+                actor_id,
+                _job_idempotency_key(command_scope, idempotency_key),
+                document_id,
+                version_id,
+                _json({"phase": "queued", "completed_pages": 0, "total_pages": 1}),
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE ingestion_page_results SET enable_job_id = ?
+            WHERE version_id = ? AND page_number = ? AND enabled = 0
+            """,
+            (job_id, version_id, page_number),
+        )
+        accepted = AcceptedPageEnablement(
+            document_id=document_id,
+            version_id=version_id,
+            page_number=page_number,
+            job_id=job_id,
+            status="accepted",
+        )
+        _record_page_enablement_idempotency(
+            connection,
+            accepted=accepted,
+            actor_id=actor_id,
+            command_scope=command_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            now=now,
+        )
+        return accepted
+
+
+def _record_page_enablement_idempotency(
+    connection: Any,
+    *,
+    accepted: AcceptedPageEnablement,
+    actor_id: str,
+    command_scope: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    now: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO idempotency_records (
+            actor_id, command_scope, idempotency_key, request_fingerprint,
+            response_status, document_id, version_id, job_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            actor_id,
+            command_scope,
+            idempotency_key,
+            request_fingerprint,
+            accepted.status,
+            accepted.document_id,
+            accepted.version_id,
+            accepted.job_id,
+            now,
+        ),
+    )
+
+
+def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
+    """处理一个已登记隐藏页，并在最后一个事务中公开页身份与审核状态。"""
+    version_id = str(job.payload["version_id"])
+    document_id = str(job.payload["document_id"])
+    page_number = int(job.payload["page_number"])
+    source_sha256 = str(job.payload["source_sha256"])
+    store = LocalObjectStore(settings.object_store_path)
+    try:
+        source = store.path_for(source_sha256).read_bytes()
+        page = next(
+            candidate
+            for candidate in list_source_pages(source)
+            if candidate.page_number == page_number
+        )
+    except Exception as error:
+        raise _stage_error("source_manifest", page_number, error) from error
+    if not page.hidden:
+        raise _stage_error("source_manifest", page_number, ValueError("源页不再隐藏"))
+
+    _checkpoint(settings, job, "conversion", 0, 1)
+    conversion_key = _stage_key(
+        phase="conversion",
+        source_sha256=source_sha256,
+        version_id=version_id,
+        page=page,
+        tool_version=CONVERSION_TOOL_VERSION,
+    )
+    with connect(settings) as connection:
+        checkpoint = connection.execute(
+            """
+            SELECT conversion_key, source_content_json
+            FROM ingestion_page_results
+            WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+            """,
+            (version_id, page_number, job.job_id),
+        ).fetchone()
+    if checkpoint is None:
+        raise RuntimeError("隐藏页启用任务不再是该源页的当前任务")
+    if (
+        checkpoint["conversion_key"] == conversion_key
+        and checkpoint["source_content_json"] is not None
+    ):
+        content = _content_from_json(str(checkpoint["source_content_json"]))
+    else:
+        try:
+            content = convert_page(source, page)
+        except Exception as error:
+            raise _stage_error("conversion", page_number, error) from error
+        with transaction(settings) as connection:
+            _assert_job_lease(connection, settings, job)
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET source_content_json = ?, conversion_key = ?
+                WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+                """,
+                (_content_json(content), conversion_key, version_id, page_number, job.job_id),
+            )
+    _checkpoint(settings, job, "conversion", 1, 1)
+
+    _checkpoint(settings, job, "rendering", 0, 1)
+    render_key = _stage_key(
+        phase="rendering",
+        source_sha256=source_sha256,
+        version_id=version_id,
+        page=page,
+        tool_version=(
+            f"{settings.render_image}|{RENDER_PLATFORM}|{STANDARD_RENDER_DPI}|"
+            f"{PDF_EXPORT_FILTER}"
+        ),
+    )
+    with connect(settings) as connection:
+        render_checkpoint = connection.execute(
+            """
+            SELECT render_key, render_sha256, render_media_type, render_dpi,
+                   render_width_px, render_height_px
+            FROM ingestion_page_results
+            WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+            """,
+            (version_id, page_number, job.job_id),
+        ).fetchone()
+    render_is_reusable = False
+    if render_checkpoint is not None:
+        try:
+            render_is_reusable = (
+                render_checkpoint["render_key"] == render_key
+                and render_checkpoint["render_sha256"] is not None
+                and render_checkpoint["render_media_type"] is not None
+                and render_checkpoint["render_dpi"] is not None
+                and render_checkpoint["render_width_px"] is not None
+                and render_checkpoint["render_height_px"] is not None
+                and store.verify(str(render_checkpoint["render_sha256"]))
+            )
+        except OSError as error:
+            raise _stage_error("storage", page_number, error) from error
+    if not render_is_reusable:
+        try:
+            (render,) = render_standard_pages(
+                source,
+                toolchain=DockerRenderingToolchain(settings.render_image),
+                pages=(page,),
+            )
+        except Exception as error:
+            raise _stage_error("rendering", page_number, error) from error
+        try:
+            stored_render = store.put(render.data)
+        except Exception as error:
+            raise _stage_error("storage", page_number, error) from error
+        now = timestamp()
+        with transaction(settings) as connection:
+            _assert_job_lease(connection, settings, job)
+            _record_object(connection, stored_render, render.media_type, now)
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET render_sha256 = ?, render_media_type = ?, render_dpi = ?,
+                    render_width_px = ?, render_height_px = ?, render_key = ?
+                WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+                """,
+                (
+                    stored_render.sha256,
+                    render.media_type,
+                    render.dpi,
+                    render.width_px,
+                    render.height_px,
+                    render_key,
+                    version_id,
+                    page_number,
+                    job.job_id,
+                ),
+            )
+    _checkpoint(settings, job, "rendering", 1, 1)
+
+    _checkpoint(settings, job, "page_fingerprint", 0, 1)
+    fingerprint_key = _stage_key(
+        phase="page_fingerprint",
+        source_sha256=source_sha256,
+        version_id=version_id,
+        page=page,
+        tool_version=f"fingerprint:{FINGERPRINT_VERSION}",
+        dependency_key=conversion_key,
+    )
+    with connect(settings) as connection:
+        fingerprint_checkpoint = connection.execute(
+            """
+            SELECT fingerprint_key, fingerprint_version, fingerprint_sha256
+            FROM ingestion_page_results
+            WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+            """,
+            (version_id, page_number, job.job_id),
+        ).fetchone()
+    if not (
+        fingerprint_checkpoint is not None
+        and fingerprint_checkpoint["fingerprint_key"] == fingerprint_key
+        and fingerprint_checkpoint["fingerprint_version"] is not None
+        and fingerprint_checkpoint["fingerprint_sha256"] is not None
+    ):
+        try:
+            fingerprint = fingerprint_page(content)
+        except Exception as error:
+            raise _stage_error("page_fingerprint", page_number, error) from error
+        with transaction(settings) as connection:
+            _assert_job_lease(connection, settings, job)
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET fingerprint_version = ?, fingerprint_sha256 = ?, fingerprint_key = ?
+                WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+                """,
+                (
+                    fingerprint.version,
+                    fingerprint.sha256,
+                    fingerprint_key,
+                    version_id,
+                    page_number,
+                    job.job_id,
+                ),
+            )
+    _checkpoint(settings, job, "page_fingerprint", 1, 1)
+    _activate_hidden_page(settings, job, document_id, version_id, page_number)
+
+
+def _activate_hidden_page(
+    settings: Settings,
+    job: ClaimedJob,
+    document_id: str,
+    version_id: str,
+    page_number: int,
+) -> None:
+    now = timestamp()
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        row = connection.execute(
+            """
+            SELECT results.*, versions.status AS version_status,
+                   documents.current_version_id, documents.deleted_at
+            FROM ingestion_page_results AS results
+            JOIN document_versions AS versions ON versions.version_id = results.version_id
+            JOIN documents ON documents.document_id = versions.document_id
+            WHERE results.version_id = ? AND results.page_number = ?
+              AND results.enable_job_id = ?
+            """,
+            (version_id, page_number, job.job_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("隐藏页启用任务不再对应源页登记")
+        if (
+            row["version_status"] != "ready"
+            or row["current_version_id"] != version_id
+            or row["deleted_at"] is not None
+        ):
+            raise RuntimeError("隐藏页所属版本不再可策展")
+        required = (
+            "source_content_json",
+            "fingerprint_version",
+            "fingerprint_sha256",
+            "render_sha256",
+            "render_media_type",
+            "render_dpi",
+            "render_width_px",
+            "render_height_px",
+        )
+        if any(row[field] is None for field in required):
+            raise RuntimeError("隐藏页处理结果不完整")
+        existing = connection.execute(
+            "SELECT page_id FROM page_versions WHERE version_id = ? AND page_number = ?",
+            (version_id, page_number),
+        ).fetchone()
+        if existing is None:
+            page_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO pages (page_id, document_id, chunk_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (page_id, document_id, uuid.uuid4().hex, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO page_versions (
+                    page_version_id, page_id, document_id, version_id, page_number,
+                    fingerprint_version, fingerprint_sha256, source_content_json,
+                    render_sha256, render_media_type, render_dpi, render_width_px,
+                    render_height_px, review_status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    page_id,
+                    document_id,
+                    version_id,
+                    page_number,
+                    row["fingerprint_version"],
+                    row["fingerprint_sha256"],
+                    row["source_content_json"],
+                    row["render_sha256"],
+                    row["render_media_type"],
+                    row["render_dpi"],
+                    row["render_width_px"],
+                    row["render_height_px"],
+                    now,
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE ingestion_page_results SET enabled = 1
+            WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+            """,
+            (version_id, page_number, job.job_id),
+        )
+        completed_at = timestamp()
+        completed = connection.execute(
+            """
+            UPDATE jobs
+            SET status = 'succeeded', lease_owner = NULL, lease_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = NULL,
+                checkpoint_json = ?, error_json = NULL, updated_at = ?
+            WHERE job_id = ? AND status = 'running'
+              AND lease_owner = ? AND lease_token = ? AND lease_expires_at > ?
+            """,
+            (
+                _json({"phase": "activation", "completed_pages": 1, "total_pages": 1}),
+                completed_at,
+                job.job_id,
+                settings.worker_id,
+                job.lease_token,
+                completed_at,
+            ),
+        )
+        if completed.rowcount != 1:
+            raise RuntimeError("worker 在隐藏页生效前失去任务租约")
+
+
+def fail_hidden_page_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:
+    now = timestamp()
+    structured = _structured_error(error, attempt=job.attempts)
+    retryable = isinstance(error, IngestionStageError) and error.retryable
+    will_retry = retryable and job.attempts < job.max_attempts
+    with transaction(settings) as connection:
+        if will_retry:
+            retry_at = (
+                datetime.now(UTC)
+                + timedelta(
+                    seconds=settings.job_retry_base_seconds * (2 ** max(job.attempts - 1, 0))
+                )
+            ).isoformat()
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued', lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, next_attempt_at = ?, error_json = ?, updated_at = ?
+                WHERE job_id = ? AND status = 'running'
+                  AND lease_owner = ? AND lease_token = ? AND lease_expires_at > ?
+                """,
+                (
+                    retry_at,
+                    _json(structured),
+                    now,
+                    job.job_id,
+                    settings.worker_id,
+                    job.lease_token,
+                    now,
+                ),
+            )
+            return
+        failed = connection.execute(
+            """
+            UPDATE jobs
+            SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = NULL,
+                error_json = ?, updated_at = ?
+            WHERE job_id = ? AND status = 'running'
+              AND lease_owner = ? AND lease_token = ? AND lease_expires_at > ?
+            """,
+            (
+                _json(structured),
+                now,
+                job.job_id,
+                settings.worker_id,
+                job.lease_token,
+                now,
+            ),
+        )
+        if failed.rowcount == 1:
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET enabled = 0, source_content_json = NULL, conversion_key = NULL,
+                    fingerprint_version = NULL, fingerprint_sha256 = NULL,
+                    fingerprint_key = NULL, render_sha256 = NULL,
+                    render_media_type = NULL, render_dpi = NULL,
+                    render_width_px = NULL, render_height_px = NULL, render_key = NULL
+                WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+                """,
+                (str(job.payload["version_id"]), int(job.payload["page_number"]), job.job_id),
+            )
+
+
 def fail_ingestion_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:
     now = timestamp()
     structured = _structured_error(error, attempt=job.attempts)
@@ -1100,14 +1667,18 @@ def read_job(settings: Settings, job_id: str) -> dict[str, Any] | None:
     with connect(settings) as connection:
         row = connection.execute(
             """
-            SELECT job_id, kind, status, attempts, checkpoint_json, error_json,
-                   next_attempt_at, version_id
+            SELECT job_id, kind, payload_json, status, attempts, checkpoint_json,
+                   error_json, next_attempt_at, version_id
             FROM jobs WHERE job_id = ?
             """,
             (job_id,),
         ).fetchone()
         page_rows = []
-        if row is not None and row["version_id"] is not None:
+        if (
+            row is not None
+            and row["kind"] == "document.ingest"
+            and row["version_id"] is not None
+        ):
             page_rows = connection.execute(
                 """
                 SELECT page_number, enabled, manifest_key, conversion_key,
@@ -1122,7 +1693,24 @@ def read_job(settings: Settings, job_id: str) -> dict[str, Any] | None:
         return None
     progress = json.loads(row["checkpoint_json"]) if row["checkpoint_json"] else None
     if progress is not None:
-        progress["pages"] = [_page_progress(page) for page in page_rows]
+        if row["kind"] == "page.enable":
+            payload = json.loads(row["payload_json"])
+            status = "in_progress"
+            if row["status"] == "queued":
+                status = "waiting_retry" if row["next_attempt_at"] is not None else "pending"
+            elif row["status"] == "succeeded":
+                status = "completed"
+            elif row["status"] in {"failed", "cancelled"}:
+                status = "failed"
+            progress["pages"] = [
+                {
+                    "page_number": int(payload["page_number"]),
+                    "phase": str(progress["phase"]),
+                    "status": status,
+                }
+            ]
+        else:
+            progress["pages"] = [_page_progress(page) for page in page_rows]
     return {
         "job_id": str(row["job_id"]),
         "kind": str(row["kind"]),

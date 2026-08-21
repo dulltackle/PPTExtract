@@ -139,7 +139,7 @@ def finish_job(settings: Settings, job: ClaimedJob, *, succeeded: bool) -> None:
 def _fail_exhausted_expired_jobs(connection: sqlite3.Connection, *, now: str) -> None:
     rows = connection.execute(
         """
-        SELECT job_id, kind, version_id, attempts, checkpoint_json
+        SELECT job_id, kind, payload_json, version_id, attempts, checkpoint_json
         FROM jobs
         WHERE status = 'running' AND attempts >= max_attempts
           AND lease_expires_at <= ?
@@ -182,4 +182,18 @@ def _fail_exhausted_expired_jobs(connection: sqlite3.Connection, *, now: str) ->
                 WHERE version_id = ? AND status = 'processing'
                 """,
                 (row["version_id"],),
+            )
+        elif failed.rowcount == 1 and row["kind"] == "page.enable":
+            payload = json.loads(row["payload_json"])
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET enabled = 0, source_content_json = NULL, conversion_key = NULL,
+                    fingerprint_version = NULL, fingerprint_sha256 = NULL,
+                    fingerprint_key = NULL, render_sha256 = NULL,
+                    render_media_type = NULL, render_dpi = NULL,
+                    render_width_px = NULL, render_height_px = NULL, render_key = NULL
+                WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
+                """,
+                (payload["version_id"], int(payload["page_number"]), row["job_id"]),
             )

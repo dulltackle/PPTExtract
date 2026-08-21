@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.support.synthetic_pptx import build_plain_text_presentation
+from tests.support.synthetic_pptx import build_minimal_presentation, build_plain_text_presentation
 
 
 def available_port() -> int:
@@ -246,3 +246,51 @@ def test_first_plain_text_upload_becomes_a_curatable_ready_page(
         assert rendered_page.status_code == 200
         assert rendered_page.headers["content-type"] == "image/png"
         assert rendered_page.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_synthetic_hidden_page_can_be_enabled_in_a_real_browser(
+    running_system: tuple[str, Path],
+) -> None:
+    base_url, _data_root = running_system
+    project_root = Path(__file__).resolve().parents[1]
+    with httpx.Client(trust_env=False, timeout=10) as client:
+        accepted = client.post(
+            f"{base_url}/api/v1/documents",
+            headers={
+                "X-Actor-ID": "blackbox-operator",
+                "Idempotency-Key": "browser-hidden-page-fixture",
+            },
+            files={
+                "file": (
+                    "public-hidden-page.pptx",
+                    build_minimal_presentation(),
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+            },
+        )
+        assert accepted.status_code == 202
+        identity = accepted.json()
+        deadline = time.monotonic() + 45
+        task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
+            time.sleep(0.1)
+            task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        assert task["status"] == "succeeded"
+
+    browser_result = subprocess.run(
+        ["node", "tests/hidden-page-blackbox.mjs", base_url],
+        cwd=project_root / "web",
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert json.loads(browser_result.stdout) == {
+        "ok": True,
+        "checks": [
+            "pending-excludes-hidden",
+            "viewport-1440x1024",
+            "viewport-1280x900",
+            "persistent-enable-to-pending",
+        ],
+    }
