@@ -4,7 +4,9 @@ import hashlib
 import os
 import uuid
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +14,10 @@ class StoredObject:
     sha256: str
     size_bytes: int
     path: Path
+
+
+class ObjectTooLargeError(ValueError):
+    """输入流超过调用方声明的硬字节上限。"""
 
 
 class LocalObjectStore:
@@ -28,21 +34,44 @@ class LocalObjectStore:
         return self.root / sha256[:2] / sha256
 
     def put(self, payload: bytes) -> StoredObject:
-        sha256 = hashlib.sha256(payload).hexdigest()
-        destination = self.path_for(sha256)
-        if destination.exists():
-            if not self.verify(sha256):
-                raise OSError(f"内容寻址对象校验失败：{sha256}")
-            return StoredObject(sha256=sha256, size_bytes=len(payload), path=destination)
+        return self.put_stream(BytesIO(payload))
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    def put_stream(
+        self, source: BinaryIO, *, max_bytes: int | None = None
+    ) -> StoredObject:
+        """流式写入、同步并复验源对象，最后发布到不可变内容键。"""
         staging_path = self.staging_root / f"{uuid.uuid4().hex}.partial"
+        digest = hashlib.sha256()
+        size_bytes = 0
         try:
             with staging_path.open("xb") as handle:
-                handle.write(payload)
+                while block := source.read(1024 * 1024):
+                    digest.update(block)
+                    size_bytes += len(block)
+                    if max_bytes is not None and size_bytes > max_bytes:
+                        raise ObjectTooLargeError("输入流超过允许的字节上限")
+                    handle.write(block)
                 handle.flush()
                 os.fsync(handle.fileno())
-            if hashlib.sha256(staging_path.read_bytes()).hexdigest() != sha256:
+            sha256 = digest.hexdigest()
+            destination = self.path_for(sha256)
+            if destination.exists():
+                if not self.verify(sha256):
+                    raise OSError(f"内容寻址对象校验失败：{sha256}")
+                return StoredObject(
+                    sha256=sha256, size_bytes=size_bytes, path=destination
+                )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            root_fd = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(root_fd)
+            finally:
+                os.close(root_fd)
+            persisted_digest = hashlib.sha256()
+            with staging_path.open("rb") as persisted:
+                for block in iter(lambda: persisted.read(1024 * 1024), b""):
+                    persisted_digest.update(block)
+            if persisted_digest.hexdigest() != sha256:
                 raise OSError("对象写入后的完整性校验失败")
             os.replace(staging_path, destination)
             directory_fd = os.open(destination.parent, os.O_RDONLY)
@@ -53,7 +82,7 @@ class LocalObjectStore:
         finally:
             staging_path.unlink(missing_ok=True)
 
-        return StoredObject(sha256=sha256, size_bytes=len(payload), path=destination)
+        return StoredObject(sha256=sha256, size_bytes=size_bytes, path=destination)
 
     def check_writable(self) -> None:
         """以真实落盘、同步和清理验证 staging 目录仍可写。"""

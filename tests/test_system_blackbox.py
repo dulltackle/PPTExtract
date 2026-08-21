@@ -15,6 +15,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.support.synthetic_pptx import build_plain_text_presentation
+
 
 def available_port() -> int:
     with socket.socket() as listener:
@@ -44,6 +46,7 @@ def running_system() -> Iterator[tuple[str, Path]]:
             "PPTEXTRACT_ACTOR_ID": "blackbox-operator",
             "PPTEXTRACT_WORKER_ID": "blackbox-worker",
             "PPTEXTRACT_WEB_DIST": str(project_root / "web" / "dist"),
+            "PPTEXTRACT_RENDER_IMAGE": "pptextract/document-toolchain:1",
         }
     )
     worker = subprocess.Popen(
@@ -146,3 +149,92 @@ def test_external_system_spine_and_browser_shell(
         "ok": True,
         "checks": ["viewport-1440", "viewport-1280", "operator-safe-error"],
     }
+
+
+def test_first_plain_text_upload_becomes_a_curatable_ready_page(
+    running_system: tuple[str, Path],
+) -> None:
+    base_url, _data_root = running_system
+    headers = {
+        "X-Actor-ID": "blackbox-operator",
+        "Idempotency-Key": "first-public-presentation",
+    }
+
+    with httpx.Client(trust_env=False, timeout=10) as client:
+        accepted = client.post(
+            f"{base_url}/api/v1/documents",
+            headers=headers,
+            files={
+                "file": (
+                    "public-first-upload.pptx",
+                    build_plain_text_presentation(),
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+            },
+        )
+
+        assert accepted.status_code == 202
+        identity = accepted.json()
+        assert identity["status"] == "accepted"
+        assert all(identity[key] for key in ("document_id", "version_id", "job_id"))
+
+        deadline = time.monotonic() + 45
+        task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
+            time.sleep(0.1)
+            task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+
+        assert task == {
+            "job_id": identity["job_id"],
+            "kind": "document.ingest",
+            "status": "succeeded",
+            "attempts": 1,
+            "progress": {
+                "phase": "activation",
+                "completed_pages": 1,
+                "total_pages": 1,
+            },
+            "error": None,
+        }
+
+        document = client.get(f"{base_url}/api/v1/documents/{identity['document_id']}")
+        assert document.status_code == 200
+        assert document.json()["current_version_id"] == identity["version_id"]
+
+        version = client.get(
+            f"{base_url}/api/v1/documents/{identity['document_id']}"
+            f"/versions/{identity['version_id']}"
+        )
+        assert version.status_code == 200
+        assert version.json()["status"] == "ready"
+        assert version.json()["source"]["filename"] == "public-first-upload.pptx"
+        assert len(version.json()["source"]["sha256"]) == 64
+
+        pending = client.get(
+            f"{base_url}/api/v1/curation/pages", params={"review_status": "pending"}
+        )
+        assert pending.status_code == 200
+        assert len(pending.json()["pages"]) == 1
+        pending_page = pending.json()["pages"][0]
+        assert pending_page["document_id"] == identity["document_id"]
+        assert pending_page["version_id"] == identity["version_id"]
+        assert pending_page["page_number"] == 1
+        assert pending_page["review_status"] == "pending"
+        assert pending_page["page_id"] != pending_page["chunk_id"]
+
+        detail = client.get(f"{base_url}/api/v1/pages/{pending_page['page_id']}")
+        assert detail.status_code == 200
+        assert detail.json()["source_content"]["titles"] == ["公开首次摄取"]
+        assert detail.json()["source_content"]["body"] == [
+            "这是可公开验证的单页纯文字内容。"
+        ]
+        render = detail.json()["standard_render"]
+        assert render["media_type"] == "image/png"
+        assert render["dpi"] == 144
+        assert render["width_px"] == 1921
+        assert render["height_px"] == 1080
+
+        rendered_page = client.get(f"{base_url}{render['url']}")
+        assert rendered_page.status_code == 200
+        assert rendered_page.headers["content-type"] == "image/png"
+        assert rendered_page.content.startswith(b"\x89PNG\r\n\x1a\n")

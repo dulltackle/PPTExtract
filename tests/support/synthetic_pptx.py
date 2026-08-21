@@ -30,6 +30,21 @@ def build_minimal_presentation() -> bytes:
     return stream.getvalue()
 
 
+def build_plain_text_presentation() -> bytes:
+    """构造 Issue #20 首次摄取快乐路径使用的单页纯文字 PPTX。"""
+    presentation = Presentation()
+    presentation.slide_width = Inches(13.333333)
+    presentation.slide_height = Inches(7.5)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "公开首次摄取"
+    body = slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(8), Inches(1))
+    body.text = "这是可公开验证的单页纯文字内容。"
+
+    stream = BytesIO()
+    presentation.save(stream)
+    return stream.getvalue()
+
+
 def build_conversion_presentation() -> tuple[bytes, bytes]:
     """构造带重复图片引用的公开转换契约夹具。"""
     presentation = Presentation()

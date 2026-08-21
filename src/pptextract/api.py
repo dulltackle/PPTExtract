@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException
@@ -12,6 +13,11 @@ from starlette.exceptions import HTTPException
 from pptextract.auth import ActorProvider, HeaderActorProvider
 from pptextract.config import Settings
 from pptextract.db import connect, database_path_is_local, initialize_database
+from pptextract.ingest_workflow import (
+    IngestionRequestError,
+    accept_first_upload,
+    read_job,
+)
 from pptextract.object_store import LocalObjectStore
 from pptextract.worker import worker_is_fresh
 
@@ -77,6 +83,171 @@ def create_app(
                 {"id": "curatable", "label": "可策展", "documents": []},
             ],
         }
+
+    @app.post("/api/v1/documents", status_code=202)
+    async def create_document(
+        request: Request, file: Annotated[UploadFile, File()]
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            accepted = accept_first_upload(
+                resolved,
+                actor_id=actor.actor_id,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                filename=file.filename or "",
+                media_type=file.content_type or "",
+                stream=file.file,
+            )
+        except IngestionRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        finally:
+            await file.close()
+        return JSONResponse(
+            status_code=202,
+            content={
+                "document_id": accepted.document_id,
+                "version_id": accepted.version_id,
+                "job_id": accepted.job_id,
+                "status": "accepted",
+            },
+        )
+
+    @app.get("/api/v1/jobs/{job_id}")
+    async def get_job(job_id: str) -> JSONResponse:
+        job = read_job(resolved, job_id)
+        if job is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        return JSONResponse(content=job)
+
+    @app.get("/api/v1/documents/{document_id}")
+    async def get_document(document_id: str) -> JSONResponse:
+        with connect(resolved) as connection:
+            row = connection.execute(
+                """
+                SELECT document_id, current_version_id, created_at
+                FROM documents WHERE document_id = ?
+                """,
+                (document_id,),
+            ).fetchone()
+        if row is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        return JSONResponse(content=dict(row))
+
+    @app.get("/api/v1/documents/{document_id}/versions/{version_id}")
+    async def get_document_version(document_id: str, version_id: str) -> JSONResponse:
+        with connect(resolved) as connection:
+            row = connection.execute(
+                """
+                SELECT version_id, document_id, status, source_sha256,
+                       source_filename, source_size_bytes, created_at, ready_at
+                FROM document_versions
+                WHERE document_id = ? AND version_id = ?
+                """,
+                (document_id, version_id),
+            ).fetchone()
+        if row is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        return JSONResponse(
+            content={
+                "version_id": row["version_id"],
+                "document_id": row["document_id"],
+                "status": row["status"],
+                "source": {
+                    "sha256": row["source_sha256"],
+                    "filename": row["source_filename"],
+                    "size_bytes": row["source_size_bytes"],
+                },
+                "created_at": row["created_at"],
+                "ready_at": row["ready_at"],
+            }
+        )
+
+    @app.get("/api/v1/curation/pages")
+    async def list_curation_pages(review_status: str = "pending") -> JSONResponse:
+        if review_status not in {"pending", "approved", "excluded"}:
+            return error_response(422, "invalid_request", "审核状态无效。")
+        with connect(resolved) as connection:
+            rows = connection.execute(
+                """
+                SELECT pv.page_id, p.chunk_id, pv.document_id, pv.version_id,
+                       pv.page_number, pv.review_status
+                FROM page_versions AS pv
+                JOIN pages AS p ON p.page_id = pv.page_id
+                JOIN documents AS d
+                  ON d.document_id = pv.document_id
+                 AND d.current_version_id = pv.version_id
+                WHERE pv.review_status = ?
+                ORDER BY pv.document_id, pv.page_number, pv.page_id
+                """,
+                (review_status,),
+            ).fetchall()
+        return JSONResponse(content={"pages": [dict(row) for row in rows]})
+
+    @app.get("/api/v1/pages/{page_id}")
+    async def get_page(page_id: str) -> JSONResponse:
+        with connect(resolved) as connection:
+            row = connection.execute(
+                """
+                SELECT pv.page_id, p.chunk_id, pv.document_id, pv.version_id,
+                       pv.page_number, pv.review_status, pv.fingerprint_version,
+                       pv.fingerprint_sha256, pv.source_content_json,
+                       pv.render_sha256, pv.render_media_type, pv.render_dpi,
+                       pv.render_width_px, pv.render_height_px
+                FROM page_versions AS pv
+                JOIN pages AS p ON p.page_id = pv.page_id
+                JOIN documents AS d
+                  ON d.document_id = pv.document_id
+                 AND d.current_version_id = pv.version_id
+                WHERE pv.page_id = ?
+                """,
+                (page_id,),
+            ).fetchone()
+        if row is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        return JSONResponse(
+            content={
+                "page_id": row["page_id"],
+                "chunk_id": row["chunk_id"],
+                "document_id": row["document_id"],
+                "version_id": row["version_id"],
+                "page_number": row["page_number"],
+                "review_status": row["review_status"],
+                "fingerprint": {
+                    "version": row["fingerprint_version"],
+                    "sha256": row["fingerprint_sha256"],
+                },
+                "source_content": json.loads(row["source_content_json"]),
+                "standard_render": {
+                    "sha256": row["render_sha256"],
+                    "media_type": row["render_media_type"],
+                    "dpi": row["render_dpi"],
+                    "width_px": row["render_width_px"],
+                    "height_px": row["render_height_px"],
+                    "url": f"/api/v1/pages/{page_id}/render",
+                },
+            }
+        )
+
+    @app.get("/api/v1/pages/{page_id}/render", response_model=None)
+    async def get_page_render(page_id: str) -> FileResponse | JSONResponse:
+        with connect(resolved) as connection:
+            row = connection.execute(
+                """
+                SELECT pv.render_sha256, pv.render_media_type
+                FROM page_versions AS pv
+                JOIN documents AS d
+                  ON d.document_id = pv.document_id
+                 AND d.current_version_id = pv.version_id
+                WHERE pv.page_id = ?
+                """,
+                (page_id,),
+            ).fetchone()
+        if row is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        path = LocalObjectStore(resolved.object_store_path).path_for(row["render_sha256"])
+        if not path.is_file():
+            return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")
+        return FileResponse(path, media_type=row["render_media_type"])
 
     @app.get("/api/v1/health")
     async def health() -> JSONResponse:

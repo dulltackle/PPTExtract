@@ -9,9 +9,15 @@ from typing import Any
 from pptextract.config import Settings
 from pptextract.db import transaction
 
+JOB_LEASE_DURATION = timedelta(minutes=5)
+
 
 def timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def lease_expiration(*, at: datetime | None = None) -> str:
+    return ((at or datetime.now(UTC)) + JOB_LEASE_DURATION).isoformat()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +59,7 @@ def enqueue_job(
 
 def claim_next_job(settings: Settings) -> ClaimedJob | None:
     now = datetime.now(UTC)
-    lease_expires_at = (now + timedelta(seconds=30)).isoformat()
+    lease_expires_at = lease_expiration(at=now)
     with transaction(settings) as connection:
         row = connection.execute(
             """

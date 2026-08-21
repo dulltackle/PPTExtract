@@ -1,7 +1,10 @@
 import hashlib
+from io import BytesIO
 from pathlib import Path
 
-from pptextract.object_store import LocalObjectStore
+import pytest
+
+from pptextract.object_store import LocalObjectStore, ObjectTooLargeError
 
 
 def test_binary_is_published_by_sha256_with_integrity_check(tmp_path: Path) -> None:
@@ -35,3 +38,13 @@ def test_writable_probe_is_synced_and_removed(tmp_path: Path) -> None:
     store.check_writable()
 
     assert list(store.staging_root.iterdir()) == []
+
+
+def test_oversized_stream_is_not_published(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "objects")
+
+    with pytest.raises(ObjectTooLargeError):
+        store.put_stream(BytesIO(b"12345"), max_bytes=4)
+
+    assert list(store.staging_root.iterdir()) == []
+    assert [path for path in store.root.rglob("*") if path.is_file()] == []

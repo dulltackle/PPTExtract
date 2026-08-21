@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -62,8 +62,93 @@ def initialize_database(settings: Settings) -> None:
                 updated_at TEXT NOT NULL,
                 UNIQUE (actor_id, idempotency_key)
             );
+
+            CREATE TABLE IF NOT EXISTS stored_objects (
+                sha256 TEXT PRIMARY KEY,
+                size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                media_type TEXT NOT NULL,
+                verified_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS documents (
+                document_id TEXT PRIMARY KEY,
+                current_version_id TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS document_versions (
+                version_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(document_id),
+                source_sha256 TEXT NOT NULL REFERENCES stored_objects(sha256),
+                source_filename TEXT NOT NULL,
+                source_size_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL
+                    CHECK (status IN ('processing', 'ready', 'failed')),
+                created_at TEXT NOT NULL,
+                ready_at TEXT,
+                UNIQUE (document_id, version_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ingestion_page_results (
+                version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                page_number INTEGER NOT NULL CHECK (page_number > 0),
+                source_slide_id INTEGER NOT NULL,
+                relationship_id TEXT NOT NULL,
+                source_part TEXT NOT NULL,
+                hidden INTEGER NOT NULL CHECK (hidden IN (0, 1)),
+                enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                source_content_json TEXT,
+                fingerprint_version INTEGER,
+                fingerprint_sha256 TEXT,
+                render_sha256 TEXT REFERENCES stored_objects(sha256),
+                render_media_type TEXT,
+                render_dpi INTEGER,
+                render_width_px INTEGER,
+                render_height_px INTEGER,
+                PRIMARY KEY (version_id, page_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS pages (
+                page_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(document_id),
+                chunk_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                UNIQUE (document_id, page_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS page_versions (
+                page_version_id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL REFERENCES pages(page_id),
+                document_id TEXT NOT NULL,
+                version_id TEXT NOT NULL,
+                page_number INTEGER NOT NULL CHECK (page_number > 0),
+                fingerprint_version INTEGER NOT NULL,
+                fingerprint_sha256 TEXT NOT NULL,
+                source_content_json TEXT NOT NULL,
+                render_sha256 TEXT NOT NULL REFERENCES stored_objects(sha256),
+                render_media_type TEXT NOT NULL,
+                render_dpi INTEGER NOT NULL,
+                render_width_px INTEGER NOT NULL,
+                render_height_px INTEGER NOT NULL,
+                review_status TEXT NOT NULL
+                    CHECK (review_status IN ('pending', 'approved', 'excluded')),
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (document_id, page_id) REFERENCES pages(document_id, page_id),
+                FOREIGN KEY (document_id, version_id)
+                    REFERENCES document_versions(document_id, version_id),
+                UNIQUE (version_id, page_number),
+                UNIQUE (version_id, page_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS page_versions_review_queue
+                ON page_versions(review_status, document_id, page_number);
             """
         )
+        job_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)")
+        }
+        if "error_json" not in job_columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN error_json TEXT")
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 

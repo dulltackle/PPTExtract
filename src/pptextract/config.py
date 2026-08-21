@@ -16,6 +16,7 @@ class Settings:
     web_dist_path: Path
     default_actor_id: str
     worker_id: str
+    render_image: str = "pptextract/document-toolchain:1"
     sqlite_busy_timeout_ms: int = 5_000
     allow_temporary_storage: bool = False
 
@@ -35,6 +36,9 @@ class Settings:
             ).resolve(),
             default_actor_id=os.environ.get("PPTEXTRACT_ACTOR_ID", "local-operator"),
             worker_id=os.environ.get("PPTEXTRACT_WORKER_ID", "worker-1"),
+            render_image=os.environ.get(
+                "PPTEXTRACT_RENDER_IMAGE", "pptextract/document-toolchain:1"
+            ),
         )
 
     @classmethod

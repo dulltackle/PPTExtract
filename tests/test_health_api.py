@@ -27,7 +27,7 @@ def test_sqlite_runtime_pragmas_are_enabled(client: TestClient, settings: Settin
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_health_reports_api_database_object_store_and_fresh_worker(
