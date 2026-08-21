@@ -24,7 +24,7 @@ def test_worker_completes_persistent_noop_job(tmp_path: Path) -> None:
             "SELECT status, attempts, actor_id FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
     assert dict(row) == {
-        "status": "completed",
+        "status": "succeeded",
         "attempts": 1,
         "actor_id": "operator-zhang",
     }

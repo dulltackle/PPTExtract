@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -45,3 +46,10 @@ def test_storage_location_check_rejects_network_filesystem(
     monkeypatch.setattr(db, "_filesystem_type", lambda _path: "nfs4")
 
     assert db.database_path_is_local(tmp_path) is False
+
+
+def test_retry_delay_must_be_finite(tmp_path: Path) -> None:
+    settings = replace(Settings.for_test(tmp_path), job_retry_base_seconds=float("nan"))
+
+    with pytest.raises(ValueError, match="任务重试基础延迟"):
+        settings.validate()

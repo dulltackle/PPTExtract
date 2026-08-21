@@ -48,7 +48,7 @@ def set_version_state(
     now = timestamp()
     with transaction(settings) as connection:
         connection.execute(
-            "UPDATE jobs SET status = 'completed', updated_at = ? WHERE job_id = ?",
+            "UPDATE jobs SET status = 'succeeded', updated_at = ? WHERE job_id = ?",
             (now, identity["job_id"]),
         )
         connection.execute(

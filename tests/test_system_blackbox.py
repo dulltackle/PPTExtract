@@ -189,10 +189,18 @@ def test_first_plain_text_upload_becomes_a_curatable_ready_page(
             "kind": "document.ingest",
             "status": "succeeded",
             "attempts": 1,
+            "next_retry_at": None,
             "progress": {
                 "phase": "activation",
                 "completed_pages": 1,
                 "total_pages": 1,
+                "pages": [
+                    {
+                        "page_number": 1,
+                        "phase": "page_fingerprint",
+                        "status": "completed",
+                    }
+                ],
             },
             "error": None,
         }

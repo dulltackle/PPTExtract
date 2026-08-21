@@ -55,14 +55,14 @@ def run_once(settings: Settings) -> bool:
     if job is None:
         return False
     if job.kind == "system.noop":
-        finish_job(settings, job.job_id, succeeded=True)
+        finish_job(settings, job, succeeded=True)
     elif job.kind == "document.ingest":
         try:
             process_ingestion_job(settings, job)
         except Exception as error:
             fail_ingestion_job(settings, job, error)
     else:
-        finish_job(settings, job.job_id, succeeded=False)
+        finish_job(settings, job, succeeded=False)
     return True
 
 

@@ -128,9 +128,24 @@ def test_v2_database_migrates_version_states_and_active_job_targets(tmp_path: Pa
         }
         assert dict(
             connection.execute(
-                "SELECT document_id, version_id FROM jobs WHERE job_id = 'job'"
+                """
+                SELECT document_id, version_id, status, max_attempts
+                FROM jobs WHERE job_id = 'job'
+                """
             ).fetchone()
-        ) == {"document_id": "document", "version_id": "version"}
+        ) == {
+            "document_id": "document",
+            "version_id": "version",
+            "status": "queued",
+            "max_attempts": 3,
+        }
+        checkpoint_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(ingestion_page_results)")
+        }
+        assert {"manifest_key", "conversion_key", "render_key", "fingerprint_key"} <= (
+            checkpoint_columns
+        )
         assert connection.execute(
             "SELECT source_part FROM ingestion_page_results WHERE version_id = 'version'"
         ).fetchone()[0] == "ppt/slides/slide1.xml"
@@ -147,8 +162,121 @@ def test_v2_database_migrates_version_states_and_active_job_targets(tmp_path: Pa
                     job_id, kind, payload_json, status, actor_id, idempotency_key,
                     document_id, version_id, created_at, updated_at
                 ) VALUES (
-                    'duplicate', 'document.ingest', '{}', 'pending', 'actor', 'other-key',
+                    'duplicate', 'document.ingest', '{}', 'queued', 'actor', 'other-key',
                     'document', 'other-version', 'now', 'now'
                 )
                 """
             )
+
+
+def test_v3_job_table_migrates_states_index_and_idempotency_foreign_key(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.for_test(tmp_path)
+    initialize_database(settings)
+    payload = json.dumps(
+        {
+            "document_id": "document",
+            "job_id": "job",
+            "source_sha256": "b" * 64,
+            "version_id": "version",
+        }
+    )
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.executescript(
+            """
+            INSERT INTO stored_objects VALUES (
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                1, 'application/test', 'now'
+            );
+            INSERT INTO documents VALUES ('document', NULL, 'now');
+            INSERT INTO document_versions VALUES (
+                'version', 'document',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                'source.pptx', 1, 'processing', 'now', NULL
+            );
+            DROP INDEX one_active_ingestion_job_per_document;
+            CREATE TABLE jobs_v3 (
+                job_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'running', 'completed', 'failed')
+                ),
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                document_id TEXT,
+                version_id TEXT,
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                checkpoint_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error_json TEXT,
+                UNIQUE (actor_id, idempotency_key)
+            );
+            DROP TABLE jobs;
+            ALTER TABLE jobs_v3 RENAME TO jobs;
+            CREATE UNIQUE INDEX one_active_ingestion_job_per_document
+            ON jobs(document_id)
+            WHERE kind = 'document.ingest' AND status IN ('pending', 'running');
+            PRAGMA user_version = 3;
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, kind, payload_json, status, actor_id, idempotency_key,
+                document_id, version_id, lease_owner, lease_expires_at,
+                attempts, checkpoint_json, created_at, updated_at
+            ) VALUES (
+                'job', 'document.ingest', ?, 'running', 'actor', 'key',
+                'document', 'version', 'worker', '2099-01-01T00:00:00+00:00',
+                1, '{"phase":"conversion"}', 'now', 'now'
+            )
+            """,
+            (payload,),
+        )
+        connection.execute(
+            """
+            INSERT INTO idempotency_records (
+                actor_id, command_scope, idempotency_key, request_fingerprint,
+                response_status, document_id, version_id, job_id, created_at
+            ) VALUES (
+                'actor', 'POST /api/v1/documents', 'request', 'fingerprint',
+                'accepted', 'document', 'version', 'job', 'now'
+            )
+            """
+        )
+
+    initialize_database(settings)
+
+    with connect(settings) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert dict(
+            connection.execute(
+                """
+                SELECT status, attempts, max_attempts, lease_owner, lease_token
+                FROM jobs WHERE job_id = 'job'
+                """
+            ).fetchone()
+        ) == {
+            "status": "running",
+            "attempts": 1,
+            "max_attempts": 3,
+            "lease_owner": "worker",
+            "lease_token": None,
+        }
+        assert connection.execute(
+            "SELECT job_id FROM idempotency_records WHERE job_id = 'job'"
+        ).fetchone()[0] == "job"
+        index_sql = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'index' AND name = 'one_active_ingestion_job_per_document'
+            """
+        ).fetchone()[0]
+        assert "requires_action" in index_sql

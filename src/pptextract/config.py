@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ class Settings:
     render_image: str = "pptextract/document-toolchain:1"
     max_source_upload_bytes: int = 128 * 1024 * 1024
     sqlite_busy_timeout_ms: int = 5_000
+    job_retry_base_seconds: float = 5.0
     allow_temporary_storage: bool = False
 
     @classmethod
@@ -43,6 +45,9 @@ class Settings:
             max_source_upload_bytes=int(
                 os.environ.get("PPTEXTRACT_MAX_SOURCE_UPLOAD_BYTES", 128 * 1024 * 1024)
             ),
+            job_retry_base_seconds=float(
+                os.environ.get("PPTEXTRACT_JOB_RETRY_BASE_SECONDS", "5")
+            ),
         )
 
     @classmethod
@@ -64,6 +69,12 @@ class Settings:
             raise ValueError("SQLite busy timeout 必须在 100–30000ms 之间")
         if self.max_source_upload_bytes <= 0:
             raise ValueError("PPTX 上传上限必须大于 0")
+        if (
+            not math.isfinite(self.job_retry_base_seconds)
+            or self.job_retry_base_seconds < 0
+            or self.job_retry_base_seconds > 3600
+        ):
+            raise ValueError("任务重试基础延迟必须在 0–3600 秒之间")
         if self.allow_temporary_storage:
             return
         temporary_root = Path(tempfile.gettempdir()).resolve()

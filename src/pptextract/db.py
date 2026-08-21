@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -50,14 +50,20 @@ def initialize_database(settings: Settings) -> None:
                 kind TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 status TEXT NOT NULL
-                    CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+                    CHECK (status IN (
+                        'queued', 'running', 'requires_action',
+                        'succeeded', 'failed', 'cancelled'
+                    )),
                 actor_id TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL,
                 document_id TEXT,
                 version_id TEXT,
                 lease_owner TEXT,
+                lease_token TEXT,
                 lease_expires_at TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+                next_attempt_at TEXT,
                 checkpoint_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -100,14 +106,18 @@ def initialize_database(settings: Settings) -> None:
                 source_part TEXT NOT NULL,
                 hidden INTEGER NOT NULL CHECK (hidden IN (0, 1)),
                 enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                manifest_key TEXT,
                 source_content_json TEXT,
+                conversion_key TEXT,
                 fingerprint_version INTEGER,
                 fingerprint_sha256 TEXT,
+                fingerprint_key TEXT,
                 render_sha256 TEXT REFERENCES stored_objects(sha256),
                 render_media_type TEXT,
                 render_dpi INTEGER,
                 render_width_px INTEGER,
                 render_height_px INTEGER,
+                render_key TEXT,
                 PRIMARY KEY (version_id, page_number)
             );
 
@@ -170,6 +180,24 @@ def initialize_database(settings: Settings) -> None:
             connection.execute("ALTER TABLE jobs ADD COLUMN document_id TEXT")
         if "version_id" not in job_columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN version_id TEXT")
+        if "lease_token" not in job_columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN lease_token TEXT")
+        if "max_attempts" not in job_columns:
+            connection.execute(
+                "ALTER TABLE jobs ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3"
+            )
+        if "next_attempt_at" not in job_columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN next_attempt_at TEXT")
+        _migrate_job_states(connection)
+        page_result_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(ingestion_page_results)")
+        }
+        for column in ("manifest_key", "conversion_key", "fingerprint_key", "render_key"):
+            if column not in page_result_columns:
+                connection.execute(
+                    f"ALTER TABLE ingestion_page_results ADD COLUMN {column} TEXT"
+                )
         for row in connection.execute(
             "SELECT job_id, payload_json FROM jobs WHERE kind = 'document.ingest'"
         ):
@@ -185,10 +213,86 @@ def initialize_database(settings: Settings) -> None:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_ingestion_job_per_document
             ON jobs(document_id)
-            WHERE kind = 'document.ingest' AND status IN ('pending', 'running')
+            WHERE kind = 'document.ingest'
+              AND status IN ('queued', 'running', 'requires_action')
             """
         )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _migrate_job_states(connection: sqlite3.Connection) -> None:
+    table_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+    ).fetchone()
+    if table_sql is None or "'pending'" not in str(table_sql["sql"]):
+        return
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP INDEX IF EXISTS one_active_ingestion_job_per_document")
+        connection.execute(
+            """
+            CREATE TABLE jobs_v4 (
+                job_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN (
+                    'queued', 'running', 'requires_action',
+                    'succeeded', 'failed', 'cancelled'
+                )),
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                document_id TEXT,
+                version_id TEXT,
+                lease_owner TEXT,
+                lease_token TEXT,
+                lease_expires_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+                next_attempt_at TEXT,
+                checkpoint_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error_json TEXT,
+                UNIQUE (actor_id, idempotency_key)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs_v4 (
+                job_id, kind, payload_json, status, actor_id, idempotency_key,
+                document_id, version_id, lease_owner, lease_token, lease_expires_at,
+                attempts, max_attempts, next_attempt_at, checkpoint_json,
+                created_at, updated_at, error_json
+            )
+            SELECT job_id, kind, payload_json,
+                   CASE status
+                       WHEN 'pending' THEN 'queued'
+                       WHEN 'completed' THEN 'succeeded'
+                       ELSE status
+                   END,
+                   actor_id, idempotency_key, document_id, version_id,
+                   lease_owner, lease_token, lease_expires_at, attempts,
+                   max_attempts, next_attempt_at, checkpoint_json,
+                   created_at, updated_at, error_json
+            FROM jobs
+            """
+        )
+        connection.execute("DROP TABLE jobs")
+        connection.execute("ALTER TABLE jobs_v4 RENAME TO jobs")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError("数据库 v4 迁移后外键校验失败")
 
 
 def _migrate_document_version_states(connection: sqlite3.Connection) -> None:
