@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -136,6 +136,8 @@ def initialize_database(settings: Settings) -> None:
                 document_id TEXT NOT NULL REFERENCES documents(document_id),
                 chunk_id TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_in_version_id TEXT REFERENCES document_versions(version_id),
                 UNIQUE (document_id, page_id)
             );
 
@@ -155,6 +157,17 @@ def initialize_database(settings: Settings) -> None:
                 render_height_px INTEGER NOT NULL,
                 review_status TEXT NOT NULL
                     CHECK (review_status IN ('pending', 'approved', 'excluded')),
+                current_snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
+                prefill_snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
+                inherited_from_page_version_id TEXT REFERENCES page_versions(page_version_id),
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                review_source_version_id TEXT REFERENCES document_versions(version_id),
+                exclusion_reason TEXT CHECK (exclusion_reason IS NULL OR exclusion_reason IN (
+                    'no_meaningful_content', 'duplicate', 'irrelevant',
+                    'unreadable', 'other'
+                )),
+                exclusion_note TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (document_id, page_id) REFERENCES pages(document_id, page_id),
                 FOREIGN KEY (document_id, version_id)
@@ -165,6 +178,52 @@ def initialize_database(settings: Settings) -> None:
 
             CREATE INDEX IF NOT EXISTS page_versions_review_queue
                 ON page_versions(review_status, document_id, page_number);
+
+            CREATE TABLE IF NOT EXISTS curation_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ('formal', 'prefill')),
+                source_snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
+                overview TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (page_version_id, snapshot_kind)
+            );
+
+            CREATE TABLE IF NOT EXISTS visual_objects (
+                visual_ref TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL REFERENCES pages(page_id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS curation_snapshot_visuals (
+                snapshot_id TEXT NOT NULL REFERENCES curation_snapshots(snapshot_id),
+                visual_ref TEXT NOT NULL REFERENCES visual_objects(visual_ref),
+                position INTEGER NOT NULL CHECK (position >= 0),
+                source_kind TEXT NOT NULL CHECK (source_kind IN ('source_image', 'capture')),
+                disposition TEXT NOT NULL CHECK (disposition IN ('included', 'ignored')),
+                summary TEXT,
+                visual_type TEXT,
+                bounds_json TEXT,
+                source_visual_ref TEXT REFERENCES visual_objects(visual_ref),
+                confirmed INTEGER NOT NULL CHECK (confirmed IN (0, 1)),
+                PRIMARY KEY (snapshot_id, visual_ref),
+                UNIQUE (snapshot_id, position)
+            );
+
+            CREATE TABLE IF NOT EXISTS page_review_events (
+                event_id TEXT PRIMARY KEY,
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN ('approved', 'excluded', 'inherited', 'prefilled')
+                ),
+                actor_id TEXT,
+                occurred_at TEXT NOT NULL,
+                source_version_id TEXT REFERENCES document_versions(version_id),
+                source_page_version_id TEXT REFERENCES page_versions(page_version_id),
+                snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
+                reason TEXT,
+                note TEXT
+            );
 
             CREATE TABLE IF NOT EXISTS idempotency_records (
                 actor_id TEXT NOT NULL,
@@ -258,6 +317,41 @@ def initialize_database(settings: Settings) -> None:
             if column not in version_columns:
                 connection.execute(
                     f"ALTER TABLE document_versions ADD COLUMN {column} TEXT"
+                )
+        page_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(pages)")
+        }
+        if "deleted_at" not in page_columns:
+            connection.execute("ALTER TABLE pages ADD COLUMN deleted_at TEXT")
+        if "deleted_in_version_id" not in page_columns:
+            connection.execute(
+                "ALTER TABLE pages ADD COLUMN deleted_in_version_id TEXT "
+                "REFERENCES document_versions(version_id)"
+            )
+        page_version_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(page_versions)")
+        }
+        page_version_additions = {
+            "current_snapshot_id": "TEXT REFERENCES curation_snapshots(snapshot_id)",
+            "prefill_snapshot_id": "TEXT REFERENCES curation_snapshots(snapshot_id)",
+            "inherited_from_page_version_id": (
+                "TEXT REFERENCES page_versions(page_version_id)"
+            ),
+            "reviewed_by": "TEXT",
+            "reviewed_at": "TEXT",
+            "review_source_version_id": "TEXT REFERENCES document_versions(version_id)",
+            "exclusion_reason": (
+                "TEXT CHECK (exclusion_reason IS NULL OR exclusion_reason IN ("
+                "'no_meaningful_content', 'duplicate', 'irrelevant', "
+                "'unreadable', 'other'))"
+            ),
+            "exclusion_note": "TEXT",
+        }
+        for column, declaration in page_version_additions.items():
+            if column not in page_version_columns:
+                connection.execute(
+                    f"ALTER TABLE page_versions ADD COLUMN {column} {declaration}"
                 )
         for row in connection.execute(
             "SELECT job_id, payload_json FROM jobs WHERE kind = 'document.ingest'"

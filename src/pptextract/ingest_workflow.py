@@ -1148,14 +1148,36 @@ def _activate_hidden_page(
             (version_id, page_number),
         ).fetchone()
         if existing is None:
-            page_id = uuid.uuid4().hex
-            connection.execute(
-                """
-                INSERT INTO pages (page_id, document_id, chunk_id, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (page_id, document_id, uuid.uuid4().hex, now),
-            )
+            identity = _match_page_identities(
+                connection,
+                document_id=document_id,
+                current_version_id=_previous_ready_version_id(
+                    connection,
+                    document_id=document_id,
+                    target_version_id=version_id,
+                ),
+                target_version_id=version_id,
+                incoming_rows=[row],
+            ).get(page_number)
+            page_id = uuid.uuid4().hex if identity is None else identity[0]
+            if identity is None:
+                connection.execute(
+                    """
+                    INSERT INTO pages (page_id, document_id, chunk_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (page_id, document_id, uuid.uuid4().hex, now),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE pages
+                    SET deleted_at = NULL, deleted_in_version_id = NULL
+                    WHERE page_id = ? AND document_id = ?
+                    """,
+                    (page_id, document_id),
+                )
+            page_version_id = uuid.uuid4().hex
             connection.execute(
                 """
                 INSERT INTO page_versions (
@@ -1166,7 +1188,7 @@ def _activate_hidden_page(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
-                    uuid.uuid4().hex,
+                    page_version_id,
                     page_id,
                     document_id,
                     version_id,
@@ -1181,6 +1203,14 @@ def _activate_hidden_page(
                     row["render_height_px"],
                     now,
                 ),
+            )
+            _materialize_review_inheritance(
+                connection,
+                page_version_id=page_version_id,
+                page_id=page_id,
+                fingerprint_version=int(row["fingerprint_version"]),
+                fingerprint_sha256=str(row["fingerprint_sha256"]),
+                now=now,
             )
         connection.execute(
             """
@@ -1361,6 +1391,14 @@ def _activate_first_version(
         ).fetchall()
         if len(rows) != enabled_pages:
             raise RuntimeError("启用页的处理检查点数量不完整")
+        identities = _match_page_identities(
+            connection,
+            document_id=document_id,
+            current_version_id=_current_version_id(connection, document_id),
+            target_version_id=version_id,
+            incoming_rows=rows,
+        )
+        active_page_ids: set[str] = set()
         for row in rows:
             required = (
                 "source_content_json",
@@ -1374,16 +1412,28 @@ def _activate_first_version(
             )
             if any(row[field] is None for field in required):
                 raise RuntimeError(f"第 {row['page_number']} 页处理结果不完整")
-            page_id = uuid.uuid4().hex
-            chunk_id = uuid.uuid4().hex
+            page_number = int(row["page_number"])
+            identity = identities.get(page_number)
+            page_id = uuid.uuid4().hex if identity is None else identity[0]
             page_version_id = uuid.uuid4().hex
-            connection.execute(
-                """
-                INSERT INTO pages (page_id, document_id, chunk_id, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (page_id, document_id, chunk_id, now),
-            )
+            if identity is None:
+                connection.execute(
+                    """
+                    INSERT INTO pages (page_id, document_id, chunk_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (page_id, document_id, uuid.uuid4().hex, now),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE pages
+                    SET deleted_at = NULL, deleted_in_version_id = NULL
+                    WHERE page_id = ? AND document_id = ?
+                    """,
+                    (page_id, document_id),
+                )
+            active_page_ids.add(page_id)
             connection.execute(
                 """
                 INSERT INTO page_versions (
@@ -1409,6 +1459,34 @@ def _activate_first_version(
                     row["render_height_px"],
                     now,
                 ),
+            )
+            _materialize_review_inheritance(
+                connection,
+                page_version_id=page_version_id,
+                page_id=page_id,
+                fingerprint_version=int(row["fingerprint_version"]),
+                fingerprint_sha256=str(row["fingerprint_sha256"]),
+                now=now,
+            )
+        if active_page_ids:
+            placeholders = ", ".join("?" for _ in active_page_ids)
+            connection.execute(
+                f"""
+                UPDATE pages
+                SET deleted_at = ?, deleted_in_version_id = ?
+                WHERE document_id = ? AND page_id NOT IN ({placeholders})
+                  AND deleted_at IS NULL
+                """,
+                (now, version_id, document_id, *sorted(active_page_ids)),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE pages
+                SET deleted_at = ?, deleted_in_version_id = ?
+                WHERE document_id = ? AND deleted_at IS NULL
+                """,
+                (now, version_id, document_id),
             )
         activated = connection.execute(
             """
@@ -1452,6 +1530,309 @@ def _activate_first_version(
         )
         if updated.rowcount != 1:
             raise RuntimeError("worker 在版本生效前失去任务租约")
+
+
+def _materialize_review_inheritance(
+    connection: Any,
+    *,
+    page_version_id: str,
+    page_id: str,
+    fingerprint_version: int,
+    fingerprint_sha256: str,
+    now: str,
+) -> None:
+    same_content = connection.execute(
+        """
+        SELECT pv.*
+        FROM page_versions AS pv
+        JOIN document_versions AS versions ON versions.version_id = pv.version_id
+        WHERE pv.page_id = ? AND pv.page_version_id <> ?
+          AND pv.fingerprint_version = ? AND pv.fingerprint_sha256 = ?
+          AND versions.status = 'ready'
+        ORDER BY versions.ready_at DESC, pv.created_at DESC, pv.page_version_id DESC
+        LIMIT 1
+        """,
+        (page_id, page_version_id, fingerprint_version, fingerprint_sha256),
+    ).fetchone()
+    if same_content is not None and same_content["review_status"] in {
+        "approved",
+        "excluded",
+    }:
+        snapshot_id = _clone_curation_snapshot(
+            connection,
+            page_id=page_id,
+            page_version_id=page_version_id,
+            source_snapshot_id=same_content["current_snapshot_id"],
+            snapshot_kind="formal",
+            preserve_visual_refs=True,
+            now=now,
+        )
+        review_source_version_id = (
+            same_content["review_source_version_id"] or same_content["version_id"]
+        )
+        connection.execute(
+            """
+            UPDATE page_versions
+            SET review_status = ?, current_snapshot_id = ?,
+                inherited_from_page_version_id = ?, reviewed_by = ?, reviewed_at = ?,
+                review_source_version_id = ?, exclusion_reason = ?, exclusion_note = ?
+            WHERE page_version_id = ?
+            """,
+            (
+                same_content["review_status"],
+                snapshot_id,
+                same_content["page_version_id"],
+                same_content["reviewed_by"],
+                same_content["reviewed_at"],
+                review_source_version_id,
+                same_content["exclusion_reason"],
+                same_content["exclusion_note"],
+                page_version_id,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO page_review_events (
+                event_id, page_version_id, event_type, actor_id, occurred_at,
+                source_version_id, source_page_version_id, snapshot_id, reason, note
+            ) VALUES (?, ?, 'inherited', NULL, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                page_version_id,
+                now,
+                same_content["version_id"],
+                same_content["page_version_id"],
+                snapshot_id,
+                same_content["exclusion_reason"],
+                same_content["exclusion_note"],
+            ),
+        )
+        return
+
+    previous = connection.execute(
+        """
+        SELECT pv.*
+        FROM page_versions AS pv
+        JOIN document_versions AS versions ON versions.version_id = pv.version_id
+        WHERE pv.page_id = ? AND pv.page_version_id <> ?
+          AND pv.current_snapshot_id IS NOT NULL AND versions.status = 'ready'
+        ORDER BY versions.ready_at DESC, pv.created_at DESC, pv.page_version_id DESC
+        LIMIT 1
+        """,
+        (page_id, page_version_id),
+    ).fetchone()
+    if previous is None:
+        return
+    snapshot_id = _clone_curation_snapshot(
+        connection,
+        page_id=page_id,
+        page_version_id=page_version_id,
+        source_snapshot_id=previous["current_snapshot_id"],
+        snapshot_kind="prefill",
+        preserve_visual_refs=False,
+        now=now,
+    )
+    connection.execute(
+        "UPDATE page_versions SET prefill_snapshot_id = ? WHERE page_version_id = ?",
+        (snapshot_id, page_version_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO page_review_events (
+            event_id, page_version_id, event_type, actor_id, occurred_at,
+            source_version_id, source_page_version_id, snapshot_id, reason, note
+        ) VALUES (?, ?, 'prefilled', NULL, ?, ?, ?, ?, NULL, NULL)
+        """,
+        (
+            uuid.uuid4().hex,
+            page_version_id,
+            now,
+            previous["version_id"],
+            previous["page_version_id"],
+            snapshot_id,
+        ),
+    )
+
+
+def _clone_curation_snapshot(
+    connection: Any,
+    *,
+    page_id: str,
+    page_version_id: str,
+    source_snapshot_id: str | None,
+    snapshot_kind: str,
+    preserve_visual_refs: bool,
+    now: str,
+) -> str | None:
+    if source_snapshot_id is None:
+        return None
+    source = connection.execute(
+        "SELECT overview FROM curation_snapshots WHERE snapshot_id = ?",
+        (source_snapshot_id,),
+    ).fetchone()
+    if source is None:
+        raise RuntimeError("审核状态引用的策展快照不存在")
+    snapshot_id = uuid.uuid4().hex
+    connection.execute(
+        """
+        INSERT INTO curation_snapshots (
+            snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
+            overview, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot_id,
+            page_version_id,
+            snapshot_kind,
+            source_snapshot_id,
+            source["overview"],
+            now,
+        ),
+    )
+    visuals = connection.execute(
+        """
+        SELECT * FROM curation_snapshot_visuals
+        WHERE snapshot_id = ? ORDER BY position
+        """,
+        (source_snapshot_id,),
+    ).fetchall()
+    for visual in visuals:
+        old_visual_ref = str(visual["visual_ref"])
+        visual_ref = old_visual_ref if preserve_visual_refs else uuid.uuid4().hex
+        if not preserve_visual_refs:
+            connection.execute(
+                """
+                INSERT INTO visual_objects (visual_ref, page_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (visual_ref, page_id, now),
+            )
+        connection.execute(
+            """
+            INSERT INTO curation_snapshot_visuals (
+                snapshot_id, visual_ref, position, source_kind, disposition,
+                summary, visual_type, bounds_json, source_visual_ref, confirmed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                visual_ref,
+                visual["position"],
+                visual["source_kind"],
+                visual["disposition"],
+                visual["summary"],
+                visual["visual_type"],
+                visual["bounds_json"],
+                None if preserve_visual_refs else old_visual_ref,
+                visual["confirmed"] if preserve_visual_refs else 0,
+            ),
+        )
+    return snapshot_id
+
+
+def _current_version_id(connection: Any, document_id: str) -> str | None:
+    row = connection.execute(
+        "SELECT current_version_id FROM documents WHERE document_id = ?",
+        (document_id,),
+    ).fetchone()
+    if row is None or row["current_version_id"] is None:
+        return None
+    return str(row["current_version_id"])
+
+
+def _previous_ready_version_id(
+    connection: Any, *, document_id: str, target_version_id: str
+) -> str | None:
+    row = connection.execute(
+        """
+        SELECT version_id
+        FROM document_versions
+        WHERE document_id = ? AND version_id <> ? AND status = 'ready'
+        ORDER BY ready_at DESC, created_at DESC, version_id DESC
+        LIMIT 1
+        """,
+        (document_id, target_version_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["version_id"])
+
+
+def _match_page_identities(
+    connection: Any,
+    *,
+    document_id: str,
+    current_version_id: str | None,
+    target_version_id: str,
+    incoming_rows: list[Any],
+) -> dict[int, tuple[str, str]]:
+    """保守匹配可唯一证明的页；返回 page_number 到稳定身份。"""
+    history = connection.execute(
+        """
+        SELECT pv.page_id, p.chunk_id, pv.fingerprint_version,
+               pv.fingerprint_sha256, pv.version_id, results.source_slide_id
+        FROM page_versions AS pv
+        JOIN pages AS p ON p.page_id = pv.page_id
+        JOIN document_versions AS versions ON versions.version_id = pv.version_id
+        JOIN ingestion_page_results AS results
+          ON results.version_id = pv.version_id
+         AND results.page_number = pv.page_number
+        WHERE pv.document_id = ? AND versions.status = 'ready'
+        ORDER BY versions.ready_at DESC, pv.created_at DESC, pv.page_version_id DESC
+        """,
+        (document_id,),
+    ).fetchall()
+    used_page_ids = {
+        str(row["page_id"])
+        for row in connection.execute(
+            "SELECT page_id FROM page_versions WHERE version_id = ?",
+            (target_version_id,),
+        )
+    }
+    incoming_by_fingerprint: dict[tuple[int, str], list[Any]] = {}
+    historical_by_fingerprint: dict[tuple[int, str], dict[str, tuple[str, str]]] = {}
+    for row in incoming_rows:
+        key = (int(row["fingerprint_version"]), str(row["fingerprint_sha256"]))
+        incoming_by_fingerprint.setdefault(key, []).append(row)
+    for row in history:
+        if str(row["page_id"]) in used_page_ids:
+            continue
+        key = (int(row["fingerprint_version"]), str(row["fingerprint_sha256"]))
+        historical_by_fingerprint.setdefault(key, {})[str(row["page_id"])] = (
+            str(row["page_id"]),
+            str(row["chunk_id"]),
+        )
+
+    matches: dict[int, tuple[str, str]] = {}
+    matched_page_ids: set[str] = set()
+    for fingerprint, incoming in incoming_by_fingerprint.items():
+        fingerprint_candidates = historical_by_fingerprint.get(fingerprint, {})
+        if len(incoming) == 1 and len(fingerprint_candidates) == 1:
+            identity = next(iter(fingerprint_candidates.values()))
+            matches[int(incoming[0]["page_number"])] = identity
+            matched_page_ids.add(identity[0])
+
+    if current_version_id is None:
+        return matches
+    current_by_slide_id: dict[int, list[tuple[str, str]]] = {}
+    for row in history:
+        if row["version_id"] != current_version_id or row["page_id"] in matched_page_ids:
+            continue
+        current_by_slide_id.setdefault(int(row["source_slide_id"]), []).append(
+            (str(row["page_id"]), str(row["chunk_id"]))
+        )
+    remaining_by_slide_id: dict[int, list[Any]] = {}
+    for row in incoming_rows:
+        if int(row["page_number"]) not in matches:
+            remaining_by_slide_id.setdefault(int(row["source_slide_id"]), []).append(row)
+    for slide_id, incoming in remaining_by_slide_id.items():
+        slide_candidates = current_by_slide_id.get(slide_id, [])
+        if len(incoming) == 1 and len(slide_candidates) == 1:
+            identity = slide_candidates[0]
+            matches[int(incoming[0]["page_number"])] = identity
+            matched_page_ids.add(identity[0])
+    return matches
 
 
 def _checkpoint(

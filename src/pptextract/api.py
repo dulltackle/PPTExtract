@@ -46,6 +46,55 @@ class LifecycleCommand(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+def _read_curation_snapshot(
+    connection: sqlite3.Connection, snapshot_id: str | None
+) -> dict[str, Any] | None:
+    if snapshot_id is None:
+        return None
+    snapshot = connection.execute(
+        """
+        SELECT snapshot_id, snapshot_kind, source_snapshot_id, overview
+        FROM curation_snapshots WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    if snapshot is None:
+        return None
+    visuals = connection.execute(
+        """
+        SELECT visual_ref, position, source_kind, disposition, summary,
+               visual_type, bounds_json, source_visual_ref, confirmed
+        FROM curation_snapshot_visuals
+        WHERE snapshot_id = ? ORDER BY position
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    return {
+        "snapshot_id": snapshot["snapshot_id"],
+        "kind": snapshot["snapshot_kind"],
+        "source_snapshot_id": snapshot["source_snapshot_id"],
+        "overview": snapshot["overview"],
+        "visuals": [
+            {
+                "visual_ref": visual["visual_ref"],
+                "position": visual["position"],
+                "source_kind": visual["source_kind"],
+                "disposition": visual["disposition"],
+                "summary": visual["summary"],
+                "visual_type": visual["visual_type"],
+                "bounds": (
+                    None
+                    if visual["bounds_json"] is None
+                    else json.loads(visual["bounds_json"])
+                ),
+                "source_visual_ref": visual["source_visual_ref"],
+                "confirmed": bool(visual["confirmed"]),
+            }
+            for visual in visuals
+        ],
+    }
+
+
 def create_app(
     settings: Settings | None = None, actor_provider: ActorProvider | None = None
 ) -> FastAPI:
@@ -436,7 +485,11 @@ def create_app(
                        pv.page_number, pv.review_status, pv.fingerprint_version,
                        pv.fingerprint_sha256, pv.source_content_json,
                        pv.render_sha256, pv.render_media_type, pv.render_dpi,
-                       pv.render_width_px, pv.render_height_px
+                       pv.render_width_px, pv.render_height_px,
+                       pv.current_snapshot_id, pv.prefill_snapshot_id,
+                       pv.inherited_from_page_version_id, pv.reviewed_by,
+                       pv.reviewed_at, pv.review_source_version_id,
+                       pv.exclusion_reason, pv.exclusion_note
                 FROM page_versions AS pv
                 JOIN pages AS p ON p.page_id = pv.page_id
                 JOIN documents AS d
@@ -446,6 +499,16 @@ def create_app(
                 """,
                 (page_id,),
             ).fetchone()
+            annotation = (
+                None
+                if row is None
+                else _read_curation_snapshot(connection, row["current_snapshot_id"])
+            )
+            prefill = (
+                None
+                if row is None
+                else _read_curation_snapshot(connection, row["prefill_snapshot_id"])
+            )
         if row is None:
             return error_response(404, "not_found", "未找到请求的资源。")
         return JSONResponse(
@@ -456,6 +519,19 @@ def create_app(
                 "version_id": row["version_id"],
                 "page_number": row["page_number"],
                 "review_status": row["review_status"],
+                "review": {
+                    "status": row["review_status"],
+                    "reviewed_by": row["reviewed_by"],
+                    "reviewed_at": row["reviewed_at"],
+                    "source_version_id": row["review_source_version_id"],
+                    "inherited_from_page_version_id": row[
+                        "inherited_from_page_version_id"
+                    ],
+                    "exclusion_reason": row["exclusion_reason"],
+                    "exclusion_note": row["exclusion_note"],
+                },
+                "annotation": annotation,
+                "prefill": prefill,
                 "fingerprint": {
                     "version": row["fingerprint_version"],
                     "sha256": row["fingerprint_sha256"],

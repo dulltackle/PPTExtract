@@ -314,3 +314,28 @@ def test_v3_job_table_migrates_states_index_and_idempotency_foreign_key(
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lifecycle_events'"
         ).fetchone() is not None
+        assert {"deleted_at", "deleted_in_version_id"} <= {
+            row["name"] for row in connection.execute("PRAGMA table_info(pages)")
+        }
+        assert {
+            "current_snapshot_id",
+            "prefill_snapshot_id",
+            "inherited_from_page_version_id",
+            "reviewed_by",
+            "reviewed_at",
+            "review_source_version_id",
+            "exclusion_reason",
+            "exclusion_note",
+        } <= {
+            row["name"] for row in connection.execute("PRAGMA table_info(page_versions)")
+        }
+        for table in (
+            "curation_snapshots",
+            "visual_objects",
+            "curation_snapshot_visuals",
+            "page_review_events",
+        ):
+            assert connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone() is not None
