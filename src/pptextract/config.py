@@ -18,6 +18,7 @@ class Settings:
     default_actor_id: str
     worker_id: str
     render_image: str = "pptextract/document-toolchain:1"
+    render_generation: int = 1
     max_source_upload_bytes: int = 128 * 1024 * 1024
     sqlite_busy_timeout_ms: int = 5_000
     job_retry_base_seconds: float = 5.0
@@ -42,6 +43,7 @@ class Settings:
             render_image=os.environ.get(
                 "PPTEXTRACT_RENDER_IMAGE", "pptextract/document-toolchain:1"
             ),
+            render_generation=int(os.environ.get("PPTEXTRACT_RENDER_GENERATION", "1")),
             max_source_upload_bytes=int(
                 os.environ.get("PPTEXTRACT_MAX_SOURCE_UPLOAD_BYTES", 128 * 1024 * 1024)
             ),
@@ -67,6 +69,8 @@ class Settings:
             raise ValueError(f"不支持的 PPTEXTRACT_CONFIG_VERSION：{self.config_version}")
         if self.sqlite_busy_timeout_ms < 100 or self.sqlite_busy_timeout_ms > 30_000:
             raise ValueError("SQLite busy timeout 必须在 100–30000ms 之间")
+        if self.render_generation <= 0:
+            raise ValueError("渲染配置代次必须为正整数")
         if self.max_source_upload_bytes <= 0:
             raise ValueError("PPTX 上传上限必须大于 0")
         if (

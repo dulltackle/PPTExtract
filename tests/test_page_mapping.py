@@ -148,14 +148,20 @@ def test_duplicate_fingerprints_require_editable_atomic_mapping_decisions(
             "title": "mapping-duplicate.pptx",
             "status": "requires_action",
             "status_label": "需要页对应",
-            "action": {
+                "action": {
                 "label": "处理页对应",
                 "href": (
                     f"/documents/{baseline['document_id']}/versions/"
                     f"{incoming['version_id']}/page-mapping"
-                ),
-            },
-        }
+                    ),
+                },
+                "rendering_warnings": {
+                    "total": 3,
+                    "pages": 3,
+                    "unconfirmed": 3,
+                    "unconfirmed_pages": 3,
+                },
+            }
     ]
 
     route = _mapping_route(baseline["document_id"], incoming["version_id"])

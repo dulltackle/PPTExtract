@@ -29,12 +29,13 @@ from pptextract.object_store import (
 )
 from pptextract.pptx_projection import PackageLimitError, SourcePage, list_source_pages
 from pptextract.rendering import (
-    PDF_EXPORT_FILTER,
-    RENDER_PLATFORM,
-    STANDARD_RENDER_DPI,
     DockerRenderingToolchain,
+    StandardPageRender,
+    audit_rendering_warnings,
+    render_configuration_version,
     render_standard_pages,
 )
+from pptextract.rendering_warnings import replace_active_warnings
 
 PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 CONVERSION_TOOL_VERSION = "firecrawl-anydoc:0.1.9|pptextract-adapter:1"
@@ -608,24 +609,44 @@ def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
             )
         _checkpoint(settings, job, "conversion", completed, total_pages)
 
-    _checkpoint(settings, job, "rendering", 0, total_pages)
     toolchain = DockerRenderingToolchain(settings.render_image)
+    render_config_version = render_configuration_version(settings.render_image)
+    _checkpoint(settings, job, "rendering_audit", 0, total_pages)
+    try:
+        audited_warnings = tuple(
+            warning
+            for warning in audit_rendering_warnings(source, toolchain)
+            if warning.page_number in {page.page_number for page in enabled_pages}
+        )
+    except Exception as error:
+        raise _stage_error("rendering", None, error) from error
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        replace_active_warnings(
+            connection,
+            version_id=version_id,
+            render_config_version=render_config_version,
+            warnings=audited_warnings,
+            page_numbers=tuple(page.page_number for page in enabled_pages),
+            observed_at=timestamp(),
+        )
+    _checkpoint(settings, job, "rendering_audit", total_pages, total_pages)
+
+    _checkpoint(settings, job, "rendering", 0, total_pages)
+    rendered_fonts: dict[int, tuple[str, ...]] = {}
     for completed, page in enumerate(enabled_pages, start=1):
         render_key = _stage_key(
             phase="rendering",
             source_sha256=source_sha256,
             version_id=version_id,
             page=page,
-            tool_version=(
-                f"{settings.render_image}|{RENDER_PLATFORM}|{STANDARD_RENDER_DPI}|"
-                f"{PDF_EXPORT_FILTER}"
-            ),
+            tool_version=render_config_version,
         )
         with connect(settings) as connection:
             checkpoint = connection.execute(
                 """
                 SELECT render_key, render_sha256, render_media_type, render_dpi,
-                       render_width_px, render_height_px
+                       render_width_px, render_height_px, render_fonts_json
                 FROM ingestion_page_results
                 WHERE version_id = ? AND page_number = ?
                 """,
@@ -640,11 +661,15 @@ def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
                 and checkpoint["render_dpi"] is not None
                 and checkpoint["render_width_px"] is not None
                 and checkpoint["render_height_px"] is not None
+                and checkpoint["render_fonts_json"] is not None
                 and store.verify(str(checkpoint["render_sha256"]))
             )
         except OSError as error:
             raise _stage_error("storage", page.page_number, error) from error
         if render_is_reusable:
+            rendered_fonts[page.page_number] = tuple(
+                json.loads(str(checkpoint["render_fonts_json"]))
+            )
             _checkpoint(settings, job, "rendering", completed, total_pages)
             continue
         try:
@@ -663,7 +688,8 @@ def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
                 """
                 UPDATE ingestion_page_results
                 SET render_sha256 = ?, render_media_type = ?, render_dpi = ?,
-                    render_width_px = ?, render_height_px = ?, render_key = ?
+                    render_width_px = ?, render_height_px = ?, render_key = ?,
+                    render_fonts_json = ?
                 WHERE version_id = ? AND page_number = ?
                 """,
                 (
@@ -673,11 +699,42 @@ def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
                     render.width_px,
                     render.height_px,
                     render_key,
+                    _json(list(render.font_families)),
                     version_id,
                     render.page_number,
                 ),
             )
+        rendered_fonts[page.page_number] = render.font_families
         _checkpoint(settings, job, "rendering", completed, total_pages)
+
+    try:
+        final_warnings = tuple(
+            warning
+            for warning in audit_rendering_warnings(
+                source, toolchain, rendered_fonts=rendered_fonts
+            )
+            if warning.page_number in {page.page_number for page in enabled_pages}
+        )
+    except Exception as error:
+        raise _stage_error("rendering", None, error) from error
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        replace_active_warnings(
+            connection,
+            version_id=version_id,
+            render_config_version=render_config_version,
+            warnings=final_warnings,
+            page_numbers=tuple(page.page_number for page in enabled_pages),
+            observed_at=timestamp(),
+        )
+        connection.execute(
+            """
+            UPDATE document_versions
+            SET render_config_version = ?, render_generation = ?
+            WHERE version_id = ?
+            """,
+            (render_config_version, settings.render_generation, version_id),
+        )
 
     _checkpoint(settings, job, "page_fingerprint", 0, total_pages)
     for completed, page in enumerate(enabled_pages, start=1):
@@ -743,6 +800,287 @@ def process_ingestion_job(settings: Settings, job: ClaimedJob) -> None:
     )
 
 
+def enqueue_stale_render_jobs(settings: Settings) -> int:
+    """为当前 ready 版本持久化渲染配置迁移任务，并立即废止旧警告。"""
+    current_config = render_configuration_version(settings.render_image)
+    now = timestamp()
+    enqueued = 0
+    with transaction(settings) as connection:
+        versions = connection.execute(
+            """
+            SELECT versions.document_id, versions.version_id, versions.source_sha256,
+                   versions.render_generation
+            FROM documents
+            JOIN document_versions AS versions
+              ON versions.version_id = documents.current_version_id
+            WHERE documents.deleted_at IS NULL AND versions.status = 'ready'
+              AND COALESCE(versions.render_config_version, '') <> ?
+              AND COALESCE(versions.render_generation, 0) < ?
+            ORDER BY versions.ready_at, versions.version_id
+            """,
+            (current_config, settings.render_generation),
+        ).fetchall()
+        for version in versions:
+            idempotency_key = f"render-config:{version['version_id']}:{current_config}"
+            existing = connection.execute(
+                "SELECT 1 FROM jobs WHERE actor_id = 'system' AND idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                continue
+            job_id = uuid.uuid4().hex
+            payload = {
+                "document_id": str(version["document_id"]),
+                "version_id": str(version["version_id"]),
+                "source_sha256": str(version["source_sha256"]),
+                "render_config_version": current_config,
+                "render_generation": settings.render_generation,
+            }
+            newer_generation = connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE kind = 'version.rerender' AND version_id = ?
+                  AND CAST(json_extract(payload_json, '$.render_generation') AS INTEGER)
+                      > ?
+                LIMIT 1
+                """,
+                (version["version_id"], settings.render_generation),
+            ).fetchone()
+            if newer_generation is not None:
+                continue
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, kind, payload_json, status, actor_id, idempotency_key,
+                    document_id, version_id, checkpoint_json, created_at, updated_at
+                ) VALUES (?, 'version.rerender', ?, 'queued', 'system', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    _json(payload),
+                    idempotency_key,
+                    version["document_id"],
+                    version["version_id"],
+                    _json({"phase": "rendering_audit", "completed_pages": 0, "total_pages": 0}),
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE rendering_warnings SET active = 0 WHERE version_id = ? AND active = 1",
+                (version["version_id"],),
+            )
+            enqueued += 1
+    return enqueued
+
+
+def process_rerender_job(settings: Settings, job: ClaimedJob) -> None:
+    """仅重建 ready 版本的渲染/字体证据，不触碰转换、指纹或审核继承。"""
+    version_id = str(job.payload["version_id"])
+    document_id = str(job.payload["document_id"])
+    source_sha256 = str(job.payload["source_sha256"])
+    expected_config = str(job.payload["render_config_version"])
+    render_generation = int(job.payload["render_generation"])
+    current_config = render_configuration_version(settings.render_image)
+    if (
+        expected_config != current_config
+        or render_generation != settings.render_generation
+    ):
+        raise RuntimeError("渲染配置已再次变化，旧的重建任务不能继续执行")
+
+    store = LocalObjectStore(settings.object_store_path)
+    try:
+        source = store.path_for(source_sha256).read_bytes()
+        manifest = list_source_pages(source)
+    except Exception as error:
+        raise _stage_error("source_manifest", None, error) from error
+    with connect(settings) as connection:
+        version = connection.execute(
+            """
+            SELECT 1
+            FROM documents
+            JOIN document_versions AS versions
+              ON versions.version_id = documents.current_version_id
+            WHERE documents.document_id = ? AND versions.version_id = ?
+              AND documents.deleted_at IS NULL AND versions.status = 'ready'
+            """,
+            (document_id, version_id),
+        ).fetchone()
+        enabled_numbers = {
+            int(row["page_number"])
+            for row in connection.execute(
+                "SELECT page_number FROM ingestion_page_results "
+                "WHERE version_id = ? AND enabled = 1",
+                (version_id,),
+            )
+        }
+    if version is None:
+        return
+    pages = tuple(page for page in manifest if page.page_number in enabled_numbers)
+    total_pages = len(pages)
+    toolchain = DockerRenderingToolchain(settings.render_image)
+
+    _checkpoint(settings, job, "rendering_audit", 0, total_pages)
+    try:
+        preliminary = tuple(
+            warning
+            for warning in audit_rendering_warnings(source, toolchain)
+            if warning.page_number in enabled_numbers
+        )
+    except Exception as error:
+        raise _stage_error("rendering", None, error) from error
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        _assert_latest_render_generation(
+            connection,
+            job=job,
+            render_generation=render_generation,
+        )
+        replace_active_warnings(
+            connection,
+            version_id=version_id,
+            render_config_version=current_config,
+            warnings=preliminary,
+            page_numbers=tuple(sorted(enabled_numbers)),
+            observed_at=timestamp(),
+        )
+    _checkpoint(settings, job, "rendering_audit", total_pages, total_pages)
+
+    rendered_fonts: dict[int, tuple[str, ...]] = {}
+    staged_renders: list[tuple[SourcePage, StandardPageRender, StoredObject, str]] = []
+    _checkpoint(settings, job, "rendering", 0, total_pages)
+    for completed, page in enumerate(pages, start=1):
+        try:
+            (render,) = render_standard_pages(source, toolchain=toolchain, pages=(page,))
+            stored_render = store.put(render.data)
+        except Exception as error:
+            raise _stage_error("rendering", page.page_number, error) from error
+        render_key = _stage_key(
+            phase="rendering",
+            source_sha256=source_sha256,
+            version_id=version_id,
+            page=page,
+            tool_version=current_config,
+        )
+        staged_renders.append((page, render, stored_render, render_key))
+        rendered_fonts[page.page_number] = render.font_families
+        _checkpoint(settings, job, "rendering", completed, total_pages)
+
+    try:
+        final_warnings = tuple(
+            warning
+            for warning in audit_rendering_warnings(
+                source, toolchain, rendered_fonts=rendered_fonts
+            )
+            if warning.page_number in enabled_numbers
+        )
+    except Exception as error:
+        raise _stage_error("rendering", None, error) from error
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        _assert_latest_render_generation(
+            connection,
+            job=job,
+            render_generation=render_generation,
+        )
+        now = timestamp()
+        for page, render, stored_render, render_key in staged_renders:
+            _record_object(connection, stored_render, render.media_type, now)
+            connection.execute(
+                """
+                UPDATE ingestion_page_results
+                SET render_sha256 = ?, render_media_type = ?, render_dpi = ?,
+                    render_width_px = ?, render_height_px = ?, render_key = ?,
+                    render_fonts_json = ?
+                WHERE version_id = ? AND page_number = ? AND enabled = 1
+                """,
+                (
+                    stored_render.sha256,
+                    render.media_type,
+                    render.dpi,
+                    render.width_px,
+                    render.height_px,
+                    render_key,
+                    _json(list(render.font_families)),
+                    version_id,
+                    page.page_number,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE page_versions
+                SET render_sha256 = ?, render_media_type = ?, render_dpi = ?,
+                    render_width_px = ?, render_height_px = ?
+                WHERE version_id = ? AND page_number = ?
+                """,
+                (
+                    stored_render.sha256,
+                    render.media_type,
+                    render.dpi,
+                    render.width_px,
+                    render.height_px,
+                    version_id,
+                    page.page_number,
+                ),
+            )
+        replace_active_warnings(
+            connection,
+            version_id=version_id,
+            render_config_version=current_config,
+            warnings=final_warnings,
+            page_numbers=tuple(sorted(enabled_numbers)),
+            observed_at=timestamp(),
+        )
+        updated_version = connection.execute(
+            """
+            UPDATE document_versions
+            SET render_config_version = ?, render_generation = ?
+            WHERE version_id = ?
+              AND COALESCE(render_generation, 0) <= ?
+            """,
+            (current_config, render_generation, version_id, render_generation),
+        )
+        if updated_version.rowcount != 1:
+            raise RuntimeError("渲染配置迁移已被更新代次取代")
+
+
+def _assert_latest_render_generation(
+    connection: Any,
+    *,
+    job: ClaimedJob,
+    render_generation: int,
+) -> None:
+    version = connection.execute(
+        "SELECT render_generation FROM document_versions WHERE version_id = ?",
+        (str(job.payload["version_id"]),),
+    ).fetchone()
+    if version is None or int(version["render_generation"] or 0) > render_generation:
+        raise RuntimeError("渲染配置迁移已被更新代次取代")
+    superseding = connection.execute(
+        """
+        SELECT 1
+        FROM jobs AS candidate
+        JOIN jobs AS current ON current.job_id = ?
+        WHERE candidate.kind = 'version.rerender'
+          AND candidate.version_id = current.version_id
+          AND candidate.job_id <> current.job_id
+          AND (
+            CAST(json_extract(candidate.payload_json, '$.render_generation') AS INTEGER)
+                > ?
+            OR (
+              CAST(json_extract(candidate.payload_json, '$.render_generation') AS INTEGER)
+                  = ?
+              AND candidate.created_at > current.created_at
+            )
+          )
+        LIMIT 1
+        """,
+        (job.job_id, render_generation, render_generation),
+    ).fetchone()
+    if superseding is not None:
+        raise RuntimeError("渲染配置迁移已被更新代次取代")
+
+
 def accept_hidden_page_enablement(
     settings: Settings,
     *,
@@ -766,6 +1104,7 @@ def accept_hidden_page_enablement(
             """
             SELECT results.hidden, results.enabled, results.enable_job_id,
                    versions.source_sha256, versions.status AS version_status,
+                   versions.render_config_version, versions.render_generation,
                    documents.current_version_id, documents.deleted_at
             FROM ingestion_page_results AS results
             JOIN document_versions AS versions
@@ -783,6 +1122,16 @@ def accept_hidden_page_enablement(
         if target["version_status"] != "ready" or target["current_version_id"] != version_id:
             raise IngestionRequestError(
                 409, "version_not_current", "只能启用当前 ready 版本的隐藏页。"
+            )
+        current_render_config = render_configuration_version(settings.render_image)
+        if (
+            target["render_config_version"] != current_render_config
+            or int(target["render_generation"] or 0) != settings.render_generation
+        ):
+            raise IngestionRequestError(
+                409,
+                "render_configuration_stale",
+                "当前版本正在等待匹配本服务代次的渲染重建。",
             )
         if not bool(target["hidden"]):
             raise IngestionRequestError(409, "page_not_hidden", "该源页不是隐藏页。")
@@ -837,27 +1186,43 @@ def accept_hidden_page_enablement(
         active_job = None
         if target["enable_job_id"] is not None:
             active_job = connection.execute(
-                "SELECT job_id, status FROM jobs WHERE job_id = ?",
+                "SELECT job_id, status, payload_json FROM jobs WHERE job_id = ?",
                 (target["enable_job_id"],),
             ).fetchone()
         if active_job is not None and active_job["status"] in {"queued", "running"}:
-            accepted = AcceptedPageEnablement(
-                document_id=document_id,
-                version_id=version_id,
-                page_number=page_number,
-                job_id=str(active_job["job_id"]),
-                status="coalesced",
+            active_payload = json.loads(str(active_job["payload_json"]))
+            active_matches = (
+                active_payload.get("render_config_version") == current_render_config
+                and int(active_payload.get("render_generation", 0))
+                == settings.render_generation
             )
-            _record_page_enablement_idempotency(
-                connection,
-                accepted=accepted,
-                actor_id=actor_id,
-                command_scope=command_scope,
-                idempotency_key=idempotency_key,
-                request_fingerprint=request_fingerprint,
-                now=now,
+            if active_matches:
+                accepted = AcceptedPageEnablement(
+                    document_id=document_id,
+                    version_id=version_id,
+                    page_number=page_number,
+                    job_id=str(active_job["job_id"]),
+                    status="coalesced",
+                )
+                _record_page_enablement_idempotency(
+                    connection,
+                    accepted=accepted,
+                    actor_id=actor_id,
+                    command_scope=command_scope,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    now=now,
+                )
+                return accepted
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled', lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
+                WHERE job_id = ? AND status IN ('queued', 'running')
+                """,
+                (now, active_job["job_id"]),
             )
-            return accepted
 
         job_id = uuid.uuid4().hex
         payload = {
@@ -865,6 +1230,8 @@ def accept_hidden_page_enablement(
             "version_id": version_id,
             "page_number": page_number,
             "source_sha256": str(target["source_sha256"]),
+            "render_config_version": current_render_config,
+            "render_generation": settings.render_generation,
         }
         connection.execute(
             """
@@ -948,6 +1315,20 @@ def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
     document_id = str(job.payload["document_id"])
     page_number = int(job.payload["page_number"])
     source_sha256 = str(job.payload["source_sha256"])
+    expected_render_config = str(
+        job.payload.get(
+            "render_config_version",
+            render_configuration_version(settings.render_image),
+        )
+    )
+    expected_render_generation = int(
+        job.payload.get("render_generation", settings.render_generation)
+    )
+    if (
+        expected_render_config != render_configuration_version(settings.render_image)
+        or expected_render_generation != settings.render_generation
+    ):
+        raise RuntimeError("隐藏页启用任务不属于当前渲染配置代次")
     store = LocalObjectStore(settings.object_store_path)
     try:
         source = store.path_for(source_sha256).read_bytes()
@@ -1002,22 +1383,43 @@ def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
             )
     _checkpoint(settings, job, "conversion", 1, 1)
 
+    toolchain = DockerRenderingToolchain(settings.render_image)
+    render_config_version = render_configuration_version(settings.render_image)
+    _checkpoint(settings, job, "rendering_audit", 0, 1)
+    try:
+        audited_warnings = tuple(
+            warning
+            for warning in audit_rendering_warnings(source, toolchain)
+            if warning.page_number == page_number
+        )
+    except Exception as error:
+        raise _stage_error("rendering", page_number, error) from error
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        _assert_hidden_page_render_generation(connection, job)
+        replace_active_warnings(
+            connection,
+            version_id=version_id,
+            render_config_version=render_config_version,
+            warnings=audited_warnings,
+            page_numbers=(page_number,),
+            observed_at=timestamp(),
+        )
+    _checkpoint(settings, job, "rendering_audit", 1, 1)
+
     _checkpoint(settings, job, "rendering", 0, 1)
     render_key = _stage_key(
         phase="rendering",
         source_sha256=source_sha256,
         version_id=version_id,
         page=page,
-        tool_version=(
-            f"{settings.render_image}|{RENDER_PLATFORM}|{STANDARD_RENDER_DPI}|"
-            f"{PDF_EXPORT_FILTER}"
-        ),
+        tool_version=render_config_version,
     )
     with connect(settings) as connection:
         render_checkpoint = connection.execute(
             """
             SELECT render_key, render_sha256, render_media_type, render_dpi,
-                   render_width_px, render_height_px
+                   render_width_px, render_height_px, render_fonts_json
             FROM ingestion_page_results
             WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
             """,
@@ -1033,6 +1435,7 @@ def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
                 and render_checkpoint["render_dpi"] is not None
                 and render_checkpoint["render_width_px"] is not None
                 and render_checkpoint["render_height_px"] is not None
+                and render_checkpoint["render_fonts_json"] is not None
                 and store.verify(str(render_checkpoint["render_sha256"]))
             )
         except OSError as error:
@@ -1041,7 +1444,7 @@ def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
         try:
             (render,) = render_standard_pages(
                 source,
-                toolchain=DockerRenderingToolchain(settings.render_image),
+                toolchain=toolchain,
                 pages=(page,),
             )
         except Exception as error:
@@ -1053,12 +1456,14 @@ def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
         now = timestamp()
         with transaction(settings) as connection:
             _assert_job_lease(connection, settings, job)
+            _assert_hidden_page_render_generation(connection, job)
             _record_object(connection, stored_render, render.media_type, now)
             connection.execute(
                 """
                 UPDATE ingestion_page_results
                 SET render_sha256 = ?, render_media_type = ?, render_dpi = ?,
-                    render_width_px = ?, render_height_px = ?, render_key = ?
+                    render_width_px = ?, render_height_px = ?, render_key = ?,
+                    render_fonts_json = ?
                 WHERE version_id = ? AND page_number = ? AND enable_job_id = ?
                 """,
                 (
@@ -1068,12 +1473,43 @@ def process_hidden_page_job(settings: Settings, job: ClaimedJob) -> None:
                     render.width_px,
                     render.height_px,
                     render_key,
+                    _json(list(render.font_families)),
                     version_id,
                     page_number,
                     job.job_id,
                 ),
             )
+        rendered_page_fonts = render.font_families
+    else:
+        assert render_checkpoint is not None
+        rendered_page_fonts = tuple(
+            json.loads(str(render_checkpoint["render_fonts_json"]))
+        )
     _checkpoint(settings, job, "rendering", 1, 1)
+
+    try:
+        final_warnings = tuple(
+            warning
+            for warning in audit_rendering_warnings(
+                source,
+                toolchain,
+                rendered_fonts={page_number: rendered_page_fonts},
+            )
+            if warning.page_number == page_number
+        )
+    except Exception as error:
+        raise _stage_error("rendering", page_number, error) from error
+    with transaction(settings) as connection:
+        _assert_job_lease(connection, settings, job)
+        _assert_hidden_page_render_generation(connection, job)
+        replace_active_warnings(
+            connection,
+            version_id=version_id,
+            render_config_version=render_config_version,
+            warnings=final_warnings,
+            page_numbers=(page_number,),
+            observed_at=timestamp(),
+        )
 
     _checkpoint(settings, job, "page_fingerprint", 0, 1)
     fingerprint_key = _stage_key(
@@ -1134,6 +1570,7 @@ def _activate_hidden_page(
     now = timestamp()
     with transaction(settings) as connection:
         _assert_job_lease(connection, settings, job)
+        _assert_hidden_page_render_generation(connection, job)
         row = connection.execute(
             """
             SELECT results.*, versions.status AS version_status,
@@ -1265,6 +1702,29 @@ def _activate_hidden_page(
             raise RuntimeError("worker 在隐藏页生效前失去任务租约")
 
 
+def _assert_hidden_page_render_generation(connection: Any, job: ClaimedJob) -> None:
+    version = connection.execute(
+        """
+        SELECT versions.render_config_version, versions.render_generation,
+               versions.status, documents.current_version_id, documents.deleted_at
+        FROM document_versions AS versions
+        JOIN documents ON documents.document_id = versions.document_id
+        WHERE versions.version_id = ? AND versions.document_id = ?
+        """,
+        (str(job.payload["version_id"]), str(job.payload["document_id"])),
+    ).fetchone()
+    if (
+        version is None
+        or version["status"] != "ready"
+        or version["current_version_id"] != job.payload["version_id"]
+        or version["deleted_at"] is not None
+        or version["render_config_version"] != job.payload.get("render_config_version")
+        or int(version["render_generation"] or 0)
+        != int(job.payload.get("render_generation", 0))
+    ):
+        raise RuntimeError("隐藏页启用任务的渲染配置代次已失效")
+
+
 def fail_hidden_page_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:
     now = timestamp()
     structured = _structured_error(error, attempt=job.attempts)
@@ -1328,6 +1788,38 @@ def fail_hidden_page_job(settings: Settings, job: ClaimedJob, error: Exception) 
                 """,
                 (str(job.payload["version_id"]), int(job.payload["page_number"]), job.job_id),
             )
+
+
+def fail_rerender_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:
+    """保留旧完整资产并按既有退避策略重试渲染配置迁移。"""
+    now = timestamp()
+    structured = _structured_error(error, attempt=job.attempts)
+    retryable = isinstance(error, IngestionStageError) and error.retryable
+    will_retry = retryable and job.attempts < job.max_attempts
+    retry_at = (
+        datetime.now(UTC)
+        + timedelta(seconds=settings.job_retry_base_seconds * (2 ** max(job.attempts - 1, 0)))
+    ).isoformat()
+    with transaction(settings) as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = ?, lease_owner = NULL, lease_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = ?, error_json = ?, updated_at = ?
+            WHERE job_id = ? AND status = 'running'
+              AND lease_owner = ? AND lease_token = ? AND lease_expires_at > ?
+            """,
+            (
+                "queued" if will_retry else "failed",
+                retry_at if will_retry else None,
+                _json(structured),
+                now,
+                job.job_id,
+                settings.worker_id,
+                job.lease_token,
+                now,
+            ),
+        )
 
 
 def fail_ingestion_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:

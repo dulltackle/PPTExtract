@@ -71,15 +71,29 @@ def claim_next_job(settings: Settings) -> ClaimedJob | None:
             """
             SELECT job_id, kind, payload_json, attempts, max_attempts
             FROM jobs
-            WHERE (status = 'queued'
-                   AND attempts < max_attempts
-                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
-               OR (status = 'running' AND attempts < max_attempts
-                   AND lease_expires_at <= ?)
+            WHERE (
+                (status = 'queued'
+                 AND attempts < max_attempts
+                 AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+                OR (status = 'running' AND attempts < max_attempts
+                    AND lease_expires_at <= ?)
+            )
+              AND (
+                kind NOT IN ('page.enable', 'version.rerender')
+                OR COALESCE(
+                    CAST(json_extract(payload_json, '$.render_generation') AS INTEGER),
+                    ?
+                ) = ?
+              )
             ORDER BY created_at, job_id
             LIMIT 1
             """,
-            (now.isoformat(), now.isoformat()),
+            (
+                now.isoformat(),
+                now.isoformat(),
+                settings.render_generation,
+                settings.render_generation,
+            ),
         ).fetchone()
         if row is None:
             return None

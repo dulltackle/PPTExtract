@@ -53,3 +53,10 @@ def test_retry_delay_must_be_finite(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="任务重试基础延迟"):
         settings.validate()
+
+
+def test_render_generation_must_be_positive(tmp_path: Path) -> None:
+    settings = replace(Settings.for_test(tmp_path), render_generation=0)
+
+    with pytest.raises(ValueError, match="渲染配置代次"):
+        settings.validate()

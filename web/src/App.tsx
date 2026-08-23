@@ -11,6 +11,7 @@ import {
 import { type BootstrapData, loadBootstrap, OperatorError, type Runway } from "./api";
 import { CurationWorkbench } from "./CurationWorkbench";
 import { PageMappingWorkbench } from "./PageMappingWorkbench";
+import { PublicationPreflight } from "./PublicationPreflight";
 import "./styles.css";
 
 type LoadState =
@@ -116,7 +117,17 @@ function StageRunway({ runway }: { runway: Runway }) {
                   <code>{document.document_id.slice(0, 10)}</code>
                 </div>
                 <code>{document.version_id?.slice(0, 10) ?? "当前"}</code>
-                <span>{document.status === "requires_action" ? "等待人工决定" : "摄取任务进行中"}</span>
+                <span>
+                  {document.rendering_warnings
+                    ? document.rendering_warnings.unconfirmed > 0
+                      ? `渲染风险 · ${document.rendering_warnings.unconfirmed_pages} 页 / ${document.rendering_warnings.unconfirmed} 条未确认`
+                      : document.rendering_warnings.total > 0
+                        ? `渲染风险 · ${document.rendering_warnings.total} 条已确认`
+                        : "未发现渲染风险"
+                    : document.status === "requires_action"
+                      ? "等待人工决定"
+                      : "摄取任务进行中"}
+                </span>
                 <div>
                   <span className={document.status === "requires_action" ? "runway-status-chip is-action" : "runway-status-chip"}>
                     {document.status_label ?? "处理中"}
@@ -169,6 +180,7 @@ export function App() {
   );
   const isMapping = mappingMatch !== null;
   const isCuration = window.location.pathname.startsWith("/curation");
+  const isPublication = window.location.pathname.startsWith("/publication");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [showUploadBoundary, setShowUploadBoundary] = useState(false);
   const activeRequest = useRef<{ controller: AbortController; requestId: number } | null>(null);
@@ -210,8 +222,10 @@ export function App() {
       ? "PPTExtract · 页对应"
       : isCuration
         ? "PPTExtract · 逐页策展"
-        : "PPTExtract · 文档";
-  }, [isCuration, isMapping]);
+        : isPublication
+          ? "PPTExtract · 发布"
+          : "PPTExtract · 文档";
+  }, [isCuration, isMapping, isPublication]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -234,11 +248,14 @@ export function App() {
         <ProductMark />
         <span className="topbar-divider" aria-hidden="true" />
         <nav aria-label="主要区域">
-          <a href="/documents" aria-current={isCuration ? undefined : "page"}>
+          <a href="/documents" aria-current={!isCuration && !isPublication ? "page" : undefined}>
             文档
           </a>
           <a href="/curation" aria-current={isCuration ? "page" : undefined}>
             策展
+          </a>
+          <a href="/publication" aria-current={isPublication ? "page" : undefined}>
+            发布
           </a>
         </nav>
         <div className="topbar-actions">
@@ -246,7 +263,7 @@ export function App() {
             <UserIcon />
             <span>{actor?.display_name ?? "正在识别操作者"}</span>
           </div>
-          {!isCuration && !isMapping ? (
+          {!isCuration && !isMapping && !isPublication ? (
             <div className="upload-boundary">
               <button
                 type="button"
@@ -275,10 +292,11 @@ export function App() {
       {state.kind === "loading" ? <LoadingRunways /> : null}
       {state.kind === "error" ? <ErrorWorkspace message={state.message} retry={refresh} /> : null}
       {state.kind === "ready" && isCuration ? <CurationWorkbench /> : null}
+      {state.kind === "ready" && isPublication ? <PublicationPreflight /> : null}
       {state.kind === "ready" && isMapping && mappingMatch ? (
         <PageMappingWorkbench documentId={mappingMatch[1]} versionId={mappingMatch[2]} />
       ) : null}
-      {state.kind === "ready" && !isCuration && !isMapping ? (
+      {state.kind === "ready" && !isCuration && !isMapping && !isPublication ? (
         <main className="workspace" aria-label="文档阶段跑道">
           <div className="runway-stack">
             {state.data.runways.map((runway) => (
@@ -295,7 +313,14 @@ export function App() {
           <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
         </span>
         <span>
-          <kbd>R</kbd> {isMapping ? "刷新证据" : isCuration ? "刷新工作位" : "刷新入口"}
+          <kbd>R</kbd>{" "}
+          {isMapping
+            ? "刷新证据"
+            : isCuration
+              ? "刷新工作位"
+              : isPublication
+                ? "刷新校验"
+                : "刷新入口"}
         </span>
         <span className="command-status">
           {state.kind === "ready"
@@ -303,6 +328,8 @@ export function App() {
               ? "页对应工作位就绪"
               : isCuration
               ? "策展工作位就绪"
+              : isPublication
+                ? "发布校验工作位就绪"
               : "入口就绪"
             : state.kind === "error"
               ? "需要恢复"

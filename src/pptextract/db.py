@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 11
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -107,6 +107,8 @@ def initialize_database(settings: Settings) -> None:
                 mapping_revision INTEGER NOT NULL DEFAULT 0,
                 mapping_confirmed_at TEXT,
                 mapping_confirmed_by TEXT,
+                render_config_version TEXT,
+                render_generation INTEGER,
                 UNIQUE (document_id, version_id)
             );
 
@@ -130,6 +132,7 @@ def initialize_database(settings: Settings) -> None:
                 render_width_px INTEGER,
                 render_height_px INTEGER,
                 render_key TEXT,
+                render_fonts_json TEXT,
                 enable_job_id TEXT REFERENCES jobs(job_id),
                 PRIMARY KEY (version_id, page_number)
             );
@@ -284,6 +287,31 @@ def initialize_database(settings: Settings) -> None:
                 created_at TEXT NOT NULL,
                 UNIQUE (actor_id, command_scope, idempotency_key)
             );
+
+            CREATE TABLE IF NOT EXISTS rendering_warnings (
+                warning_id TEXT PRIMARY KEY,
+                version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                page_number INTEGER NOT NULL CHECK (page_number > 0),
+                code TEXT NOT NULL CHECK (code IN ('missing_font', 'animation_flattened')),
+                details_json TEXT NOT NULL,
+                render_config_version TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                FOREIGN KEY (version_id, page_number)
+                    REFERENCES ingestion_page_results(version_id, page_number)
+            );
+
+            CREATE INDEX IF NOT EXISTS rendering_warnings_current_version
+                ON rendering_warnings(version_id, active, page_number);
+
+            CREATE TABLE IF NOT EXISTS rendering_warning_confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                warning_id TEXT NOT NULL UNIQUE REFERENCES rendering_warnings(warning_id),
+                actor_id TEXT NOT NULL,
+                confirmed_at TEXT NOT NULL,
+                warning_details_json TEXT NOT NULL,
+                render_config_version TEXT NOT NULL
+            );
             """
         )
         if 0 < existing_version < 3:
@@ -313,6 +341,22 @@ def initialize_database(settings: Settings) -> None:
                 connection.execute(
                     f"ALTER TABLE ingestion_page_results ADD COLUMN {column} TEXT"
                 )
+        if "render_fonts_json" not in page_result_columns:
+            connection.execute(
+                "ALTER TABLE ingestion_page_results ADD COLUMN render_fonts_json TEXT"
+            )
+        version_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(document_versions)")
+        }
+        if "render_config_version" not in version_columns:
+            connection.execute(
+                "ALTER TABLE document_versions ADD COLUMN render_config_version TEXT"
+            )
+        if "render_generation" not in version_columns:
+            connection.execute(
+                "ALTER TABLE document_versions ADD COLUMN render_generation INTEGER"
+            )
         if "enable_job_id" not in page_result_columns:
             connection.execute(
                 "ALTER TABLE ingestion_page_results "

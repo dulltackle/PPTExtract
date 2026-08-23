@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException
 
 from pptextract.auth import ActorProvider, HeaderActorProvider
 from pptextract.config import Settings
-from pptextract.db import connect, database_path_is_local, initialize_database
+from pptextract.db import connect, database_path_is_local, initialize_database, transaction
 from pptextract.ingest_workflow import (
     IngestionRequestError,
     MappingPreconditionError,
@@ -25,6 +25,7 @@ from pptextract.ingest_workflow import (
     read_page_mapping,
     save_page_mapping_decision,
 )
+from pptextract.jobs import timestamp
 from pptextract.lifecycle import (
     read_lifecycle_events,
     restore_document,
@@ -34,6 +35,13 @@ from pptextract.lifecycle import (
     void_version,
 )
 from pptextract.object_store import LocalObjectStore
+from pptextract.rendering import render_configuration_version
+from pptextract.rendering_warnings import (
+    confirm_warning,
+    read_warning_rows,
+    serialize_warning,
+    summarize_rows,
+)
 from pptextract.worker import worker_is_fresh
 
 
@@ -53,6 +61,11 @@ class LifecycleCommand(BaseModel):
 class PageMappingDecision(BaseModel):
     decision: str
     page_id: str | None = None
+
+
+class ConfirmAllRenderingWarnings(BaseModel):
+    render_config_version: str = Field(min_length=1, max_length=200)
+    warning_ids: list[str] = Field(min_length=1, max_length=10_000)
 
 
 def _read_curation_snapshot(
@@ -164,29 +177,75 @@ def create_app(
                 ORDER BY versions.created_at, versions.version_id
                 """
             ).fetchall()
+            active_warning_summaries = {
+                str(version["version_id"]): summarize_rows(
+                    read_warning_rows(
+                        connection, version_id=str(version["version_id"])
+                    )
+                )
+                for version in active_versions
+            }
+            curatable_versions = connection.execute(
+                """
+                SELECT versions.document_id, versions.version_id, versions.source_filename
+                FROM documents
+                JOIN document_versions AS versions
+                  ON versions.version_id = documents.current_version_id
+                WHERE documents.deleted_at IS NULL AND versions.status = 'ready'
+                ORDER BY versions.ready_at, versions.version_id
+                """
+            ).fetchall()
         processing_documents = []
         for version in active_versions:
             requires_mapping = version["job_status"] == "requires_action"
-            processing_documents.append(
-                {
-                    "document_id": version["document_id"],
-                    "version_id": version["version_id"],
-                    "title": version["source_filename"],
-                    "status": version["job_status"],
-                    "status_label": "需要页对应" if requires_mapping else "正在处理",
-                    "action": (
-                        {
-                            "label": "处理页对应",
+            processing_payload = {
+                "document_id": version["document_id"],
+                "version_id": version["version_id"],
+                "title": version["source_filename"],
+                "status": version["job_status"],
+                "status_label": "需要页对应" if requires_mapping else "正在处理",
+                "action": (
+                    {
+                        "label": "处理页对应",
+                        "href": (
+                            f"/documents/{version['document_id']}/versions/"
+                            f"{version['version_id']}/page-mapping"
+                        ),
+                    }
+                    if requires_mapping
+                    else None
+                ),
+            }
+            warning_summary = active_warning_summaries[str(version["version_id"])]
+            if warning_summary["total"]:
+                processing_payload["rendering_warnings"] = warning_summary
+            processing_documents.append(processing_payload)
+        curatable_documents = []
+        with connect(resolved) as connection:
+            for version in curatable_versions:
+                warning_summary = summarize_rows(
+                    read_warning_rows(connection, version_id=str(version["version_id"]))
+                )
+                curatable_documents.append(
+                    {
+                        "document_id": version["document_id"],
+                        "version_id": version["version_id"],
+                        "title": version["source_filename"],
+                        "status": "ready",
+                        "status_label": "可策展",
+                        "rendering_warnings": warning_summary,
+                        "action": {
+                            "label": "进入策展",
                             "href": (
-                                f"/documents/{version['document_id']}/versions/"
-                                f"{version['version_id']}/page-mapping"
+                                "/curation?filter=rendering-warnings"
+                                f"&document={version['document_id']}"
+                                f"&version={version['version_id']}"
+                                if warning_summary["total"]
+                                else "/curation"
                             ),
-                        }
-                        if requires_mapping
-                        else None
-                    ),
-                }
-            )
+                        },
+                    }
+                )
         return {
             "actor": {"actor_id": actor.actor_id, "display_name": actor.display_name},
             "runways": [
@@ -196,7 +255,11 @@ def create_app(
                     "label": "处理中",
                     "documents": processing_documents,
                 },
-                {"id": "curatable", "label": "可策展", "documents": []},
+                {
+                    "id": "curatable",
+                    "label": "可策展",
+                    "documents": curatable_documents,
+                },
             ],
         }
 
@@ -343,7 +406,8 @@ def create_app(
         with connect(resolved) as connection:
             row = connection.execute(
                 """
-                SELECT results.render_sha256, results.render_media_type
+                SELECT results.render_sha256, results.render_media_type,
+                       versions.render_config_version
                 FROM ingestion_page_results AS results
                 JOIN document_versions AS versions ON versions.version_id = results.version_id
                 WHERE versions.document_id = ? AND results.version_id = ?
@@ -353,6 +417,12 @@ def create_app(
             ).fetchone()
         if row is None:
             return error_response(404, "not_found", "未找到标准页渲染结果。")
+        if row["render_config_version"] != render_configuration_version(
+            resolved.render_image
+        ):
+            return error_response(
+                409, "render_configuration_stale", "标准页正在按新渲染配置重建。"
+            )
         path = LocalObjectStore(resolved.object_store_path).path_for(row["render_sha256"])
         if not path.is_file():
             return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")
@@ -519,6 +589,273 @@ def create_app(
             }
         )
 
+    def rendering_warning_payload(
+        connection: sqlite3.Connection, *, document_id: str, version_id: str
+    ) -> dict[str, Any] | None:
+        version = connection.execute(
+            """
+            SELECT version_id, render_config_version FROM document_versions
+            WHERE document_id = ? AND version_id = ?
+            """,
+            (document_id, version_id),
+        ).fetchone()
+        if version is None:
+            return None
+        rows = read_warning_rows(connection, version_id=version_id)
+        config_version = str(
+            version["render_config_version"]
+            or render_configuration_version(resolved.render_image)
+        )
+        return {
+            "document_id": document_id,
+            "version_id": version_id,
+            "render_config_version": config_version,
+            "summary": summarize_rows(rows),
+            "warnings": [serialize_warning(row) for row in rows],
+        }
+
+    def warning_version_is_curatable(
+        connection: sqlite3.Connection, *, document_id: str, version_id: str
+    ) -> bool:
+        return (
+            connection.execute(
+                """
+                SELECT 1
+                FROM documents
+                JOIN document_versions AS versions
+                  ON versions.version_id = documents.current_version_id
+                WHERE documents.document_id = ? AND versions.version_id = ?
+                  AND documents.deleted_at IS NULL AND versions.status = 'ready'
+                  AND versions.render_config_version = ?
+                """,
+                (
+                    document_id,
+                    version_id,
+                    render_configuration_version(resolved.render_image),
+                ),
+            ).fetchone()
+            is not None
+        )
+
+    @app.get(
+        "/api/v1/documents/{document_id}/versions/{version_id}/rendering-warnings"
+    )
+    async def get_rendering_warnings(document_id: str, version_id: str) -> JSONResponse:
+        with connect(resolved) as connection:
+            payload = rendering_warning_payload(
+                connection, document_id=document_id, version_id=version_id
+            )
+        if payload is None:
+            return error_response(404, "not_found", "未找到请求的资源。")
+        return JSONResponse(content=payload)
+
+    @app.post(
+        "/api/v1/documents/{document_id}/versions/{version_id}"
+        "/rendering-warnings/confirm-all"
+    )
+    async def confirm_all_rendering_warnings(
+        document_id: str,
+        version_id: str,
+        command: ConfirmAllRenderingWarnings,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        confirmed_count = 0
+        with transaction(resolved) as connection:
+            payload = rendering_warning_payload(
+                connection, document_id=document_id, version_id=version_id
+            )
+            if payload is None:
+                return error_response(404, "not_found", "未找到请求的资源。")
+            if not warning_version_is_curatable(
+                connection, document_id=document_id, version_id=version_id
+            ):
+                return error_response(
+                    409,
+                    "version_not_current",
+                    "只能确认当前 ready 版本的渲染警告。",
+                )
+            current_versions = {
+                warning["render_config_version"] for warning in payload["warnings"]
+            }
+            if current_versions and current_versions != {command.render_config_version}:
+                return error_response(
+                    409,
+                    "rendering_warnings_stale",
+                    "渲染配置或警告集合已变化，请重新检查后确认。",
+                )
+            current_unconfirmed_ids = {
+                str(warning["warning_id"])
+                for warning in payload["warnings"]
+                if warning["status"] == "unconfirmed"
+            }
+            supplied_ids = set(command.warning_ids)
+            if (
+                len(supplied_ids) != len(command.warning_ids)
+                or supplied_ids != current_unconfirmed_ids
+            ):
+                return error_response(
+                    409,
+                    "rendering_warnings_stale",
+                    "渲染配置或警告集合已变化，请重新检查后确认。",
+                )
+            confirmed_at = timestamp()
+            for warning in payload["warnings"]:
+                if warning["status"] == "confirmed":
+                    continue
+                if confirm_warning(
+                    connection,
+                    warning_id=str(warning["warning_id"]),
+                    version_id=version_id,
+                    actor_id=actor.actor_id,
+                    confirmed_at=confirmed_at,
+                ):
+                    confirmed_count += 1
+            refreshed = rendering_warning_payload(
+                connection, document_id=document_id, version_id=version_id
+            )
+        assert refreshed is not None
+        return JSONResponse(
+            content={
+                "confirmed_count": confirmed_count,
+                "summary": refreshed["summary"],
+                "render_config_version": refreshed["render_config_version"],
+                "warnings": refreshed["warnings"],
+            }
+        )
+
+    @app.post(
+        "/api/v1/documents/{document_id}/versions/{version_id}"
+        "/rendering-warnings/{warning_id}/confirm"
+    )
+    async def confirm_one_rendering_warning(
+        document_id: str, version_id: str, warning_id: str, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        with transaction(resolved) as connection:
+            version = connection.execute(
+                "SELECT 1 FROM document_versions WHERE document_id = ? AND version_id = ?",
+                (document_id, version_id),
+            ).fetchone()
+            if version is None:
+                return error_response(404, "not_found", "未找到请求的资源。")
+            if not warning_version_is_curatable(
+                connection, document_id=document_id, version_id=version_id
+            ):
+                return error_response(
+                    409,
+                    "version_not_current",
+                    "只能确认当前 ready 版本的渲染警告。",
+                )
+            if not confirm_warning(
+                connection,
+                warning_id=warning_id,
+                version_id=version_id,
+                actor_id=actor.actor_id,
+                confirmed_at=timestamp(),
+            ):
+                return error_response(404, "not_found", "未找到请求的资源。")
+            row = next(
+                row
+                for row in read_warning_rows(connection, version_id=version_id)
+                if row["warning_id"] == warning_id
+            )
+        return JSONResponse(content=serialize_warning(row))
+
+    def publication_warning_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+        return list(
+            connection.execute(
+                """
+                SELECT warnings.warning_id, warnings.version_id, warnings.page_number,
+                       documents.document_id,
+                       warnings.code, warnings.details_json,
+                       warnings.render_config_version, warnings.observed_at,
+                       confirmations.actor_id AS confirmed_by,
+                       confirmations.confirmed_at
+                FROM documents
+                JOIN document_versions AS versions
+                  ON versions.version_id = documents.current_version_id
+                JOIN rendering_warnings AS warnings
+                  ON warnings.version_id = versions.version_id AND warnings.active = 1
+                LEFT JOIN rendering_warning_confirmations AS confirmations
+                  ON confirmations.warning_id = warnings.warning_id
+                WHERE documents.deleted_at IS NULL AND versions.status = 'ready'
+                ORDER BY warnings.version_id, warnings.page_number,
+                         warnings.code, warnings.warning_id
+                """
+            ).fetchall()
+        )
+
+    def publication_preflight_content(connection: sqlite3.Connection) -> dict[str, Any]:
+        rows = publication_warning_rows(connection)
+        summary = summarize_rows(rows)
+        current_config = render_configuration_version(resolved.render_image)
+        stale = connection.execute(
+            """
+            SELECT versions.document_id, versions.version_id
+            FROM documents
+            JOIN document_versions AS versions
+              ON versions.version_id = documents.current_version_id
+            WHERE documents.deleted_at IS NULL AND versions.status = 'ready'
+              AND COALESCE(versions.render_config_version, '') <> ?
+            ORDER BY versions.ready_at, versions.version_id
+            """,
+            (current_config,),
+        ).fetchall()
+        first_unconfirmed = next(
+            (row for row in rows if row["confirmed_at"] is None),
+            None,
+        )
+        href = None
+        if first_unconfirmed is not None:
+            href = (
+                "/curation?filter=rendering-warnings"
+                f"&document={first_unconfirmed['document_id']}"
+                f"&version={first_unconfirmed['version_id']}"
+                f"&page={first_unconfirmed['page_number']}"
+                f"&warning={first_unconfirmed['warning_id']}"
+            )
+        return {
+            "can_publish": summary["unconfirmed"] == 0 and not stale,
+            "summary": summary,
+            "stale_render_versions": len(stale),
+            "href": href,
+        }
+
+    @app.get("/api/v1/publications/preflight")
+    async def get_publication_preflight() -> JSONResponse:
+        with connect(resolved) as connection:
+            content = publication_preflight_content(connection)
+        return JSONResponse(content=content)
+
+    @app.post("/api/v1/publications/preflight")
+    async def validate_publication_preflight() -> JSONResponse:
+        with connect(resolved) as connection:
+            content = publication_preflight_content(connection)
+        if content["can_publish"]:
+            return JSONResponse(content=content)
+        if content["stale_render_versions"]:
+            return error_response(
+                409,
+                "render_configuration_stale",
+                "渲染配置已变化，当前版本的标准页正在等待确定性重建。",
+                {"stale_versions": content["stale_render_versions"]},
+            )
+        summary = content["summary"]
+        return error_response(
+            409,
+            "rendering_warnings_unconfirmed",
+            (
+                f"仍有 {summary['unconfirmed_pages']} 页 / "
+                f"{summary['unconfirmed']} 条渲染警告未确认，发布被阻止。"
+            ),
+            {
+                "unconfirmed": summary["unconfirmed"],
+                "unconfirmed_pages": summary["unconfirmed_pages"],
+                "href": content["href"],
+            },
+        )
+
     @app.get("/api/v1/curation/pages")
     async def list_curation_pages(review_status: str = "pending") -> JSONResponse:
         if review_status not in {"pending", "approved", "excluded", "all"}:
@@ -549,8 +886,18 @@ def create_app(
                 """,
                 (review_status, review_status),
             ).fetchall()
+            warning_rows_by_version = {
+                version_id: read_warning_rows(connection, version_id=version_id)
+                for version_id in {str(row["version_id"]) for row in rows}
+            }
         pages = []
         for row in rows:
+            version_warning_rows = warning_rows_by_version[str(row["version_id"])]
+            page_warning_rows = [
+                warning
+                for warning in version_warning_rows
+                if int(warning["page_number"]) == int(row["page_number"])
+            ]
             source_content = (
                 None
                 if row["source_content_json"] is None
@@ -568,25 +915,29 @@ def create_app(
                         else json.loads(row["enable_error"])
                     ),
                 }
-            pages.append(
-                {
-                    "page_id": row["page_id"],
-                    "chunk_id": row["chunk_id"],
-                    "document_id": row["document_id"],
-                    "version_id": row["version_id"],
-                    "page_number": row["page_number"],
-                    "review_status": row["review_status"],
-                    "title": titles[0] if titles else None,
-                    "hidden": bool(row["hidden"]),
-                    "enabled": bool(row["enabled"]),
-                    "source_reference": {
-                        "slide_id": row["source_slide_id"],
-                        "relationship_id": row["relationship_id"],
-                        "part": row["source_part"],
-                    },
-                    "enablement": enablement,
-                }
-            )
+            page_payload = {
+                "page_id": row["page_id"],
+                "chunk_id": row["chunk_id"],
+                "document_id": row["document_id"],
+                "version_id": row["version_id"],
+                "page_number": row["page_number"],
+                "review_status": row["review_status"],
+                "title": titles[0] if titles else None,
+                "hidden": bool(row["hidden"]),
+                "enabled": bool(row["enabled"]),
+                "source_reference": {
+                    "slide_id": row["source_slide_id"],
+                    "relationship_id": row["relationship_id"],
+                    "part": row["source_part"],
+                },
+                "enablement": enablement,
+            }
+            if version_warning_rows:
+                page_payload["rendering_warnings"] = summarize_rows(page_warning_rows)
+                page_payload["version_rendering_warnings"] = summarize_rows(
+                    version_warning_rows
+                )
+            pages.append(page_payload)
         return JSONResponse(content={"pages": pages})
 
     @app.post(
@@ -653,6 +1004,17 @@ def create_app(
                 if row is None
                 else _read_curation_snapshot(connection, row["prefill_snapshot_id"])
             )
+            page_warning_rows = (
+                []
+                if row is None
+                else [
+                    warning
+                    for warning in read_warning_rows(
+                        connection, version_id=str(row["version_id"])
+                    )
+                    if int(warning["page_number"]) == int(row["page_number"])
+                ]
+            )
         if row is None:
             return error_response(404, "not_found", "未找到请求的资源。")
         return JSONResponse(
@@ -689,6 +1051,12 @@ def create_app(
                     "height_px": row["render_height_px"],
                     "url": f"/api/v1/pages/{page_id}/render",
                 },
+                "rendering_warnings": {
+                    "summary": summarize_rows(page_warning_rows),
+                    "warnings": [
+                        serialize_warning(warning) for warning in page_warning_rows
+                    ],
+                },
             }
         )
 
@@ -697,17 +1065,25 @@ def create_app(
         with connect(resolved) as connection:
             row = connection.execute(
                 """
-                SELECT pv.render_sha256, pv.render_media_type
+                SELECT pv.render_sha256, pv.render_media_type,
+                       versions.render_config_version
                 FROM page_versions AS pv
                 JOIN documents AS d
                   ON d.document_id = pv.document_id
                  AND d.current_version_id = pv.version_id
+                JOIN document_versions AS versions ON versions.version_id = pv.version_id
                 WHERE d.deleted_at IS NULL AND pv.page_id = ?
                 """,
                 (page_id,),
             ).fetchone()
         if row is None:
             return error_response(404, "not_found", "未找到请求的资源。")
+        if row["render_config_version"] != render_configuration_version(
+            resolved.render_image
+        ):
+            return error_response(
+                409, "render_configuration_stale", "标准页正在按新渲染配置重建。"
+            )
         path = LocalObjectStore(resolved.object_store_path).path_for(row["render_sha256"])
         if not path.is_file():
             return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")

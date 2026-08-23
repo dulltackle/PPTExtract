@@ -88,6 +88,54 @@ describe("默认文档入口", () => {
     expect(screen.queryByText("区域经营分析")).not.toBeInTheDocument();
   });
 
+  it("在文档行持续显示渲染风险汇总并只提供策展入口", async () => {
+    const withWarnings = {
+      ...bootstrap,
+      runways: bootstrap.runways.map((runway) =>
+        runway.id === "curatable"
+          ? {
+              ...runway,
+              documents: [
+                {
+                  document_id: "document-1",
+                  version_id: "version-1",
+                  title: "公开风险文档.pptx",
+                  status: "ready",
+                  status_label: "可策展",
+                  rendering_warnings: {
+                    total: 5,
+                    pages: 3,
+                    unconfirmed: 5,
+                    unconfirmed_pages: 3,
+                  },
+                  action: {
+                    label: "进入策展",
+                    href: "/curation?filter=rendering-warnings",
+                  },
+                },
+              ],
+            }
+          : runway,
+      ),
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(withWarnings), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("公开风险文档.pptx")).toBeInTheDocument();
+    expect(screen.getByText("渲染风险 · 3 页 / 5 条未确认")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "进入策展" })).toHaveAttribute(
+      "href",
+      "/curation?filter=rendering-warnings",
+    );
+    expect(screen.queryByRole("button", { name: /确认.*警告/ })).not.toBeInTheDocument();
+  });
+
   it("显示 API 的安全错误消息并允许恢复", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     fetchMock.mockResolvedValueOnce(
@@ -161,6 +209,294 @@ describe("默认文档入口", () => {
       ),
     );
     await waitFor(() => expect(screen.queryByText("过期请求不应覆盖界面。")).not.toBeInTheDocument());
+  });
+});
+
+describe("渲染警告工作流", () => {
+  it("从深链进入警告模式、移动焦点并支持单条和整版确认", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/curation?filter=rendering-warnings&warning=warning-font",
+    );
+    const warningSummary = {
+      total: 2,
+      pages: 1,
+      unconfirmed: 2,
+      unconfirmed_pages: 1,
+    };
+    const warnings = [
+      {
+        warning_id: "warning-font",
+        page_number: 1,
+        code: "missing_font",
+        details: {
+          requested_font: "PPTExtract Missing Contract Font",
+          replacement_font: "Noto Sans",
+        },
+        render_config_version: "render-config-1",
+        observed_at: "2026-08-22T10:00:00+00:00",
+        status: "unconfirmed",
+        confirmed_by: null,
+        confirmed_at: null,
+      },
+      {
+        warning_id: "warning-animation",
+        page_number: 1,
+        code: "animation_flattened",
+        details: { timeline_count: 1 },
+        render_config_version: "render-config-1",
+        observed_at: "2026-08-22T10:00:00+00:00",
+        status: "unconfirmed",
+        confirmed_by: null,
+        confirmed_at: null,
+      },
+    ];
+    const warningPage = {
+      ...visiblePage,
+      rendering_warnings: warningSummary,
+      version_rendering_warnings: warningSummary,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [warningPage] }), { status: 200 }),
+        );
+      }
+      if (
+        url ===
+        "/api/v1/documents/document-1/versions/version-1/rendering-warnings"
+      ) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              document_id: "document-1",
+              version_id: "version-1",
+              render_config_version: "render-config-1",
+              summary: warningSummary,
+              warnings,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/warning-font/confirm") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...warnings[0],
+              status: "confirmed",
+              confirmed_by: "operator-zhang",
+              confirmed_at: "2026-08-22T10:05:00+00:00",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/rendering-warnings/confirm-all") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              confirmed_count: 1,
+              summary: { ...warningSummary, unconfirmed: 0, unconfirmed_pages: 0 },
+              render_config_version: "render-config-1",
+              warnings: warnings.map((warning) => ({
+                ...warning,
+                status: "confirmed",
+                confirmed_by:
+                  warning.warning_id === "warning-font" ? "operator-zhang" : "operator-li",
+                confirmed_at: "2026-08-22T10:06:00+00:00",
+              })),
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+
+    const heading = await screen.findByRole("heading", { name: "渲染警告" });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByText("字体缺失或替代")).toBeInTheDocument();
+    expect(screen.getByText(/PPTExtract Missing Contract Font → Noto Sans/)).toBeInTheDocument();
+    expect(screen.getByText("动画时间线已静态扁平化")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认字体缺失或替代警告" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /渲染警告 2\/2 未确认/ })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认字体缺失或替代警告" }));
+    expect(await screen.findByText(/operator-zhang.*已确认/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("已确认 1 条渲染警告");
+
+    await userEvent.click(screen.getByRole("button", { name: "确认当前版本全部警告" }));
+    const dialog = screen.getByRole("dialog", { name: "确认当前版本全部警告" });
+    expect(dialog).toHaveTextContent("1 页 / 1 条未确认");
+    expect(dialog).toHaveTextContent("render-config-1");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认全部 1 条警告" })).toHaveFocus(),
+    );
+    await userEvent.tab();
+    expect(screen.getByRole("button", { name: "返回检查" })).toHaveFocus();
+    await userEvent.tab({ shift: true });
+    expect(screen.getByRole("button", { name: "确认全部 1 条警告" })).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "确认全部 1 条警告" }));
+    expect(await screen.findByText("当前版本 2 条渲染警告均已确认")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("在发布表面独立显示硬阻塞并提供警告深链", async () => {
+    window.history.replaceState(null, "", "/publication");
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url === "/api/v1/publications/preflight") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              can_publish: false,
+              summary: { total: 5, pages: 3, unconfirmed: 5, unconfirmed_pages: 3 },
+              stale_render_versions: 0,
+              href: "/curation?filter=rendering-warnings&document=doc-1&version=version-1&page=2&warning=warning-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("发布被阻止")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "发布前置校验" })).toBeInTheDocument();
+    expect(screen.getByText("3 页 / 5 条未确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+    expect(screen.getByRole("link", { name: "前往确认渲染警告" })).toHaveAttribute(
+      "href",
+      "/curation?filter=rendering-warnings&document=doc-1&version=version-1&page=2&warning=warning-1",
+    );
+  });
+
+  it("发布确认遇到并发状态变化后重新加载并恢复硬阻塞", async () => {
+    window.history.replaceState(null, "", "/publication");
+    let preflightReads = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url === "/api/v1/publications/preflight" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: "rendering_warnings_unconfirmed", message: "出现新的未确认警告。" },
+            }),
+            { status: 409 },
+          ),
+        );
+      }
+      if (url === "/api/v1/publications/preflight") {
+        preflightReads += 1;
+        const blocked = preflightReads > 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              can_publish: !blocked,
+              stale_render_versions: 0,
+              href: blocked ? "/curation?filter=rendering-warnings" : null,
+              summary: blocked
+                ? { total: 1, pages: 1, unconfirmed: 1, unconfirmed_pages: 1 }
+                : { total: 0, pages: 0, unconfirmed: 0, unconfirmed_pages: 0 },
+            }),
+          ),
+        );
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    const confirm = await screen.findByRole("button", { name: "确认并继续" });
+    expect(confirm).toBeEnabled();
+    await userEvent.click(confirm);
+
+    expect(await screen.findByText("发布被阻止")).toBeInTheDocument();
+    expect(screen.getByText("1 页 / 1 条未确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+  });
+
+  it("从文档级渲染警告深链进入对应文档，而不是全局第一项", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/curation?filter=rendering-warnings&document=document-2&version=version-2",
+    );
+    const summary = { total: 1, pages: 1, unconfirmed: 1, unconfirmed_pages: 1 };
+    const first = {
+      ...visiblePage,
+      rendering_warnings: summary,
+      version_rendering_warnings: summary,
+    };
+    const second = {
+      ...visiblePage,
+      document_id: "document-2",
+      version_id: "version-2",
+      page_id: "page-2",
+      page_number: 2,
+      title: "文档乙风险页",
+      rendering_warnings: summary,
+      version_rendering_warnings: summary,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages: [first, second] })));
+      }
+      if (url === "/api/v1/documents/document-2/versions/version-2/rendering-warnings") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              document_id: "document-2",
+              version_id: "version-2",
+              render_config_version: "render-config-1",
+              summary,
+              warnings: [
+                {
+                  warning_id: "warning-document-2",
+                  page_number: 2,
+                  code: "animation_flattened",
+                  details: { timeline_count: 1 },
+                  render_config_version: "render-config-1",
+                  observed_at: "2026-08-22T10:00:00+00:00",
+                  status: "unconfirmed",
+                  confirmed_by: null,
+                  confirmed_at: null,
+                },
+              ],
+            }),
+          ),
+        );
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+
+    const evidence = await screen.findByAltText("第 2 页标准页渲染结果");
+    expect(evidence).toHaveAttribute("src", "/api/v1/pages/page-2/render");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/documents/document-2/versions/version-2/rendering-warnings",
+      expect.any(Object),
+    );
   });
 });
 

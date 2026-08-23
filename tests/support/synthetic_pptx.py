@@ -49,6 +49,71 @@ def build_plain_text_presentation(
     return stream.getvalue()
 
 
+def build_rendering_warning_presentation() -> bytes:
+    """构造同时含缺失字体与动画时间线的公开渲染警告夹具。"""
+    from xml.etree import ElementTree
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    presentation = Presentation()
+    presentation.slide_width = Inches(13.333333)
+    presentation.slide_height = Inches(7.5)
+
+    font_slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    font_slide.shapes.title.text = "公开缺失字体页"
+    text_box = font_slide.shapes.add_textbox(Inches(0.8), Inches(2), Inches(11), Inches(1))
+    run = text_box.text_frame.paragraphs[0].add_run()
+    run.text = "此文字故意引用不存在的字体"
+    run.font.name = "PPTExtract Missing Contract Font"
+
+    animation_slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    animation_slide.shapes.title.text = "公开动画扁平化页"
+
+    stream = BytesIO()
+    presentation.save(stream)
+    output = BytesIO()
+    presentation_namespace = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    with ZipFile(BytesIO(stream.getvalue())) as package, ZipFile(
+        output, "w", compression=ZIP_DEFLATED
+    ) as rewritten:
+        for entry in package.infolist():
+            content = package.read(entry.filename)
+            if entry.filename == "ppt/slides/slide2.xml":
+                slide = ElementTree.fromstring(content)
+                timing = ElementTree.SubElement(
+                    slide, f"{{{presentation_namespace}}}timing"
+                )
+                ElementTree.SubElement(timing, f"{{{presentation_namespace}}}tnLst")
+                content = ElementTree.tostring(slide, encoding="utf-8", xml_declaration=True)
+            rewritten.writestr(entry, content)
+    return output.getvalue()
+
+
+def build_table_font_presentation() -> bytes:
+    """构造表格单元格显式缺失字体的公开契约夹具。"""
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    table = slide.shapes.add_table(1, 1, Inches(1), Inches(1), Inches(5), Inches(1)).table
+    run = table.cell(0, 0).text_frame.paragraphs[0].add_run()
+    run.text = "公开表格字体"
+    run.font.name = "PPTExtract Missing Table Font"
+    stream = BytesIO()
+    presentation.save(stream)
+    return stream.getvalue()
+
+
+def build_installed_font_glyph_fallback_presentation() -> bytes:
+    """构造字体家族已安装、但中文字形会由渲染器回退的公开夹具。"""
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    text_box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1))
+    run = text_box.text_frame.paragraphs[0].add_run()
+    run.text = "ABC 公开中文字形回退"
+    run.font.name = "Liberation Sans"
+    stream = BytesIO()
+    presentation.save(stream)
+    return stream.getvalue()
+
+
 def build_conversion_presentation() -> tuple[bytes, bytes]:
     """构造带重复图片引用的公开转换契约夹具。"""
     presentation = Presentation()

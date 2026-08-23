@@ -509,6 +509,18 @@ def test_hidden_page_can_be_enabled_once_through_the_public_api(
             "part": "ppt/slides/slide2.xml",
         },
         "enablement": {"status": "not_started", "job_id": None, "error": None},
+        "rendering_warnings": {
+            "total": 0,
+            "pages": 0,
+            "unconfirmed": 0,
+            "unconfirmed_pages": 0,
+        },
+        "version_rendering_warnings": {
+            "total": 1,
+            "pages": 1,
+            "unconfirmed": 1,
+            "unconfirmed_pages": 1,
+        },
     }
     with connect(settings) as connection:
         unprocessed = connection.execute(

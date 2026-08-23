@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  confirmAllRenderingWarnings,
+  confirmRenderingWarning,
   type CurationPage,
   enableHiddenPage,
   loadCurationPages,
   loadJob,
   loadPageDetail,
+  loadRenderingWarnings,
   OperatorError,
+  type RenderingWarning,
 } from "./api";
 
-type Filter = "pending" | "all";
+type Filter = "pending" | "all" | "rendering-warnings";
 
 interface PageOperation {
   submitting: boolean;
@@ -61,12 +65,14 @@ function PageRail({
   pages,
   filter,
   selectedKey,
+  versionWarningSummary,
   onFilter,
   onSelect,
 }: {
   pages: CurationPage[];
   filter: Filter;
   selectedKey: string | null;
+  versionWarningSummary: CurationPage["version_rendering_warnings"];
   onFilter: (filter: Filter) => void;
   onSelect: (key: string) => void;
 }) {
@@ -78,7 +84,7 @@ function PageRail({
           <p>{pages.length} 页可见</p>
         </div>
         <div className="filter-tabs" aria-label="页清单筛选">
-          {(["pending", "all"] as const).map((value) => (
+          {(["pending", "all", "rendering-warnings"] as const).map((value) => (
             <button
               key={value}
               type="button"
@@ -86,17 +92,35 @@ function PageRail({
               aria-pressed={filter === value}
               onClick={() => onFilter(value)}
             >
-              {value === "pending" ? "待处理" : "全部"}
+              {value === "pending" ? "待处理" : value === "all" ? "全部" : "渲染警告"}
             </button>
           ))}
         </div>
+        {versionWarningSummary && versionWarningSummary.total > 0 ? (
+          <div className="version-warning-summary">
+            <span aria-hidden="true">!</span>
+            {versionWarningSummary.unconfirmed > 0
+              ? `当前版本 · ${versionWarningSummary.unconfirmed} 条渲染警告待确认`
+              : `当前版本 · ${versionWarningSummary.total} 条渲染警告已确认`}
+          </div>
+        ) : null}
       </div>
       <div className="page-list">
         {pages.length === 0 ? (
           <div className="page-list-empty">
-            <strong>{filter === "pending" ? "待处理队列为空" : "当前版本没有可显示的页"}</strong>
+            <strong>
+              {filter === "pending"
+                ? "待处理队列为空"
+                : filter === "rendering-warnings"
+                  ? "当前没有渲染警告"
+                  : "当前版本没有可显示的页"}
+            </strong>
             <span>
-              {filter === "pending" ? "切换到“全部”可查看已处理页与隐藏页登记。" : "上传并处理版本后，源页会按原始顺序出现。"}
+              {filter === "pending"
+                ? "切换到“全部”可查看已处理页与隐藏页登记。"
+                : filter === "rendering-warnings"
+                  ? "字体与动画风险会在标准页渲染完成后出现在这里。"
+                  : "上传并处理版本后，源页会按原始顺序出现。"}
             </span>
           </div>
         ) : null}
@@ -105,12 +129,15 @@ function PageRail({
           const hiddenUnprocessed = page.hidden && !page.enabled;
           const title = hiddenUnprocessed ? "隐藏页 · 未处理" : page.title || `第 ${page.page_number} 页`;
           const status = pageStatusLabel(page);
+          const warningLabel = (page.rendering_warnings?.total ?? 0) > 0
+            ? `，渲染警告 ${page.rendering_warnings?.unconfirmed ?? 0}/${page.rendering_warnings?.total ?? 0} 未确认`
+            : "";
           return (
             <button
               type="button"
               className={`page-row ${hiddenUnprocessed ? "page-row--hidden" : ""} ${selectedKey === key ? "is-selected" : ""}`}
               key={key}
-              aria-label={`第 ${page.page_number} 页，${title}，${status}`}
+              aria-label={`第 ${page.page_number} 页，${title}，${status}${warningLabel}`}
               aria-current={selectedKey === key ? "true" : undefined}
               onClick={() => onSelect(key)}
             >
@@ -118,8 +145,18 @@ function PageRail({
               <span className={`page-state-mark ${hiddenUnprocessed ? "is-hollow" : ""}`} aria-hidden="true" />
               <span className="page-row-copy">
                 <strong>{title}</strong>
-                <span>{status}</span>
+                <span>
+                  {status}
+                  {(page.rendering_warnings?.total ?? 0) > 0
+                    ? ` · 渲染警告 ${page.rendering_warnings?.unconfirmed ?? 0}/${page.rendering_warnings?.total ?? 0} 未确认`
+                    : ""}
+                </span>
               </span>
+              {(page.rendering_warnings?.total ?? 0) > 0 ? (
+                <span className="page-warning-mark" aria-hidden="true">
+                  !
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -222,23 +259,347 @@ function SourceRegistration({
   );
 }
 
+function warningTitle(warning: RenderingWarning): string {
+  return warning.code === "missing_font" ? "字体缺失或替代" : "动画时间线已静态扁平化";
+}
+
+function summarizePageWarnings(warnings: RenderingWarning[]) {
+  const unconfirmed = warnings.filter((warning) => warning.status === "unconfirmed").length;
+  return {
+    total: warnings.length,
+    pages: warnings.length ? 1 : 0,
+    unconfirmed,
+    unconfirmed_pages: unconfirmed ? 1 : 0,
+  };
+}
+
+function WarningInspector({
+  page,
+  targetWarningId,
+  onSummaryChange,
+}: {
+  page: CurationPage;
+  targetWarningId: string | null;
+  onSummaryChange: (
+    versionSummary: NonNullable<CurationPage["version_rendering_warnings"]>,
+    pageSummary: NonNullable<CurationPage["rendering_warnings"]>,
+  ) => void;
+}) {
+  const [warnings, setWarnings] = useState<RenderingWarning[]>([]);
+  const [summary, setSummary] = useState(page.rendering_warnings ?? {
+    total: 0,
+    pages: 0,
+    unconfirmed: 0,
+    unconfirmed_pages: 0,
+  });
+  const [renderConfigVersion, setRenderConfigVersion] = useState<string | null>(null);
+  const [versionUnconfirmedIds, setVersionUnconfirmedIds] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const [showConfirmAll, setShowConfirmAll] = useState(false);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const confirmAllTriggerRef = useRef<HTMLButtonElement>(null);
+  const confirmAllSubmitRef = useRef<HTMLButtonElement>(null);
+  const confirmAllDialogRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (showConfirmAll) {
+      window.requestAnimationFrame(() => confirmAllSubmitRef.current?.focus());
+    }
+  }, [showConfirmAll]);
+
+  const closeConfirmAll = () => {
+    setShowConfirmAll(false);
+    window.requestAnimationFrame(() => confirmAllTriggerRef.current?.focus());
+  };
+
+  useEffect(() => {
+    if (!page.page_id) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    loadRenderingWarnings(page, controller.signal)
+      .then((payload) => {
+        const pageWarnings = payload.warnings.filter(
+          (warning) => warning.page_number === page.page_number,
+        );
+        setWarnings(pageWarnings);
+        setSummary(payload.summary);
+        setRenderConfigVersion(payload.render_config_version);
+        setVersionUnconfirmedIds(
+          payload.warnings
+            .filter((warning) => warning.status === "unconfirmed")
+            .map((warning) => warning.warning_id),
+        );
+        onSummaryChange(payload.summary, summarizePageWarnings(pageWarnings));
+        window.requestAnimationFrame(() => headingRef.current?.focus());
+      })
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setError(cause instanceof OperatorError ? cause.message : "渲染警告加载失败，请重试。");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+    // summary 仅作首屏占位；真实值始终由页详情覆盖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onSummaryChange, page.page_id, page.page_number]);
+
+  const handleConfirm = async (warning: RenderingWarning) => {
+    if (submitting) return;
+    setSubmitting(warning.warning_id);
+    setAnnouncement(null);
+    try {
+      const confirmed = await confirmRenderingWarning(page, warning.warning_id);
+      const nextWarnings = warnings.map((candidate) =>
+        candidate.warning_id === confirmed.warning_id ? confirmed : candidate,
+      );
+      const nextSummary = {
+        ...summary,
+        unconfirmed: Math.max(0, summary.unconfirmed - 1),
+        unconfirmed_pages:
+          summarizePageWarnings(nextWarnings).unconfirmed === 0
+            ? Math.max(0, summary.unconfirmed_pages - 1)
+            : summary.unconfirmed_pages,
+      };
+      setWarnings(nextWarnings);
+      setVersionUnconfirmedIds((current) =>
+        current.filter((warningId) => warningId !== confirmed.warning_id),
+      );
+      setSummary(nextSummary);
+      onSummaryChange(nextSummary, summarizePageWarnings(nextWarnings));
+      setAnnouncement("已确认 1 条渲染警告。");
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 警告仍保持未确认。`
+          : "渲染警告确认失败；警告仍保持未确认。",
+      );
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const handleConfirmAll = async () => {
+    if (!renderConfigVersion || submitting) return;
+    setSubmitting("all");
+    setAnnouncement(null);
+    try {
+      const result = await confirmAllRenderingWarnings(
+        page,
+        renderConfigVersion,
+        versionUnconfirmedIds,
+      );
+      setSummary(result.summary);
+      const pageWarnings = result.warnings.filter(
+        (warning) => warning.page_number === page.page_number,
+      );
+      setWarnings(pageWarnings);
+      setRenderConfigVersion(result.render_config_version);
+      setVersionUnconfirmedIds(
+        result.warnings
+          .filter((warning) => warning.status === "unconfirmed")
+          .map((warning) => warning.warning_id),
+      );
+      onSummaryChange(result.summary, summarizePageWarnings(pageWarnings));
+      setAnnouncement(`已确认 ${result.confirmed_count} 条渲染警告。`);
+      setShowConfirmAll(false);
+      window.requestAnimationFrame(() => headingRef.current?.focus());
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 请重新检查当前版本。`
+          : "整版确认失败，请重新检查当前版本。",
+      );
+      closeConfirmAll();
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  return (
+    <div className="warning-inspector" aria-busy={loading}>
+      <div className="warning-inspector-heading">
+        <div>
+          <h2 ref={headingRef} tabIndex={-1}>渲染警告</h2>
+          <p>风险不阻止策展，但必须在发布前由人确认。</p>
+        </div>
+        <span className={summary.unconfirmed ? "warning-count-chip" : "warning-count-chip is-confirmed"}>
+          {summary.unconfirmed ? `${summary.unconfirmed} 条待确认` : "全部已确认"}
+        </span>
+      </div>
+
+      {announcement ? (
+        <div className="warning-announcement" role="status" aria-live="polite">
+          {announcement}
+        </div>
+      ) : null}
+      {error ? <div className="warning-load-error" role="alert">{error}</div> : null}
+      {!loading && !error && warnings.length === 0 ? (
+        <div className="warning-empty-state">
+          <strong>此页没有渲染警告</strong>
+          <span>选择左侧带警告标记的页面继续复核。</span>
+        </div>
+      ) : null}
+
+      <div className="warning-list">
+        {warnings.map((warning) => {
+          const confirmed = warning.status === "confirmed";
+          const targeted = warning.warning_id === targetWarningId;
+          return (
+            <article
+              className={`warning-entry ${confirmed ? "is-confirmed" : "is-unconfirmed"} ${targeted ? "is-targeted" : ""}`}
+              key={warning.warning_id}
+            >
+              <header>
+                <div>
+                  <span className="warning-type-mark" aria-hidden="true" />
+                  <strong>{warningTitle(warning)}</strong>
+                </div>
+                <span>{confirmed ? "已确认" : "未确认"}</span>
+              </header>
+              <p className="warning-detail">
+                {warning.code === "missing_font"
+                  ? `${warning.details.requested_font ?? "未知字体"} → ${warning.details.replacement_font ?? "未记录替代字体"}`
+                  : `检测到 ${warning.details.timeline_count ?? 1} 条动画时间线；标准页渲染只保留静态打印状态。`}
+              </p>
+              <dl>
+                <div><dt>页码</dt><dd>{warning.page_number}</dd></div>
+                <div><dt>渲染配置</dt><dd>{warning.render_config_version}</dd></div>
+              </dl>
+              {confirmed ? (
+                <p className="warning-confirmation">
+                  {warning.confirmed_by ?? "未知操作者"} · 已确认
+                  {warning.confirmed_at ? ` · ${new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(new Date(warning.confirmed_at))}` : ""}
+                </p>
+              ) : (
+                <button
+                  type="button"
+                  className="warning-confirm-button"
+                  disabled={submitting !== null}
+                  onClick={() => void handleConfirm(warning)}
+                  aria-label={`确认${warningTitle(warning)}警告`}
+                >
+                  {submitting === warning.warning_id ? "正在确认" : "确认此警告"}
+                </button>
+              )}
+            </article>
+          );
+        })}
+      </div>
+
+      {summary.total > 0 ? (
+        <div className="warning-version-action">
+          <div>
+            <strong>
+              {summary.unconfirmed
+                ? `当前版本仍有 ${summary.unconfirmed} 条未确认`
+                : `当前版本 ${summary.total} 条渲染警告均已确认`}
+            </strong>
+            <span>{renderConfigVersion ?? "正在读取渲染配置"}</span>
+          </div>
+          <button
+            type="button"
+            ref={confirmAllTriggerRef}
+            disabled={!summary.unconfirmed || submitting !== null}
+            onClick={() => setShowConfirmAll(true)}
+          >
+            确认当前版本全部警告
+          </button>
+        </div>
+      ) : null}
+
+      {showConfirmAll ? (
+        <div className="compact-dialog-backdrop">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-all-warning-title"
+            className="compact-dialog"
+            ref={confirmAllDialogRef}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                closeConfirmAll();
+                return;
+              }
+              if (event.key !== "Tab") return;
+              const controls = Array.from(
+                confirmAllDialogRef.current?.querySelectorAll<HTMLElement>(
+                  "button:not([disabled]), [href], [tabindex]:not([tabindex='-1'])",
+                ) ?? [],
+              );
+              if (!controls.length) return;
+              const first = controls[0];
+              const last = controls[controls.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }}
+          >
+            <h2 id="confirm-all-warning-title">确认当前版本全部警告</h2>
+            <p>{summary.unconfirmed_pages} 页 / {summary.unconfirmed} 条未确认</p>
+            <dl>
+              <div><dt>渲染配置版本</dt><dd>{renderConfigVersion}</dd></div>
+            </dl>
+            <p>系统仍会为每条警告分别保存操作者、时间、警告明细和配置版本。</p>
+            <div className="dialog-actions">
+              <button type="button" onClick={closeConfirmAll}>返回检查</button>
+              <button
+                type="button"
+                ref={confirmAllSubmitRef}
+                className="warning-confirm-button"
+                onClick={() => void handleConfirmAll()}
+              >
+                确认全部 {summary.unconfirmed} 条警告
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function InspectorPanel({
   page,
   submitting,
   announcement,
   statusRef,
   onEnable,
+  warningMode,
+  targetWarningId,
+  onWarningSummaryChange,
 }: {
   page: CurationPage | null;
   submitting: boolean;
   announcement: string | null;
   statusRef: React.RefObject<HTMLDivElement | null>;
   onEnable: () => void;
+  warningMode: boolean;
+  targetWarningId: string | null;
+  onWarningSummaryChange: (
+    versionSummary: NonNullable<CurationPage["version_rendering_warnings"]>,
+    pageSummary: NonNullable<CurationPage["rendering_warnings"]>,
+  ) => void;
 }) {
   return (
     <aside className="inspector-panel" aria-label="来源与策展日志">
       {!page ? (
         <div className="inspector-empty">选择一页后，这里会显示可追溯来源与可用动作。</div>
+      ) : warningMode && page.page_id ? (
+        <WarningInspector
+          key={`${page.document_id}:${page.version_id}:${page.page_number}`}
+          page={page}
+          targetWarningId={targetWarningId}
+          onSummaryChange={onWarningSummaryChange}
+        />
       ) : page.hidden && !page.enabled ? (
         <SourceRegistration
           page={page}
@@ -341,7 +702,16 @@ function NormalSourceRegistration({
 }
 
 export function CurationWorkbench() {
-  const [filter, setFilter] = useState<Filter>("pending");
+  const requestedParams = new URLSearchParams(window.location.search);
+  const requestedFilter = requestedParams.get("filter");
+  const requestedDocumentId = requestedParams.get("document");
+  const requestedVersionId = requestedParams.get("version");
+  const requestedPageParam = requestedParams.get("page");
+  const requestedPageNumber = requestedPageParam === null ? null : Number(requestedPageParam);
+  const [filter, setFilter] = useState<Filter>(
+    requestedFilter === "rendering-warnings" ? "rendering-warnings" : "pending",
+  );
+  const targetWarningId = requestedParams.get("warning");
   const [pages, setPages] = useState<CurationPage[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -365,8 +735,17 @@ export function CurationWorkbench() {
       setPages(nextPages);
       setSelectedKey((current) => {
         const preferred = preserveKey ?? current;
+        const requested = nextPages.find(
+          (page) =>
+            page.document_id === requestedDocumentId &&
+            page.version_id === requestedVersionId &&
+            (requestedPageNumber === null ||
+              page.page_number === requestedPageNumber),
+        );
         return nextPages.some((page) => pageKey(page) === preferred)
           ? preferred
+          : requested
+            ? pageKey(requested)
           : nextPages[0]
             ? pageKey(nextPages[0])
             : null;
@@ -409,6 +788,30 @@ export function CurationWorkbench() {
       if (selectedKeyRef.current === targetKey) statusRef.current?.focus();
     });
   }, []);
+
+  const handleWarningSummaryChange = useCallback(
+    (
+      versionSummary: NonNullable<CurationPage["version_rendering_warnings"]>,
+      pageSummary: NonNullable<CurationPage["rendering_warnings"]>,
+    ) => {
+      const targetKey = selectedKeyRef.current;
+      setPages((current) => {
+        const target = current.find((page) => pageKey(page) === targetKey);
+        if (!target) return current;
+        return current.map((page) =>
+          page.version_id === target.version_id
+            ? {
+                ...page,
+                version_rendering_warnings: versionSummary,
+                rendering_warnings:
+                  pageKey(page) === targetKey ? pageSummary : page.rendering_warnings,
+              }
+            : page,
+        );
+      });
+    },
+    [],
+  );
 
   const watchJob = useCallback(
     async (jobId: string, targetKey: string) => {
@@ -549,6 +952,7 @@ export function CurationWorkbench() {
         pages={pages}
         filter={filter}
         selectedKey={selectedKey}
+        versionWarningSummary={selected?.version_rendering_warnings}
         onFilter={setFilter}
         onSelect={setSelectedKey}
       />
@@ -559,6 +963,9 @@ export function CurationWorkbench() {
         announcement={selectedOperation?.announcement ?? null}
         statusRef={statusRef}
         onEnable={() => void handleEnable()}
+        warningMode={filter === "rendering-warnings"}
+        targetWarningId={targetWarningId}
+        onWarningSummaryChange={handleWarningSummaryChange}
       />
     </main>
   );

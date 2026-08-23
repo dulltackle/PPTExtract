@@ -7,10 +7,13 @@ from datetime import UTC, datetime, timedelta
 from pptextract.config import Settings
 from pptextract.db import connect, initialize_database, transaction
 from pptextract.ingest_workflow import (
+    enqueue_stale_render_jobs,
     fail_hidden_page_job,
     fail_ingestion_job,
+    fail_rerender_job,
     process_hidden_page_job,
     process_ingestion_job,
+    process_rerender_job,
 )
 from pptextract.jobs import claim_next_job, finish_job
 from pptextract.object_store import LocalObjectStore
@@ -56,6 +59,7 @@ def worker_is_fresh(settings: Settings, *, at: datetime | None = None) -> bool:
 
 def run_once(settings: Settings) -> bool:
     record_heartbeat(settings)
+    enqueue_stale_render_jobs(settings)
     job = claim_next_job(settings)
     if job is None:
         return False
@@ -71,6 +75,13 @@ def run_once(settings: Settings) -> bool:
             process_hidden_page_job(settings, job)
         except Exception as error:
             fail_hidden_page_job(settings, job, error)
+    elif job.kind == "version.rerender":
+        try:
+            process_rerender_job(settings, job)
+        except Exception as error:
+            fail_rerender_job(settings, job, error)
+        else:
+            finish_job(settings, job, succeeded=True)
     else:
         finish_job(settings, job, succeeded=False)
     return True

@@ -10,6 +10,7 @@ export interface DocumentSummary {
   status?: JobStatus;
   status_label?: string;
   action?: { label: string; href: string } | null;
+  rendering_warnings?: RenderingWarningSummary;
 }
 
 export interface Runway {
@@ -36,7 +37,30 @@ export interface JobError {
   retryable?: boolean;
 }
 
-export type JobStatus = "queued" | "running" | "requires_action" | "succeeded" | "failed" | "cancelled";
+export type JobStatus = "queued" | "running" | "requires_action" | "succeeded" | "failed" | "cancelled" | "ready";
+
+export interface RenderingWarningSummary {
+  total: number;
+  pages: number;
+  unconfirmed: number;
+  unconfirmed_pages: number;
+}
+
+export interface RenderingWarning {
+  warning_id: string;
+  page_number: number;
+  code: "missing_font" | "animation_flattened";
+  details: {
+    requested_font?: string | null;
+    replacement_font?: string | null;
+    timeline_count?: number | null;
+  };
+  render_config_version: string;
+  observed_at: string;
+  status: "unconfirmed" | "confirmed";
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+}
 
 export interface EnablementState {
   status: JobStatus | "not_started";
@@ -56,6 +80,8 @@ export interface CurationPage {
   enabled: boolean;
   source_reference: SourceReference;
   enablement: EnablementState | null;
+  rendering_warnings?: RenderingWarningSummary;
+  version_rendering_warnings?: RenderingWarningSummary;
 }
 
 export interface JobData {
@@ -90,6 +116,25 @@ export interface PageDetail {
     body: string[];
     speaker_notes: string[];
   };
+  rendering_warnings?: {
+    summary: RenderingWarningSummary;
+    warnings: RenderingWarning[];
+  };
+}
+
+export interface PublicationPreflight {
+  can_publish: boolean;
+  summary: RenderingWarningSummary;
+  stale_render_versions: number;
+  href: string | null;
+}
+
+export interface RenderingWarningsPayload {
+  document_id: string;
+  version_id: string;
+  render_config_version: string;
+  summary: RenderingWarningSummary;
+  warnings: RenderingWarning[];
 }
 
 export interface MappingAdjacentPage {
@@ -283,12 +328,13 @@ export async function confirmPageMapping(
 }
 
 export async function loadCurationPages(
-  reviewStatus: "pending" | "all",
+  reviewStatus: "pending" | "all" | "rendering-warnings",
   signal?: AbortSignal,
 ): Promise<CurationPage[]> {
   let response: Response;
   try {
-    response = await fetch(`/api/v1/curation/pages?review_status=${reviewStatus}`, {
+    const apiReviewStatus = reviewStatus === "rendering-warnings" ? "all" : reviewStatus;
+    response = await fetch(`/api/v1/curation/pages?review_status=${apiReviewStatus}`, {
       headers: { Accept: "application/json" },
       signal,
     });
@@ -296,8 +342,12 @@ export async function loadCurationPages(
     if (error instanceof DOMException && error.name === "AbortError") throw error;
     throw new OperatorError("无法加载策展页清单。请检查连接后重试。");
   }
-  return (await readJson<{ pages: CurationPage[] }>(response, "策展页清单暂时不可用。"))
-    .pages;
+  const pages = (
+    await readJson<{ pages: CurationPage[] }>(response, "策展页清单暂时不可用。")
+  ).pages;
+  return reviewStatus === "rendering-warnings"
+    ? pages.filter((page) => (page.rendering_warnings?.total ?? 0) > 0)
+    : pages;
 }
 
 export async function enableHiddenPage(page: CurationPage): Promise<PageEnablementAccepted> {
@@ -329,4 +379,77 @@ export async function loadPageDetail(pageId: string, signal?: AbortSignal): Prom
     signal,
   });
   return readJson<PageDetail>(response, "AnyDoc 来源暂时不可用，请重试。");
+}
+
+function renderingWarningRoute(page: CurationPage): string {
+  return `/api/v1/documents/${page.document_id}/versions/${page.version_id}/rendering-warnings`;
+}
+
+export async function loadRenderingWarnings(
+  page: CurationPage,
+  signal?: AbortSignal,
+): Promise<RenderingWarningsPayload> {
+  const response = await fetch(renderingWarningRoute(page), {
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  return readJson<RenderingWarningsPayload>(response, "渲染警告暂时不可用，请重试。");
+}
+
+export async function confirmRenderingWarning(
+  page: CurationPage,
+  warningId: string,
+): Promise<RenderingWarning> {
+  const response = await fetch(`${renderingWarningRoute(page)}/${warningId}/confirm`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<RenderingWarning>(response, "渲染警告确认失败，请重试。");
+}
+
+export async function confirmAllRenderingWarnings(
+  page: CurationPage,
+  renderConfigVersion: string,
+  warningIds: string[],
+): Promise<{
+  confirmed_count: number;
+  summary: RenderingWarningSummary;
+  render_config_version: string;
+  warnings: RenderingWarning[];
+}> {
+  const response = await fetch(`${renderingWarningRoute(page)}/confirm-all`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        render_config_version: renderConfigVersion,
+        warning_ids: warningIds,
+      }),
+  });
+  return readJson<{
+    confirmed_count: number;
+    summary: RenderingWarningSummary;
+    render_config_version: string;
+    warnings: RenderingWarning[];
+  }>(
+    response,
+    "整版渲染警告确认失败，请重新检查。",
+  );
+}
+
+export async function loadPublicationPreflight(
+  signal?: AbortSignal,
+): Promise<PublicationPreflight> {
+  const response = await fetch("/api/v1/publications/preflight", {
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  return readJson(response, "发布前置校验暂时不可用，请重试。");
+}
+
+export async function validatePublicationPreflight(): Promise<PublicationPreflight> {
+  const response = await fetch("/api/v1/publications/preflight", {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson(response, "发布前置校验未通过，请重新检查。");
 }
