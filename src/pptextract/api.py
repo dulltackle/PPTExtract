@@ -13,6 +13,14 @@ from starlette.exceptions import HTTPException
 
 from pptextract.auth import ActorProvider, HeaderActorProvider
 from pptextract.config import Settings
+from pptextract.curation import (
+    CurationRequestError,
+    approve_page,
+    complete_source_review,
+    confirm_source_snapshot,
+    read_page_curation,
+    save_source_snapshot,
+)
 from pptextract.db import connect, database_path_is_local, initialize_database, transaction
 from pptextract.ingest_workflow import (
     IngestionRequestError,
@@ -66,6 +74,16 @@ class PageMappingDecision(BaseModel):
 class ConfirmAllRenderingWarnings(BaseModel):
     render_config_version: str = Field(min_length=1, max_length=200)
     warning_ids: list[str] = Field(min_length=1, max_length=10_000)
+
+
+class SaveSourceSnapshot(BaseModel):
+    base_snapshot_id: str | None = None
+    titles: list[str] = Field(max_length=10_000)
+    body: list[str] = Field(max_length=100_000)
+
+
+class SnapshotCommand(BaseModel):
+    snapshot_id: str = Field(min_length=1, max_length=128)
 
 
 def _read_curation_snapshot(
@@ -1004,6 +1022,9 @@ def create_app(
                 if row is None
                 else _read_curation_snapshot(connection, row["prefill_snapshot_id"])
             )
+            curation = (
+                None if row is None else read_page_curation(connection, page_id)
+            )
             page_warning_rows = (
                 []
                 if row is None
@@ -1043,6 +1064,7 @@ def create_app(
                     "sha256": row["fingerprint_sha256"],
                 },
                 "source_content": json.loads(row["source_content_json"]),
+                "curation": curation,
                 "standard_render": {
                     "sha256": row["render_sha256"],
                     "media_type": row["render_media_type"],
@@ -1059,6 +1081,72 @@ def create_app(
                 },
             }
         )
+
+    @app.post("/api/v1/pages/{page_id}/curation/snapshots")
+    async def create_source_snapshot(
+        page_id: str, command: SaveSourceSnapshot, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = save_source_snapshot(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+                titles=command.titles,
+                body=command.body,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=201, content={"curation": curation})
+
+    @app.post("/api/v1/pages/{page_id}/curation/source-confirmation")
+    async def confirm_page_source(
+        page_id: str, command: SnapshotCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = confirm_source_snapshot(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                snapshot_id=command.snapshot_id,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content={"curation": curation})
+
+    @app.post("/api/v1/pages/{page_id}/curation/source-review")
+    async def review_page_source(
+        page_id: str, command: SnapshotCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = complete_source_review(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                snapshot_id=command.snapshot_id,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content={"curation": curation})
+
+    @app.post("/api/v1/pages/{page_id}/approve")
+    async def approve_curation_page(
+        page_id: str, command: SnapshotCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = approve_page(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                snapshot_id=command.snapshot_id,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=result)
 
     @app.get("/api/v1/pages/{page_id}/render", response_model=None)
     async def get_page_render(page_id: str) -> FileResponse | JSONResponse:

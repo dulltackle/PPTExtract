@@ -7,11 +7,11 @@ import {
   enableHiddenPage,
   loadCurationPages,
   loadJob,
-  loadPageDetail,
   loadRenderingWarnings,
   OperatorError,
   type RenderingWarning,
 } from "./api";
+import { SourceReviewLog } from "./SourceReviewLog";
 
 type Filter = "pending" | "all" | "rendering-warnings";
 
@@ -576,6 +576,9 @@ function InspectorPanel({
   warningMode,
   targetWarningId,
   onWarningSummaryChange,
+  curationAnnouncement,
+  onSourceDirtyChange,
+  onApproved,
 }: {
   page: CurationPage | null;
   submitting: boolean;
@@ -588,11 +591,16 @@ function InspectorPanel({
     versionSummary: NonNullable<CurationPage["version_rendering_warnings"]>,
     pageSummary: NonNullable<CurationPage["rendering_warnings"]>,
   ) => void;
+  curationAnnouncement: string | null;
+  onSourceDirtyChange: (dirty: boolean) => void;
+  onApproved: () => Promise<void>;
 }) {
   return (
     <aside className="inspector-panel" aria-label="来源与策展日志">
       {!page ? (
-        <div className="inspector-empty">选择一页后，这里会显示可追溯来源与可用动作。</div>
+        <div className="inspector-empty">
+          {curationAnnouncement ?? "选择一页后，这里会显示可追溯来源与可用动作。"}
+        </div>
       ) : warningMode && page.page_id ? (
         <WarningInspector
           key={`${page.document_id}:${page.version_id}:${page.page_number}`}
@@ -609,95 +617,15 @@ function InspectorPanel({
           onEnable={onEnable}
         />
       ) : (
-        <NormalSourceRegistration
+        <SourceReviewLog
           page={page}
-          announcement={announcement}
+          arrivalAnnouncement={curationAnnouncement ?? announcement}
           statusRef={statusRef}
+          onDirtyChange={onSourceDirtyChange}
+          onApproved={onApproved}
         />
       )}
     </aside>
-  );
-}
-
-function NormalSourceRegistration({
-  page,
-  announcement,
-  statusRef,
-}: {
-  page: CurationPage;
-  announcement: string | null;
-  statusRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  const [source, setSource] = useState<{
-    titles: string[];
-    body: string[];
-    speaker_notes: string[];
-  } | null>(null);
-  const [sourceError, setSourceError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!page.page_id) return;
-    const controller = new AbortController();
-    setSource(null);
-    setSourceError(null);
-    loadPageDetail(page.page_id, controller.signal)
-      .then((detail) => setSource(detail.source_content))
-      .catch((cause) => {
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setSourceError(
-          cause instanceof OperatorError ? cause.message : "AnyDoc 来源加载失败，请重试。",
-        );
-      });
-    return () => controller.abort();
-  }, [page.page_id]);
-
-  return (
-    <div className="source-registration">
-      <div className="log-title-row">
-        <div>
-          <h2>AnyDoc 来源</h2>
-          <p>页已进入普通策展流程</p>
-        </div>
-        <span className="pending-chip">{pageStatusLabel(page)}</span>
-      </div>
-      {announcement ? (
-        <div
-          className="task-notice task-notice--success"
-          role="status"
-          aria-live="polite"
-          tabIndex={-1}
-          ref={statusRef}
-        >
-          <strong>{announcement}</strong>
-        </div>
-      ) : null}
-      <div className="normal-source-note" aria-busy={!source && !sourceError}>
-        {sourceError ? (
-          <p className="source-load-error">{sourceError}</p>
-        ) : source ? (
-          <>
-            <strong>{source.titles[0] || page.title || `第 ${page.page_number} 页`}</strong>
-            {source.body.length ? (
-              <div className="source-body">
-                {source.body.map((paragraph, index) => (
-                  <p key={`${index}:${paragraph}`}>{paragraph}</p>
-                ))}
-              </div>
-            ) : (
-              <p>本页没有正文段落；标题、表格、图片或备注仍可作为来源。</p>
-            )}
-            {source.speaker_notes.length ? (
-              <div className="speaker-notes">
-                <span>演讲者备注</span>
-                <p>{source.speaker_notes.join("\n")}</p>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <p>正在加载真实 AnyDoc 来源…</p>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -717,6 +645,8 @@ export function CurationWorkbench() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [operations, setOperations] = useState<Record<string, PageOperation>>({});
+  const [sourceDirty, setSourceDirty] = useState(false);
+  const [curationAnnouncement, setCurationAnnouncement] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const poll = useRef<AbortController | null>(null);
   const timer = useRef<number | null>(null);
@@ -750,9 +680,11 @@ export function CurationWorkbench() {
             ? pageKey(nextPages[0])
             : null;
       });
+      return nextPages;
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      if (cause instanceof DOMException && cause.name === "AbortError") return [];
       setError(cause instanceof OperatorError ? cause.message : "策展页清单发生未知错误。请重试。");
+      return [];
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
@@ -768,6 +700,25 @@ export function CurationWorkbench() {
     [pages, selectedKey],
   );
   const selectedOperation = selectedKey ? operations[selectedKey] : undefined;
+
+  const confirmDiscard = useCallback(() => {
+    if (!sourceDirty) return true;
+    return window.confirm("当前页仍有未保存的来源修改。放弃这些修改并继续吗？");
+  }, [sourceDirty]);
+
+  const handleSelect = useCallback((key: string) => {
+    if (!confirmDiscard()) return;
+    setSourceDirty(false);
+    setCurationAnnouncement(null);
+    setSelectedKey(key);
+  }, [confirmDiscard]);
+
+  const handleFilter = useCallback((nextFilter: Filter) => {
+    if (!confirmDiscard()) return;
+    setSourceDirty(false);
+    setCurationAnnouncement(null);
+    setFilter(nextFilter);
+  }, [confirmDiscard]);
 
   const updateOperation = useCallback(
     (targetKey: string, update: Partial<PageOperation>) => {
@@ -932,6 +883,26 @@ export function CurationWorkbench() {
     }
   };
 
+  const handleApproved = useCallback(async () => {
+    setSourceDirty(false);
+    const approvedKey = selectedKeyRef.current;
+    const nextPages = await loadPages(filter, approvedKey);
+    const approvedIndex = nextPages.findIndex((page) => pageKey(page) === approvedKey);
+    const orderedPages = approvedIndex < 0
+      ? nextPages
+      : [
+          ...nextPages.slice(approvedIndex + 1),
+          ...nextPages.slice(0, approvedIndex),
+        ];
+    const nextPending = orderedPages.find((page) => page.review_status === "pending");
+    if (nextPending) setSelectedKey(pageKey(nextPending));
+    setCurationAnnouncement(
+      nextPending
+        ? "上一页已批准。已转到下一待处理页。"
+        : "待处理队列已清空",
+    );
+  }, [filter, loadPages]);
+
   if (error) {
     return (
       <main className="curation-load-state">
@@ -953,8 +924,8 @@ export function CurationWorkbench() {
         filter={filter}
         selectedKey={selectedKey}
         versionWarningSummary={selected?.version_rendering_warnings}
-        onFilter={setFilter}
-        onSelect={setSelectedKey}
+        onFilter={handleFilter}
+        onSelect={handleSelect}
       />
       <EvidencePanel page={selected} />
       <InspectorPanel
@@ -966,6 +937,9 @@ export function CurationWorkbench() {
         warningMode={filter === "rendering-warnings"}
         targetWarningId={targetWarningId}
         onWarningSummaryChange={handleWarningSummaryChange}
+        curationAnnouncement={curationAnnouncement}
+        onSourceDirtyChange={setSourceDirty}
+        onApproved={handleApproved}
       />
     </main>
   );

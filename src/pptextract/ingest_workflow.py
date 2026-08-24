@@ -2291,7 +2291,10 @@ def _clone_curation_snapshot(
     if source_snapshot_id is None:
         return None
     source = connection.execute(
-        "SELECT overview FROM curation_snapshots WHERE snapshot_id = ?",
+        """
+        SELECT overview, source_content_json, created_by
+        FROM curation_snapshots WHERE snapshot_id = ?
+        """,
         (source_snapshot_id,),
     ).fetchone()
     if source is None:
@@ -2301,8 +2304,8 @@ def _clone_curation_snapshot(
         """
         INSERT INTO curation_snapshots (
             snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
-            overview, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            overview, source_content_json, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot_id,
@@ -2310,9 +2313,54 @@ def _clone_curation_snapshot(
             snapshot_kind,
             source_snapshot_id,
             source["overview"],
+            source["source_content_json"],
+            source["created_by"],
             now,
         ),
     )
+    if preserve_visual_refs:
+        confirmation = connection.execute(
+            """
+            SELECT actor_id, confirmed_at
+            FROM curation_source_confirmations WHERE snapshot_id = ?
+            """,
+            (source_snapshot_id,),
+        ).fetchone()
+        if confirmation is not None:
+            connection.execute(
+                """
+                INSERT INTO curation_source_confirmations (
+                    confirmation_id, snapshot_id, actor_id, confirmed_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    snapshot_id,
+                    confirmation["actor_id"],
+                    confirmation["confirmed_at"],
+                ),
+            )
+        review = connection.execute(
+            """
+            SELECT actor_id, completed_at
+            FROM curation_source_reviews WHERE snapshot_id = ?
+            """,
+            (source_snapshot_id,),
+        ).fetchone()
+        if review is not None:
+            connection.execute(
+                """
+                INSERT INTO curation_source_reviews (
+                    review_id, snapshot_id, actor_id, completed_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    snapshot_id,
+                    review["actor_id"],
+                    review["completed_at"],
+                ),
+            )
     visuals = connection.execute(
         """
         SELECT * FROM curation_snapshot_visuals

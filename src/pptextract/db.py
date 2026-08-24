@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -191,8 +191,28 @@ def initialize_database(settings: Settings) -> None:
                 snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ('formal', 'prefill')),
                 source_snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
                 overview TEXT,
-                created_at TEXT NOT NULL,
-                UNIQUE (page_version_id, snapshot_kind)
+                source_content_json TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS curation_snapshots_page_version
+                ON curation_snapshots(page_version_id, created_at, snapshot_id);
+
+            CREATE TABLE IF NOT EXISTS curation_source_confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL UNIQUE
+                    REFERENCES curation_snapshots(snapshot_id),
+                actor_id TEXT NOT NULL,
+                confirmed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS curation_source_reviews (
+                review_id TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL UNIQUE
+                    REFERENCES curation_snapshots(snapshot_id),
+                actor_id TEXT NOT NULL,
+                completed_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS visual_objects (
@@ -316,6 +336,7 @@ def initialize_database(settings: Settings) -> None:
         )
         if 0 < existing_version < 3:
             _migrate_document_version_states(connection)
+        _migrate_curation_snapshots(connection)
         job_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)")}
         if "error_json" not in job_columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN error_json TEXT")
@@ -458,6 +479,75 @@ def initialize_database(settings: Settings) -> None:
             """
         )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _migrate_curation_snapshots(connection: sqlite3.Connection) -> None:
+    table = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'curation_snapshots'"
+    ).fetchone()
+    if table is None:
+        return
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(curation_snapshots)")
+    }
+    table_sql = str(table["sql"])
+    if {"source_content_json", "created_by"} <= columns and (
+        "UNIQUE (page_version_id, snapshot_kind)" not in table_sql
+    ):
+        return
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "ALTER TABLE curation_snapshots RENAME TO curation_snapshots_v11"
+        )
+        connection.execute(
+            """
+            CREATE TABLE curation_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ('formal', 'prefill')),
+                source_snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
+                overview TEXT,
+                source_content_json TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        source_content = (
+            "source_content_json" if "source_content_json" in columns else "NULL"
+        )
+        created_by = "created_by" if "created_by" in columns else "NULL"
+        connection.execute(
+            f"""
+            INSERT INTO curation_snapshots (
+                snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
+                overview, source_content_json, created_by, created_at
+            )
+            SELECT snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
+                   overview, {source_content}, {created_by}, created_at
+            FROM curation_snapshots_v11
+            """
+        )
+        connection.execute("DROP TABLE curation_snapshots_v11")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS curation_snapshots_page_version
+            ON curation_snapshots(page_version_id, created_at, snapshot_id)
+            """
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA legacy_alter_table = OFF")
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _migrate_job_states(connection: sqlite3.Connection) -> None:

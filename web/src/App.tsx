@@ -322,6 +322,11 @@ export function App() {
                 ? "刷新校验"
                 : "刷新入口"}
         </span>
+        {isCuration ? (
+          <span>
+            <kbd>A</kbd> 审核闸门开放时批准
+          </span>
+        ) : null}
         <span className="command-status">
           {state.kind === "ready"
             ? isMapping

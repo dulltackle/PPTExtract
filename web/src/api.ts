@@ -107,15 +107,58 @@ export interface PageEnablementAccepted {
   page_id: string | null;
 }
 
+export interface SourceImage {
+  reference_index: number;
+  alt_text: string;
+  media_type: string;
+  origin_part: string;
+  data_base64?: string;
+}
+
+export interface SourceContent {
+  titles: string[];
+  body: string[];
+  tables: unknown[];
+  images: SourceImage[];
+  speaker_notes: string[];
+}
+
+export interface CurationSnapshot {
+  snapshot_id: string;
+  source_snapshot_id: string | null;
+  source_content: SourceContent;
+  created_by: string | null;
+  created_at: string;
+  source_confirmation: { actor_id: string; confirmed_at: string } | null;
+  source_review: { actor_id: string; completed_at: string } | null;
+}
+
+export interface CurationBlocker {
+  code:
+    | "source_unsaved"
+    | "source_unconfirmed"
+    | "source_review_incomplete"
+    | "image_sources_unresolved"
+    | "chunk_body_empty";
+  message: string;
+}
+
+export interface CurationState {
+  current_snapshot: CurationSnapshot | null;
+  image_sources: { total: number; unresolved: number };
+  chunk_body: { nonempty: boolean };
+  blockers: CurationBlocker[];
+  can_confirm_source: boolean;
+  can_complete_source_review: boolean;
+  can_approve: boolean;
+}
+
 export interface PageDetail {
   page_id: string;
   page_number: number;
   review_status: "pending" | "approved" | "excluded";
-  source_content: {
-    titles: string[];
-    body: string[];
-    speaker_notes: string[];
-  };
+  source_content: SourceContent;
+  curation?: CurationState;
   rendering_warnings?: {
     summary: RenderingWarningSummary;
     warnings: RenderingWarning[];
@@ -379,6 +422,78 @@ export async function loadPageDetail(pageId: string, signal?: AbortSignal): Prom
     signal,
   });
   return readJson<PageDetail>(response, "AnyDoc 来源暂时不可用，请重试。");
+}
+
+export async function saveCurationSnapshot(
+  pageId: string,
+  baseSnapshotId: string | null,
+  titles: string[],
+  body: string[],
+): Promise<CurationState> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/snapshots`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ base_snapshot_id: baseSnapshotId, titles, body }),
+  });
+  return (
+    await readJson<{ curation: CurationState }>(
+      response,
+      "来源修改未能保存；本地修改仍保留。",
+    )
+  ).curation;
+}
+
+async function submitSnapshotCommand(
+  pageId: string,
+  action: "source-confirmation" | "source-review",
+  snapshotId: string,
+  fallback: string,
+): Promise<CurationState> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/${action}`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ snapshot_id: snapshotId }),
+  });
+  return (await readJson<{ curation: CurationState }>(response, fallback)).curation;
+}
+
+export function confirmCurationSource(
+  pageId: string,
+  snapshotId: string,
+): Promise<CurationState> {
+  return submitSnapshotCommand(
+    pageId,
+    "source-confirmation",
+    snapshotId,
+    "文字来源确认失败；当前状态未改变。",
+  );
+}
+
+export function completeCurationSourceReview(
+  pageId: string,
+  snapshotId: string,
+): Promise<CurationState> {
+  return submitSnapshotCommand(
+    pageId,
+    "source-review",
+    snapshotId,
+    "来源审核未能完成；当前状态未改变。",
+  );
+}
+
+export async function approveCurationPage(
+  pageId: string,
+  snapshotId: string,
+): Promise<{ review: { status: "approved" }; chunk_body: string }> {
+  const response = await fetch(`/api/v1/pages/${pageId}/approve`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ snapshot_id: snapshotId }),
+  });
+  return readJson<{ review: { status: "approved" }; chunk_body: string }>(
+    response,
+    "批准未完成；页面仍保留在待处理队列。",
+  );
 }
 
 function renderingWarningRoute(page: CurationPage): string {

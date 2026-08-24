@@ -400,6 +400,68 @@ def test_unchanged_page_inherits_formal_annotation_and_original_review(
     }
 
 
+def test_unchanged_page_inherits_frozen_source_content_and_review_facts(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    _install_toolchain(monkeypatch)
+    first = _upload(
+        client,
+        _presentation("来源继承页", subject="first"),
+        key="source-review-first",
+    )
+    assert run_once(settings) is True
+    original = _pages_by_title(client)["来源继承页"]
+    page_id = str(original["page_id"])
+
+    saved = client.post(
+        f"/api/v1/pages/{page_id}/curation/snapshots",
+        headers={"X-Actor-ID": "curator-source"},
+        json={
+            "base_snapshot_id": None,
+            "titles": ["人工修订的继承标题"],
+            "body": [],
+        },
+    ).json()["curation"]["current_snapshot"]
+    for route, actor in (
+        ("source-confirmation", "curator-confirm"),
+        ("source-review", "curator-review"),
+    ):
+        response = client.post(
+            f"/api/v1/pages/{page_id}/curation/{route}",
+            headers={"X-Actor-ID": actor},
+            json={"snapshot_id": saved["snapshot_id"]},
+        )
+        assert response.status_code == 200
+    approved = client.post(
+        f"/api/v1/pages/{page_id}/approve",
+        headers={"X-Actor-ID": "curator-approve"},
+        json={"snapshot_id": saved["snapshot_id"]},
+    )
+    assert approved.status_code == 200
+
+    _upload(
+        client,
+        _presentation("来源继承页", subject="second"),
+        key="source-review-second",
+        document_id=first["document_id"],
+    )
+    assert run_once(settings) is True
+    inherited = _pages_by_title(client)["来源继承页"]
+    detail = client.get(f"/api/v1/pages/{inherited['page_id']}").json()
+    snapshot = detail["curation"]["current_snapshot"]
+
+    assert inherited["review_status"] == "approved"
+    assert snapshot["snapshot_id"] != saved["snapshot_id"]
+    assert snapshot["source_snapshot_id"] == saved["snapshot_id"]
+    assert snapshot["source_content"]["titles"] == ["人工修订的继承标题"]
+    assert snapshot["created_by"] == "curator-source"
+    assert snapshot["source_confirmation"]["actor_id"] == "curator-confirm"
+    assert snapshot["source_review"]["actor_id"] == "curator-review"
+    assert detail["curation"]["chunk_body"] == {"nonempty": True}
+    assert detail["curation"]["blockers"] == []
+
+
 def test_changed_page_keeps_identity_but_only_receives_unconfirmed_prefill(
     system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
 ) -> None:

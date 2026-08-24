@@ -294,3 +294,74 @@ def test_synthetic_hidden_page_can_be_enabled_in_a_real_browser(
             "persistent-enable-to-pending",
         ],
     }
+
+
+def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_browser(
+    running_system: tuple[str, Path],
+) -> None:
+    base_url, _data_root = running_system
+    project_root = Path(__file__).resolve().parents[1]
+    with httpx.Client(trust_env=False, timeout=10) as client:
+        accepted = client.post(
+            f"{base_url}/api/v1/documents",
+            headers={
+                "X-Actor-ID": "blackbox-operator",
+                "Idempotency-Key": "browser-curation-review-fixture",
+            },
+            files={
+                "file": (
+                    "public-curation-review.pptx",
+                    build_plain_text_presentation(
+                        title="公开浏览器策展页",
+                        body_text="这是公开浏览器策展正文。",
+                    ),
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+            },
+        )
+        assert accepted.status_code == 202
+        identity = accepted.json()
+        deadline = time.monotonic() + 45
+        task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
+            time.sleep(0.1)
+            task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        assert task["status"] == "succeeded"
+
+    route = (
+        "/curation?document="
+        f"{identity['document_id']}&version={identity['version_id']}&page=1"
+    )
+    browser_result = subprocess.run(
+        ["node", "tests/curation-review-blackbox.mjs", base_url, route],
+        cwd=project_root / "web",
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert json.loads(browser_result.stdout) == {
+        "ok": True,
+        "checks": [
+            "viewport-1280-three-columns",
+            "plain-text-zero-capture-approved",
+            "keyboard-a-approved",
+        ],
+    }
+
+    with httpx.Client(trust_env=False, timeout=5) as client:
+        pages = client.get(
+            f"{base_url}/api/v1/curation/pages", params={"review_status": "all"}
+        ).json()["pages"]
+        approved = next(
+            page
+            for page in pages
+            if page["document_id"] == identity["document_id"]
+            and page["version_id"] == identity["version_id"]
+        )
+        assert approved["review_status"] == "approved"
+        detail = client.get(f"{base_url}/api/v1/pages/{approved['page_id']}").json()
+        assert detail["review"]["reviewed_by"] == "blackbox-operator"
+        assert detail["review"]["source_version_id"] == identity["version_id"]
+        assert detail["annotation"]["overview"] is None
+        assert detail["annotation"]["visuals"] == []
