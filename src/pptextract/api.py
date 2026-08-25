@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
@@ -19,6 +19,8 @@ from pptextract.curation import (
     complete_source_review,
     confirm_source_snapshot,
     read_page_curation,
+    read_source_image,
+    save_image_source_disposition,
     save_source_snapshot,
 )
 from pptextract.db import connect, database_path_is_local, initialize_database, transaction
@@ -86,6 +88,14 @@ class SnapshotCommand(BaseModel):
     snapshot_id: str = Field(min_length=1, max_length=128)
 
 
+class SaveImageSourceDisposition(BaseModel):
+    base_snapshot_id: str = Field(min_length=1, max_length=128)
+    disposition: str
+    summary: str | None = Field(default=None, max_length=100_000)
+    ignore_reason: str | None = Field(default=None, max_length=128)
+    ignore_note: str | None = Field(default=None, max_length=100_000)
+
+
 def _read_curation_snapshot(
     connection: sqlite3.Connection, snapshot_id: str | None
 ) -> dict[str, Any] | None:
@@ -103,7 +113,8 @@ def _read_curation_snapshot(
     visuals = connection.execute(
         """
         SELECT visual_ref, position, source_kind, disposition, summary,
-               visual_type, bounds_json, source_visual_ref, confirmed
+               visual_type, bounds_json, source_visual_ref, confirmed,
+               source_image_ref, asset_sha256, asset_media_type, asset_size_bytes
         FROM curation_snapshot_visuals
         WHERE snapshot_id = ? ORDER BY position
         """,
@@ -129,6 +140,19 @@ def _read_curation_snapshot(
                 ),
                 "source_visual_ref": visual["source_visual_ref"],
                 "confirmed": bool(visual["confirmed"]),
+                **(
+                    {
+                        "source_image_ref": visual["source_image_ref"],
+                        "asset": {
+                            "sha256": visual["asset_sha256"],
+                            "media_type": visual["asset_media_type"],
+                            "size_bytes": visual["asset_size_bytes"],
+                            "byte_contract": "anydoc_original",
+                        },
+                    }
+                    if visual["source_kind"] == "source_image"
+                    else {}
+                ),
             }
             for visual in visuals
         ],
@@ -1116,6 +1140,33 @@ def create_app(
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(content={"curation": curation})
 
+    @app.post(
+        "/api/v1/pages/{page_id}/curation/image-sources/{source_ref}",
+        status_code=201,
+    )
+    async def save_page_image_source(
+        page_id: str,
+        source_ref: str,
+        command: SaveImageSourceDisposition,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = save_image_source_disposition(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+                source_ref=source_ref,
+                disposition=command.disposition,
+                summary=command.summary,
+                ignore_reason=command.ignore_reason,
+                ignore_note=command.ignore_note,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=201, content={"curation": curation})
+
     @app.post("/api/v1/pages/{page_id}/curation/source-review")
     async def review_page_source(
         page_id: str, command: SnapshotCommand, request: Request
@@ -1176,6 +1227,35 @@ def create_app(
         if not path.is_file():
             return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")
         return FileResponse(path, media_type=row["render_media_type"])
+
+    @app.get(
+        "/api/v1/pages/{page_id}/source-images/{source_ref}",
+        response_model=None,
+    )
+    async def get_source_image(page_id: str, source_ref: str) -> Response | JSONResponse:
+        with connect(resolved) as connection:
+            try:
+                source_image = read_source_image(
+                    connection, page_id=page_id, source_ref=source_ref
+                )
+            except CurationRequestError as error:
+                return error_response(error.status_code, error.code, error.message)
+        if source_image is None:
+            return error_response(
+                404, "source_image_not_found", "未找到图片来源原始字节。"
+            )
+        payload, media_type = source_image
+        return Response(
+            content=payload,
+            media_type=media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": (
+                    "sandbox; default-src 'none'; img-src data:; "
+                    "style-src 'unsafe-inline'"
+                ),
+            },
+        )
 
     @app.get("/api/v1/health")
     async def health() -> JSONResponse:

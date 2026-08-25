@@ -116,6 +116,12 @@ def test_v2_database_migrates_version_states_and_active_job_targets(tmp_path: Pa
 
     with connect(settings) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'page_version_image_sources'
+            """
+        ).fetchone() is not None
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert dict(
             connection.execute(

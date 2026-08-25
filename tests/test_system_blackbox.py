@@ -15,7 +15,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.support.synthetic_pptx import build_minimal_presentation, build_plain_text_presentation
+from tests.support.synthetic_pptx import (
+    build_image_curation_presentation,
+    build_minimal_presentation,
+    build_plain_text_presentation,
+)
 
 
 def available_port() -> int:
@@ -365,3 +369,59 @@ def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_b
         assert detail["review"]["source_version_id"] == identity["version_id"]
         assert detail["annotation"]["overview"] is None
         assert detail["annotation"]["visuals"] == []
+
+
+def test_anydoc_image_sources_are_disposed_in_a_real_browser(
+    running_system: tuple[str, Path],
+) -> None:
+    base_url, _data_root = running_system
+    project_root = Path(__file__).resolve().parents[1]
+    with httpx.Client(trust_env=False, timeout=10) as client:
+        accepted = client.post(
+            f"{base_url}/api/v1/documents",
+            headers={
+                "X-Actor-ID": "blackbox-operator",
+                "Idempotency-Key": "browser-source-image-fixture",
+            },
+            files={
+                "file": (
+                    "public-source-image-review.pptx",
+                    build_image_curation_presentation(),
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+            },
+        )
+        assert accepted.status_code == 202
+        identity = accepted.json()
+        deadline = time.monotonic() + 60
+        task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
+            time.sleep(0.1)
+            task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+        assert task["status"] == "succeeded"
+
+    route_prefix = (
+        "/curation?document="
+        f"{identity['document_id']}&version={identity['version_id']}"
+    )
+    browser_result = subprocess.run(
+        ["node", "tests/source-image-review-blackbox.mjs", base_url, route_prefix],
+        cwd=project_root / "web",
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert json.loads(browser_result.stdout) == {
+        "ok": True,
+        "checks": [
+            "image-viewport-1280-three-columns",
+            "single-image-included",
+            "single-image-ignored",
+            "mixed-duplicate-dispositions",
+            "preview-and-save-recovery",
+            "review-invalidated-and-leave-warning",
+            "image-viewport-1440",
+            "source-load-recovery",
+        ],
+    }

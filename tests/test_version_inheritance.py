@@ -11,7 +11,7 @@ from pptx import Presentation
 
 from pptextract.api import create_app
 from pptextract.config import Settings
-from pptextract.conversion import NormalizedPageContent
+from pptextract.conversion import NormalizedImage, NormalizedPageContent
 from pptextract.db import connect, transaction
 from pptextract.pptx_projection import SourcePage
 from pptextract.rendering import StandardPageRender
@@ -87,11 +87,25 @@ def _replace_title(source: bytes, old_title: str, new_title: str) -> bytes:
     return stream.getvalue()
 
 
-def _install_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_toolchain(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_image: bytes | None = None,
+    source_image_reference_index: int = 0,
+) -> None:
     def convert(source: bytes, page: SourcePage) -> NormalizedPageContent:
         presentation = Presentation(BytesIO(source))
         title = presentation.slides[page.page_number - 1].shapes.title.text
-        return NormalizedPageContent((title,), (), (), ())
+        images = () if source_image is None else (
+            NormalizedImage(
+                source_image_reference_index,
+                "可继承来源图",
+                "image/png",
+                "ppt/media/inherited.png",
+                source_image,
+            ),
+        )
+        return NormalizedPageContent((title,), (), (), images)
 
     def render(
         source: bytes, *, toolchain: object, pages: tuple[SourcePage, ...]
@@ -460,6 +474,80 @@ def test_unchanged_page_inherits_frozen_source_content_and_review_facts(
     assert snapshot["source_review"]["actor_id"] == "curator-review"
     assert detail["curation"]["chunk_body"] == {"nonempty": True}
     assert detail["curation"]["blockers"] == []
+
+
+def test_unchanged_page_inherits_frozen_source_image_disposition_and_original_asset(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    original_bytes = b"inherited-anydoc-original"
+    _install_toolchain(
+        monkeypatch,
+        source_image=original_bytes,
+        source_image_reference_index=7,
+    )
+    first = _upload(
+        client,
+        _presentation("图片来源继承页", subject="first"),
+        key="image-source-first",
+    )
+    assert run_once(settings) is True
+    original = _pages_by_title(client)["图片来源继承页"]
+    page_id = str(original["page_id"])
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/snapshots",
+        json={"base_snapshot_id": None, "titles": ["图片来源继承页"], "body": []},
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-confirmation",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    original_source_ref = state["image_sources"]["items"][0]["source_ref"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/image-sources/{original_source_ref}",
+        headers={"X-Actor-ID": "curator-image"},
+        json={
+            "base_snapshot_id": state["current_snapshot"]["snapshot_id"],
+            "disposition": "included",
+            "summary": "公开图片展示可继承的原始资产契约。",
+        },
+    ).json()["curation"]
+    visual_ref = state["image_sources"]["items"][0]["visual_ref"]
+    asset_sha256 = state["image_sources"]["items"][0]["object_sha256"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-review",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    assert client.post(
+        f"/api/v1/pages/{page_id}/approve",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).status_code == 200
+
+    _upload(
+        client,
+        _presentation("图片来源继承页", subject="second"),
+        key="image-source-second",
+        document_id=first["document_id"],
+    )
+    assert run_once(settings) is True
+    inherited = _pages_by_title(client)["图片来源继承页"]
+    detail = client.get(f"/api/v1/pages/{inherited['page_id']}").json()
+    item = detail["curation"]["image_sources"]["items"][0]
+
+    assert inherited["review_status"] == "approved"
+    assert item["source_ref"] != original_source_ref
+    assert item["disposition"] == "included"
+    assert item["summary"] == "公开图片展示可继承的原始资产契约。"
+    assert item["visual_ref"] == visual_ref
+    assert item["object_sha256"] == asset_sha256
+    assert detail["curation"]["blockers"] == []
+    assert detail["annotation"]["visuals"][0]["source_image_ref"] == item["source_ref"]
+    assert detail["annotation"]["visuals"][0]["asset"] == {
+        "sha256": asset_sha256,
+        "media_type": "image/png",
+        "size_bytes": len(original_bytes),
+        "byte_contract": "anydoc_original",
+    }
 
 
 def test_changed_page_keeps_identity_but_only_receives_unconfirmed_prefill(

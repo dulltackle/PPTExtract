@@ -115,6 +115,33 @@ export interface SourceImage {
   data_base64?: string;
 }
 
+export type ImageDisposition = "included" | "ignored";
+
+export type ImageIgnoreReason =
+  | "decorative"
+  | "duplicate_source"
+  | "expressed_elsewhere"
+  | "not_relevant"
+  | "corrupt_or_unverifiable"
+  | "other";
+
+export interface CurationImageSource extends SourceImage {
+  source_ref: string;
+  position: number;
+  object_sha256: string | null;
+  size_bytes: number | null;
+  integrity: "verified" | "missing" | "hash_mismatch";
+  duplicate_object: boolean;
+  preview_url: string;
+  disposition: ImageDisposition | null;
+  summary: string | null;
+  ignore_reason: ImageIgnoreReason | null;
+  ignore_note: string | null;
+  visual_ref: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+}
+
 export interface SourceContent {
   titles: string[];
   body: string[];
@@ -131,6 +158,7 @@ export interface CurationSnapshot {
   created_at: string;
   source_confirmation: { actor_id: string; confirmed_at: string } | null;
   source_review: { actor_id: string; completed_at: string } | null;
+  image_source_decisions?: CurationImageSource[];
 }
 
 export interface CurationBlocker {
@@ -138,14 +166,26 @@ export interface CurationBlocker {
     | "source_unsaved"
     | "source_unconfirmed"
     | "source_review_incomplete"
-    | "image_sources_unresolved"
+    | "image_disposition_required"
+    | "image_summary_required"
+    | "image_reason_required"
+    | "image_other_note_required"
+    | "image_changes_unsaved"
+    | "image_bytes_unavailable"
+    | "image_hash_mismatch"
+    | "image_media_type_unsupported"
     | "chunk_body_empty";
   message: string;
+  source_ref?: string;
 }
 
 export interface CurationState {
   current_snapshot: CurationSnapshot | null;
-  image_sources: { total: number; unresolved: number };
+  image_sources: {
+    total: number;
+    unresolved: number;
+    items: CurationImageSource[];
+  };
   chunk_body: { nonempty: boolean };
   blockers: CurationBlocker[];
   can_confirm_source: boolean;
@@ -439,6 +479,37 @@ export async function saveCurationSnapshot(
     await readJson<{ curation: CurationState }>(
       response,
       "来源修改未能保存；本地修改仍保留。",
+    )
+  ).curation;
+}
+
+export async function saveCurationImageSource(
+  pageId: string,
+  sourceRef: string,
+  baseSnapshotId: string,
+  disposition: ImageDisposition,
+  summary: string | null,
+  ignoreReason: ImageIgnoreReason | null,
+  ignoreNote: string | null,
+): Promise<CurationState> {
+  const response = await fetch(
+    `/api/v1/pages/${pageId}/curation/image-sources/${sourceRef}`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base_snapshot_id: baseSnapshotId,
+        disposition,
+        summary,
+        ignore_reason: ignoreReason,
+        ignore_note: ignoreNote,
+      }),
+    },
+  );
+  return (
+    await readJson<{ curation: CurationState }>(
+      response,
+      "图片来源处置未能保存；本地修改仍保留。",
     )
   ).curation;
 }

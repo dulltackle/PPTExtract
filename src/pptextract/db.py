@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -10,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -185,6 +188,22 @@ def initialize_database(settings: Settings) -> None:
             CREATE INDEX IF NOT EXISTS page_versions_review_queue
                 ON page_versions(review_status, document_id, page_number);
 
+            CREATE TABLE IF NOT EXISTS page_version_image_sources (
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                reference_index INTEGER NOT NULL CHECK (reference_index >= 0),
+                position INTEGER NOT NULL CHECK (position >= 0),
+                object_sha256 TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                media_type TEXT NOT NULL,
+                origin_part TEXT NOT NULL,
+                alt_text TEXT NOT NULL,
+                PRIMARY KEY (page_version_id, reference_index),
+                UNIQUE (page_version_id, position)
+            );
+
+            CREATE INDEX IF NOT EXISTS page_version_image_sources_object
+                ON page_version_image_sources(object_sha256);
+
             CREATE TABLE IF NOT EXISTS curation_snapshots (
                 snapshot_id TEXT PRIMARY KEY,
                 page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
@@ -233,6 +252,32 @@ def initialize_database(settings: Settings) -> None:
                 source_visual_ref TEXT REFERENCES visual_objects(visual_ref),
                 confirmed INTEGER NOT NULL CHECK (confirmed IN (0, 1)),
                 PRIMARY KEY (snapshot_id, visual_ref),
+                UNIQUE (snapshot_id, position)
+            );
+
+            CREATE TABLE IF NOT EXISTS curation_snapshot_image_sources (
+                snapshot_id TEXT NOT NULL REFERENCES curation_snapshots(snapshot_id),
+                source_ref TEXT NOT NULL,
+                reference_index INTEGER NOT NULL CHECK (reference_index >= 0),
+                position INTEGER NOT NULL CHECK (position >= 0),
+                disposition TEXT NOT NULL CHECK (disposition IN ('included', 'ignored')),
+                summary TEXT,
+                ignore_reason TEXT CHECK (
+                    ignore_reason IS NULL OR ignore_reason IN (
+                        'decorative', 'duplicate_source', 'expressed_elsewhere',
+                        'not_relevant', 'corrupt_or_unverifiable', 'other'
+                    )
+                ),
+                ignore_note TEXT,
+                visual_ref TEXT REFERENCES visual_objects(visual_ref),
+                object_sha256 TEXT,
+                media_type TEXT NOT NULL,
+                size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0),
+                origin_part TEXT NOT NULL,
+                alt_text TEXT NOT NULL,
+                decided_by TEXT NOT NULL,
+                decided_at TEXT NOT NULL,
+                PRIMARY KEY (snapshot_id, source_ref),
                 UNIQUE (snapshot_id, position)
             );
 
@@ -459,6 +504,23 @@ def initialize_database(settings: Settings) -> None:
                 connection.execute(
                     f"ALTER TABLE page_versions ADD COLUMN {column} {declaration}"
                 )
+        visual_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(curation_snapshot_visuals)")
+        }
+        visual_additions = {
+            "source_image_ref": "TEXT",
+            "asset_sha256": "TEXT REFERENCES stored_objects(sha256)",
+            "asset_media_type": "TEXT",
+            "asset_size_bytes": "INTEGER",
+        }
+        for column, declaration in visual_additions.items():
+            if column not in visual_columns:
+                connection.execute(
+                    f"ALTER TABLE curation_snapshot_visuals ADD COLUMN {column} {declaration}"
+                )
+        if existing_version < 14:
+            _backfill_page_version_image_sources(connection)
         for row in connection.execute(
             "SELECT job_id, payload_json FROM jobs WHERE kind = 'document.ingest'"
         ):
@@ -479,6 +541,42 @@ def initialize_database(settings: Settings) -> None:
             """
         )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _backfill_page_version_image_sources(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT page_version_id, source_content_json FROM page_versions"
+    ).fetchall()
+    for row in rows:
+        content = json.loads(str(row["source_content_json"]))
+        for position, image in enumerate(content.get("images", [])):
+            if not isinstance(image, dict):
+                continue
+            encoded = image.get("data_base64")
+            if not isinstance(encoded, str):
+                continue
+            try:
+                payload = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                continue
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO page_version_image_sources (
+                    page_version_id, reference_index, position, object_sha256,
+                    size_bytes, media_type, origin_part, alt_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["page_version_id"],
+                    int(image.get("reference_index", position)),
+                    position,
+                    hashlib.sha256(payload).hexdigest(),
+                    len(payload),
+                    str(image.get("media_type", "application/octet-stream")),
+                    str(image.get("origin_part", "")),
+                    str(image.get("alt_text", "")),
+                ),
+            )
 
 
 def _migrate_curation_snapshots(connection: sqlite3.Connection) -> None:

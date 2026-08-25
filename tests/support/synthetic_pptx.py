@@ -148,6 +148,33 @@ def build_conversion_presentation() -> tuple[bytes, bytes]:
     return stream.getvalue(), image_bytes
 
 
+def build_image_curation_presentation() -> bytes:
+    """构造图片来源真实浏览器处置使用的三页公开 PPTX。"""
+    presentation = Presentation()
+    presentation.slide_width = Inches(13.333333)
+    presentation.slide_height = Inches(7.5)
+
+    image_payloads: list[bytes] = []
+    for color in ((32, 112, 208), (82, 156, 111), (224, 96, 64)):
+        stream = BytesIO()
+        Image.new("RGB", (64, 40), color).save(stream, format="PNG")
+        image_payloads.append(stream.getvalue())
+
+    keep_page = _add_title_and_body(presentation, "公开单项保留页", "保留流程正文")
+    _add_picture(keep_page, image_payloads[0], "单项保留来源图", 0.7)
+
+    ignore_page = _add_title_and_body(presentation, "公开单项忽略页", "忽略流程正文")
+    _add_picture(ignore_page, image_payloads[1], "单项忽略来源图", 0.7)
+
+    mixed_page = _add_title_and_body(presentation, "公开混合处置页", "混合流程正文")
+    _add_picture(mixed_page, image_payloads[2], "重复对象第一处引用", 0.7)
+    _add_picture(mixed_page, image_payloads[2], "重复对象第二处引用", 4.1)
+
+    output = BytesIO()
+    presentation.save(output)
+    return output.getvalue()
+
+
 def build_public_contract_presentation(
     *, order: tuple[int, ...] | None = None
 ) -> bytes:

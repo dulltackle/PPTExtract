@@ -69,7 +69,7 @@ function curationState(
       ];
   return {
     current_snapshot: snapshot,
-    image_sources: { total: 0, unresolved: 0 },
+    image_sources: { total: 0, unresolved: 0, items: [] },
     chunk_body: { nonempty: true },
     blockers,
     can_confirm_source: snapshot !== null,
@@ -283,5 +283,215 @@ describe("来源文字审核工作台", () => {
     await waitFor(() => expect(
       screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" }),
     ).toHaveValue("第二页来源标题"));
+  });
+
+  it("按 AnyDoc 顺序逐项保留或忽略图片来源并显式完成来源审核", async () => {
+    const source = {
+      ...originalSource,
+      images: [
+        {
+          reference_index: 0,
+          alt_text: "公开流程图",
+          media_type: "image/png",
+          origin_part: "ppt/media/shared.png",
+        },
+        {
+          reference_index: 1,
+          alt_text: "公开装饰图",
+          media_type: "image/png",
+          origin_part: "ppt/media/shared.png",
+        },
+      ],
+    };
+    type Decision = "included" | "ignored" | null;
+    let snapshotId: string | null = null;
+    let confirmed = false;
+    let reviewed = false;
+    let decisions: Decision[] = [null, null];
+    let summaries = ["", ""];
+    let reasons: Array<string | null> = [null, null];
+    let notes = ["", ""];
+    const imageItems = () => source.images.map((image, index) => ({
+      ...image,
+      source_ref: `source-${index + 1}`,
+      position: index,
+      object_sha256: "a".repeat(64),
+      size_bytes: 2048 + index,
+      integrity: "verified" as const,
+      duplicate_object: true,
+      preview_url: `/api/v1/pages/page-1/source-images/source-${index + 1}`,
+      disposition: decisions[index],
+      summary: summaries[index] || null,
+      ignore_reason: reasons[index],
+      ignore_note: notes[index] || null,
+      visual_ref: decisions[index] === "included" ? "visual-1" : null,
+      decided_by: decisions[index] ? "operator-zhang" : null,
+      decided_at: decisions[index] ? "2026-08-24T18:00:00+00:00" : null,
+    }));
+    const state = () => {
+      const imageBlockers = imageItems().flatMap((item) => {
+        const number = String(item.position + 1).padStart(2, "0");
+        if (!item.disposition) return [{
+          code: "image_disposition_required",
+          message: `图片来源 ${number}：尚未选择保留或忽略。`,
+          source_ref: item.source_ref,
+        }];
+        if (item.disposition === "included" && !item.summary) return [{
+          code: "image_summary_required",
+          message: `图片来源 ${number}：保留项缺少 summary。`,
+          source_ref: item.source_ref,
+        }];
+        if (item.disposition === "ignored" && !item.ignore_reason) return [{
+          code: "image_reason_required",
+          message: `图片来源 ${number}：忽略项缺少原因。`,
+          source_ref: item.source_ref,
+        }];
+        if (item.ignore_reason === "other" && !item.ignore_note) return [{
+          code: "image_other_note_required",
+          message: `图片来源 ${number}：“其他”原因缺少说明。`,
+          source_ref: item.source_ref,
+        }];
+        return [];
+      });
+      const blockers = [
+        ...(!snapshotId ? [{ code: "source_unsaved", message: "文字修改尚未保存。" }] : []),
+        ...(!confirmed ? [{ code: "source_unconfirmed", message: "文字来源尚未确认。" }] : []),
+        ...(!reviewed ? [{ code: "source_review_incomplete", message: "来源审核尚未完成。" }] : []),
+        ...imageBlockers,
+      ];
+      return {
+        current_snapshot: snapshotId ? {
+          snapshot_id: snapshotId,
+          source_snapshot_id: null,
+          source_content: source,
+          created_by: "operator-zhang",
+          created_at: "2026-08-24T18:00:00+00:00",
+          source_confirmation: confirmed ? {
+            actor_id: "operator-zhang",
+            confirmed_at: "2026-08-24T18:00:00+00:00",
+          } : null,
+          source_review: reviewed ? {
+            actor_id: "operator-zhang",
+            completed_at: "2026-08-24T18:02:00+00:00",
+          } : null,
+          image_source_decisions: [],
+        } : null,
+        image_sources: {
+          total: 2,
+          unresolved: imageBlockers.length,
+          items: imageItems(),
+        },
+        chunk_body: { nonempty: true },
+        blockers,
+        can_confirm_source: Boolean(snapshotId),
+        can_complete_source_review: confirmed && imageBlockers.length === 0,
+        can_approve: reviewed && blockers.length === 0,
+      };
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }));
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: source,
+          curation: state(),
+        }), { status: 200 }));
+      }
+      if (url.endsWith("/curation/snapshots") && init?.method === "POST") {
+        const request = JSON.parse(String(init.body));
+        source.titles = request.titles;
+        source.body = request.body;
+        snapshotId = "snapshot-text";
+        confirmed = false;
+        reviewed = false;
+        return Promise.resolve(new Response(JSON.stringify({ curation: state() }), { status: 201 }));
+      }
+      if (url.endsWith("/curation/source-confirmation") && init?.method === "POST") {
+        confirmed = true;
+        return Promise.resolve(new Response(JSON.stringify({ curation: state() }), { status: 200 }));
+      }
+      if (url.includes("/curation/image-sources/") && init?.method === "POST") {
+        const index = url.endsWith("source-1") ? 0 : 1;
+        const body = JSON.parse(String(init.body));
+        snapshotId = `snapshot-image-${index + 1}`;
+        reviewed = false;
+        decisions[index] = body.disposition;
+        summaries[index] = body.summary ?? "";
+        reasons[index] = body.ignore_reason ?? null;
+        notes[index] = body.ignore_note ?? "";
+        return Promise.resolve(new Response(JSON.stringify({ curation: state() }), { status: 201 }));
+      }
+      if (url.endsWith("/curation/source-review") && init?.method === "POST") {
+        reviewed = true;
+        return Promise.resolve(new Response(JSON.stringify({ curation: state() }), { status: 200 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "保存修改" }));
+    await userEvent.click(await screen.findByRole("button", { name: "确认文字来源" }));
+
+    expect(await screen.findByRole("heading", { name: "图片来源" })).toBeInTheDocument();
+    expect(screen.getByText("0 / 2 已处置")).toBeInTheDocument();
+    expect(screen.getAllByText("重复对象")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /上移|下移|排序/ })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("radio", { name: "保留原始图片" }));
+    expect(screen.getByText("将以原始字节与媒体类型进入产物")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存并处理下一项" })).toBeDisabled();
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "图片来源 01 summary" }),
+      "公开流程图展示录入、核验和发布三个连续阶段。",
+    );
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" }),
+      "（文字修订）",
+    );
+    expect(screen.queryByRole("button", { name: "保存并处理下一项" })).not.toBeInTheDocument();
+    const saveText = screen.getByRole("button", { name: "保存修改" });
+    expect(saveText).toBeEnabled();
+    await userEvent.click(saveText);
+    const confirmText = screen.getByRole("button", { name: "确认文字来源" });
+    expect(confirmText).toBeEnabled();
+    await userEvent.click(confirmText);
+    expect(screen.getByRole("textbox", { name: "图片来源 01 summary" })).toHaveValue(
+      "公开流程图展示录入、核验和发布三个连续阶段。",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "保存并处理下一项" }));
+    await waitFor(() => expect(
+      screen.getByRole("radio", { name: "保留原始图片" }),
+    ).toHaveFocus());
+
+    await userEvent.click(screen.getByRole("radio", { name: "忽略此来源" }));
+    expect(screen.getByRole("button", { name: "保存并处理下一项" })).toBeDisabled();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "图片来源 02 忽略原因" }), "other");
+    expect(screen.getByRole("button", { name: "保存并处理下一项" })).toBeDisabled();
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "图片来源 02 其他原因说明" }),
+      "该图片只包含无语义的版式占位。",
+    );
+    expect(screen.getByRole("button", { name: "保存并处理下一项" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "保存并处理下一项" }));
+    const review = screen.getByRole("button", { name: "完成来源审核" });
+    await waitFor(() => expect(review).toHaveFocus());
+    await userEvent.click(review);
+    expect(await screen.findByText("来源完整 · 无需截图")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /图片来源 01/ }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "图片来源 01 summary" }),
+      "（修订）",
+    );
+    expect(screen.getByText("来源审核确认已失效")).toBeInTheDocument();
   });
 });

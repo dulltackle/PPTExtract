@@ -19,6 +19,7 @@ from pptextract.conversion import (
     NormalizedTableSlot,
     convert_page,
 )
+from pptextract.curation import source_image_ref
 from pptextract.db import connect, transaction
 from pptextract.fingerprint import FINGERPRINT_VERSION, fingerprint_page
 from pptextract.jobs import ClaimedJob, lease_expiration, timestamp
@@ -1664,6 +1665,11 @@ def _activate_hidden_page(
                     now,
                 ),
             )
+            _materialize_page_version_image_sources(
+                connection,
+                page_version_id=page_version_id,
+                serialized=str(row["source_content_json"]),
+            )
             _materialize_review_inheritance(
                 connection,
                 page_version_id=page_version_id,
@@ -2123,6 +2129,11 @@ def _materialize_page_versions(
                 now,
             ),
         )
+        _materialize_page_version_image_sources(
+            connection,
+            page_version_id=page_version_id,
+            serialized=str(row["source_content_json"]),
+        )
         _materialize_review_inheritance(
             connection,
             page_version_id=page_version_id,
@@ -2361,6 +2372,21 @@ def _clone_curation_snapshot(
                     review["completed_at"],
                 ),
             )
+    decisions = (
+        connection.execute(
+            """
+            SELECT * FROM curation_snapshot_image_sources
+            WHERE snapshot_id = ? ORDER BY position
+            """,
+            (source_snapshot_id,),
+        ).fetchall()
+        if preserve_visual_refs
+        else []
+    )
+    reference_index_by_source_ref = {
+        str(decision["source_ref"]): int(decision["reference_index"])
+        for decision in decisions
+    }
     visuals = connection.execute(
         """
         SELECT * FROM curation_snapshot_visuals
@@ -2383,8 +2409,9 @@ def _clone_curation_snapshot(
             """
             INSERT INTO curation_snapshot_visuals (
                 snapshot_id, visual_ref, position, source_kind, disposition,
-                summary, visual_type, bounds_json, source_visual_ref, confirmed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                summary, visual_type, bounds_json, source_visual_ref, confirmed,
+                source_image_ref, asset_sha256, asset_media_type, asset_size_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot_id,
@@ -2397,8 +2424,52 @@ def _clone_curation_snapshot(
                 visual["bounds_json"],
                 None if preserve_visual_refs else old_visual_ref,
                 visual["confirmed"] if preserve_visual_refs else 0,
+                (
+                    source_image_ref(
+                        page_version_id,
+                        reference_index_by_source_ref[str(visual["source_image_ref"])],
+                    )
+                    if preserve_visual_refs
+                    and visual["source_image_ref"] in reference_index_by_source_ref
+                    else None
+                ),
+                visual["asset_sha256"],
+                visual["asset_media_type"],
+                visual["asset_size_bytes"],
             ),
         )
+    if preserve_visual_refs:
+        for decision in decisions:
+            inherited_source_ref = source_image_ref(
+                page_version_id, int(decision["reference_index"])
+            )
+            connection.execute(
+                """
+                INSERT INTO curation_snapshot_image_sources (
+                    snapshot_id, source_ref, reference_index, position, disposition,
+                    summary, ignore_reason, ignore_note, visual_ref, object_sha256,
+                    media_type, size_bytes, origin_part, alt_text, decided_by, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    inherited_source_ref,
+                    decision["reference_index"],
+                    decision["position"],
+                    decision["disposition"],
+                    decision["summary"],
+                    decision["ignore_reason"],
+                    decision["ignore_note"],
+                    decision["visual_ref"],
+                    decision["object_sha256"],
+                    decision["media_type"],
+                    decision["size_bytes"],
+                    decision["origin_part"],
+                    decision["alt_text"],
+                    decision["decided_by"],
+                    decision["decided_at"],
+                ),
+            )
     return snapshot_id
 
 
@@ -3276,6 +3347,32 @@ def _content_json(content: NormalizedPageContent) -> str:
     for image in payload["images"]:
         image["data_base64"] = base64.b64encode(image.pop("data")).decode("ascii")
     return _json(payload)
+
+
+def _materialize_page_version_image_sources(
+    connection: Any, *, page_version_id: str, serialized: str
+) -> None:
+    payload = json.loads(serialized)
+    for position, image in enumerate(payload.get("images", [])):
+        data = base64.b64decode(image["data_base64"], validate=True)
+        connection.execute(
+            """
+            INSERT INTO page_version_image_sources (
+                page_version_id, reference_index, position, object_sha256,
+                size_bytes, media_type, origin_part, alt_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                page_version_id,
+                int(image.get("reference_index", position)),
+                position,
+                hashlib.sha256(data).hexdigest(),
+                len(data),
+                str(image.get("media_type", "application/octet-stream")),
+                str(image.get("origin_part", "")),
+                str(image.get("alt_text", "")),
+            ),
+        )
 
 
 def _content_from_json(serialized: str) -> NormalizedPageContent:

@@ -3,16 +3,74 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   approveCurationPage,
   type CurationBlocker,
+  type CurationImageSource,
   type CurationState,
   completeCurationSourceReview,
   confirmCurationSource,
   type CurationPage,
+  type ImageDisposition,
+  type ImageIgnoreReason,
   loadPageDetail,
   OperatorError,
   type PageDetail,
   saveCurationSnapshot,
+  saveCurationImageSource,
   type SourceContent,
 } from "./api";
+
+interface ImageDraft {
+  disposition: ImageDisposition | null;
+  summary: string;
+  ignoreReason: ImageIgnoreReason | null;
+  ignoreNote: string;
+}
+
+const IGNORE_REASONS: Array<{ value: ImageIgnoreReason; label: string }> = [
+  { value: "decorative", label: "装饰性内容" },
+  { value: "duplicate_source", label: "重复来源" },
+  { value: "expressed_elsewhere", label: "其他来源已完整表达" },
+  { value: "not_relevant", label: "与页面知识无关" },
+  { value: "corrupt_or_unverifiable", label: "内容损坏或无法核验" },
+  { value: "other", label: "其他" },
+];
+
+function draftFromImage(item: CurationImageSource): ImageDraft {
+  return {
+    disposition: item.disposition,
+    summary: item.summary ?? "",
+    ignoreReason: item.ignore_reason,
+    ignoreNote: item.ignore_note ?? "",
+  };
+}
+
+function imageDrafts(items: CurationImageSource[]): Record<string, ImageDraft> {
+  return Object.fromEntries(items.map((item) => [item.source_ref, draftFromImage(item)]));
+}
+
+function imageDraftComplete(draft: ImageDraft): boolean {
+  if (draft.disposition === "included") return Boolean(draft.summary.trim());
+  if (draft.disposition !== "ignored" || !draft.ignoreReason) return false;
+  return draft.ignoreReason !== "other" || Boolean(draft.ignoreNote.trim());
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null) return "字节缺失";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function browserPreviewable(mediaType: string): boolean {
+  return new Set([
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/svg+xml",
+    "image/bmp",
+  ]).has(mediaType.toLowerCase());
+}
 
 function normalizedSource(source: Partial<SourceContent>): SourceContent {
   return {
@@ -31,17 +89,36 @@ function fallbackCuration(source: SourceContent): CurationState {
     ...source.speaker_notes,
   ].some((value) => value.trim()) || source.tables.length > 0;
   const imageCount = source.images.length;
+  const items: CurationImageSource[] = source.images.map((image, index) => ({
+    ...image,
+    source_ref: `unavailable-${index}`,
+    position: index,
+    object_sha256: null,
+    size_bytes: null,
+    integrity: "missing",
+    duplicate_object: false,
+    preview_url: "",
+    disposition: null,
+    summary: null,
+    ignore_reason: null,
+    ignore_note: null,
+    visual_ref: null,
+    decided_by: null,
+    decided_at: null,
+  }));
   return {
     current_snapshot: null,
-    image_sources: { total: imageCount, unresolved: imageCount },
+    image_sources: { total: imageCount, unresolved: imageCount, items },
     chunk_body: { nonempty: hasText },
     blockers: [
       { code: "source_unsaved", message: "文字修改尚未保存。" },
       { code: "source_unconfirmed", message: "文字来源尚未确认。" },
       { code: "source_review_incomplete", message: "来源审核尚未完成。" },
-      ...(imageCount
-        ? [{ code: "image_sources_unresolved" as const, message: `${imageCount} 个图片来源尚待逐项处置。` }]
-        : []),
+      ...items.map((item) => ({
+        code: "image_disposition_required" as const,
+        message: `图片来源 ${String(item.position + 1).padStart(2, "0")}：尚未选择保留或忽略。`,
+        source_ref: item.source_ref,
+      })),
       ...(!hasText
         ? [{ code: "chunk_body_empty" as const, message: "已确认来源无法生成非空 Chunk 正文。" }]
         : []),
@@ -64,7 +141,6 @@ function localBlockers(
   titles: string[],
   body: string[],
 ): CurationBlocker[] {
-  const imageCount = source.images.length;
   const nonempty = [
     ...titles,
     ...body,
@@ -74,13 +150,64 @@ function localBlockers(
     { code: "source_unsaved", message: "文字修改尚未保存。" },
     { code: "source_unconfirmed", message: "文字来源尚未确认。" },
     { code: "source_review_incomplete", message: "来源审核尚未完成。" },
-    ...(imageCount
-      ? [{ code: "image_sources_unresolved" as const, message: `${imageCount} 个图片来源尚待逐项处置。` }]
-      : []),
     ...(!nonempty
       ? [{ code: "chunk_body_empty" as const, message: "已确认来源无法生成非空 Chunk 正文。" }]
       : []),
   ];
+}
+
+function localImageBlockers(
+  items: CurationImageSource[],
+  drafts: Record<string, ImageDraft>,
+): CurationBlocker[] {
+  return items.flatMap((item): CurationBlocker[] => {
+    const draft = drafts[item.source_ref] ?? draftFromImage(item);
+    const number = String(item.position + 1).padStart(2, "0");
+    if (!draft.disposition) return [{
+      code: "image_disposition_required",
+      message: `图片来源 ${number}：尚未选择保留或忽略。`,
+      source_ref: item.source_ref,
+    }];
+    if (draft.disposition === "included" && !draft.summary.trim()) return [{
+      code: "image_summary_required",
+      message: `图片来源 ${number}：保留项缺少 summary。`,
+      source_ref: item.source_ref,
+    }];
+    if (draft.disposition === "ignored" && !draft.ignoreReason) return [{
+      code: "image_reason_required",
+      message: `图片来源 ${number}：忽略项缺少原因。`,
+      source_ref: item.source_ref,
+    }];
+    if (
+      draft.disposition === "ignored" &&
+      draft.ignoreReason === "other" &&
+      !draft.ignoreNote.trim()
+    ) return [{
+      code: "image_other_note_required",
+      message: `图片来源 ${number}：“其他”原因缺少说明。`,
+      source_ref: item.source_ref,
+    }];
+    if (draft.disposition === "included" && item.object_sha256 === null) return [{
+      code: "image_bytes_unavailable",
+      message: `图片来源 ${number}：原始字节缺失或无法校验。`,
+      source_ref: item.source_ref,
+    }];
+    if (draft.disposition === "included" && item.integrity === "hash_mismatch") {
+      return [{
+        code: "image_hash_mismatch",
+        message: `图片来源 ${number}：原始字节与已记录哈希不一致。`,
+        source_ref: item.source_ref,
+      }];
+    }
+    if (draft.disposition === "included" && !item.media_type.startsWith("image/")) {
+      return [{
+        code: "image_media_type_unsupported",
+        message: `图片来源 ${number}：媒体类型不受产物契约支持。`,
+        source_ref: item.source_ref,
+      }];
+    }
+    return [];
+  });
 }
 
 function PhaseStatus({ complete, children }: { complete: boolean; children: string }) {
@@ -108,16 +235,24 @@ export function SourceReviewLog({
   const [detail, setDetail] = useState<PageDetail | null>(null);
   const [titles, setTitles] = useState<string[]>([]);
   const [body, setBody] = useState<string[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, ImageDraft>>({});
+  const [expandedSourceRef, setExpandedSourceRef] = useState<string | null>(null);
+  const [focusSourceRef, setFocusSourceRef] = useState<string | null>(null);
+  const [imageDimensions, setImageDimensions] = useState<Record<string, string>>({});
+  const [previewFailures, setPreviewFailures] = useState<Record<string, boolean>>({});
+  const [previewRevisions, setPreviewRevisions] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryRevision, setRetryRevision] = useState(0);
-  const [operation, setOperation] = useState<"save" | "confirm" | "review" | "approve" | null>(null);
+  const [operation, setOperation] = useState<"save" | "image" | "confirm" | "review" | "approve" | null>(null);
   const [focusTarget, setFocusTarget] = useState<"confirm" | "review" | "approve" | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(arrivalAnnouncement);
   const firstFieldRef = useRef<HTMLTextAreaElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
+  const imageChoiceRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const imageFieldRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const load = useCallback(() => {
     if (!page.page_id) return () => undefined;
@@ -134,6 +269,15 @@ export function SourceReviewLog({
         setDetail({ ...payload, source_content: original, curation });
         setTitles(effective.titles);
         setBody(effective.body);
+        setDrafts(imageDrafts(curation.image_sources.items));
+        setExpandedSourceRef(
+          curation.image_sources.items.find((item) => item.disposition === null)?.source_ref ??
+            curation.image_sources.items[0]?.source_ref ??
+            null,
+        );
+        setImageDimensions({});
+        setPreviewFailures({});
+        setPreviewRevisions({});
         window.requestAnimationFrame(() => firstFieldRef.current?.focus());
       })
       .catch((cause) => {
@@ -161,11 +305,17 @@ export function SourceReviewLog({
   const savedSource = original
     ? normalizedSource(curation?.current_snapshot?.source_content ?? original)
     : null;
-  const dirty = Boolean(
+  const textDirty = Boolean(
     savedSource &&
       (JSON.stringify(titles) !== JSON.stringify(savedSource.titles) ||
         JSON.stringify(body) !== JSON.stringify(savedSource.body)),
   );
+  const imageDirtyRefs = (curation?.image_sources.items ?? []).filter((item) => (
+    JSON.stringify(drafts[item.source_ref] ?? draftFromImage(item)) !==
+      JSON.stringify(draftFromImage(item))
+  )).map((item) => item.source_ref);
+  const imageDirty = imageDirtyRefs.length > 0;
+  const dirty = textDirty || imageDirty;
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -181,10 +331,33 @@ export function SourceReviewLog({
     };
   }, [dirty, onDirtyChange]);
 
-  const blockers = useMemo(
-    () => dirty && original ? localBlockers(original, titles, body) : curation?.blockers ?? [],
-    [body, curation?.blockers, dirty, original, titles],
-  );
+  const blockers = useMemo<CurationBlocker[]>(() => {
+    if (!curation) return [];
+    const imageBlockers = localImageBlockers(curation.image_sources.items, drafts);
+    if (textDirty && original) {
+      return [...localBlockers(original, titles, body), ...imageBlockers];
+    }
+    if (imageDirty) {
+      const stable = curation.blockers.filter((blocker) => (
+        !blocker.code.startsWith("image_") && blocker.code !== "source_review_incomplete"
+      ));
+      const currentSourceRef = imageDirtyRefs[0];
+      return [
+        ...stable,
+        { code: "source_review_incomplete", message: "来源审核尚未完成。" },
+        {
+          code: "image_changes_unsaved",
+          message: `图片来源 ${String(
+            (curation.image_sources.items.find((item) => item.source_ref === currentSourceRef)
+              ?.position ?? 0) + 1,
+          ).padStart(2, "0")}：修改尚未保存。`,
+          source_ref: currentSourceRef,
+        },
+        ...imageBlockers,
+      ];
+    }
+    return curation.blockers;
+  }, [body, curation, drafts, imageDirty, imageDirtyRefs, original, textDirty, titles]);
   const snapshot = curation?.current_snapshot ?? null;
   const busy = operation !== null;
   const pending = page.review_status === "pending";
@@ -203,16 +376,30 @@ export function SourceReviewLog({
     });
   }, [busy, curation, focusTarget]);
 
-  const applyCuration = (next: CurationState) => {
+  useEffect(() => {
+    if (busy || !focusSourceRef) return;
+    const target = imageChoiceRefs.current[focusSourceRef];
+    if (!target || target.disabled) return;
+    window.requestAnimationFrame(() => {
+      target.focus();
+      setFocusSourceRef(null);
+    });
+  }, [busy, curation, focusSourceRef]);
+
+  const applyCuration = (
+    next: CurationState,
+    { preserveImageDrafts = false }: { preserveImageDrafts?: boolean } = {},
+  ) => {
     setDetail((current) => current ? { ...current, curation: next } : current);
     if (next.current_snapshot) {
       setTitles(next.current_snapshot.source_content.titles);
       setBody(next.current_snapshot.source_content.body);
     }
+    if (!preserveImageDrafts) setDrafts(imageDrafts(next.image_sources.items));
   };
 
   const handleSave = async () => {
-    if (!page.page_id || busy || (!dirty && snapshot)) return;
+    if (!page.page_id || busy || (!textDirty && snapshot)) return;
     setOperation("save");
     setAnnouncement("正在保存来源修改…");
     try {
@@ -222,8 +409,12 @@ export function SourceReviewLog({
         titles,
         body,
       );
-      applyCuration(next);
-      setAnnouncement("修改已保存为新的不可变策展快照。请继续确认文字来源。");
+      applyCuration(next, { preserveImageDrafts: imageDirty });
+      setAnnouncement(
+        imageDirty
+          ? "文字修改已保存；本地图片草稿仍保留。请重新确认文字来源后继续。"
+          : "修改已保存为新的不可变策展快照。请继续确认文字来源。",
+      );
       setFocusTarget("confirm");
     } catch (cause) {
       setAnnouncement(
@@ -237,14 +428,21 @@ export function SourceReviewLog({
   };
 
   const handleConfirm = async () => {
-    if (!page.page_id || !snapshot || dirty || busy) return;
+    if (!page.page_id || !snapshot || textDirty || busy) return;
     setOperation("confirm");
     setAnnouncement("正在记录文字来源确认…");
     try {
       const next = await confirmCurationSource(page.page_id, snapshot.snapshot_id);
-      applyCuration(next);
+      applyCuration(next, { preserveImageDrafts: imageDirty });
       setAnnouncement("文字来源已由人确认；字段完成与人工核对已分别记录。");
-      setFocusTarget("review");
+      const firstImage = next.image_sources.items.find((item) => item.disposition === null) ??
+        next.image_sources.items[0];
+      if (firstImage) {
+        setExpandedSourceRef(firstImage.source_ref);
+        setFocusSourceRef(firstImage.source_ref);
+      } else {
+        setFocusTarget("review");
+      }
     } catch (cause) {
       setAnnouncement(
         cause instanceof OperatorError ? cause.message : "文字来源确认失败；当前状态未改变。",
@@ -252,6 +450,115 @@ export function SourceReviewLog({
     } finally {
       setOperation(null);
     }
+  };
+
+  const updateImageDraft = (sourceRef: string, change: Partial<ImageDraft>) => {
+    setDrafts((current) => ({
+      ...current,
+      [sourceRef]: {
+        ...(current[sourceRef] ?? {
+          disposition: null,
+          summary: "",
+          ignoreReason: null,
+          ignoreNote: "",
+        }),
+        ...change,
+      },
+    }));
+  };
+
+  const handleImageSave = async (item: CurationImageSource) => {
+    const draft = drafts[item.source_ref] ?? draftFromImage(item);
+    if (
+      !page.page_id || !snapshot || textDirty || busy || !draft.disposition ||
+      !pending
+    ) return;
+    const itemBlocker = localImageBlockers([item], {
+      [item.source_ref]: draft,
+    })[0];
+    if (itemBlocker) {
+      setExpandedSourceRef(item.source_ref);
+      setAnnouncement(itemBlocker.message);
+      window.requestAnimationFrame(() => {
+        const target = imageFieldRefs.current[item.source_ref] ??
+          imageChoiceRefs.current[item.source_ref];
+        target?.focus();
+      });
+      return;
+    }
+    setOperation("image");
+    setAnnouncement(`正在保存图片来源 ${String(item.position + 1).padStart(2, "0")}…`);
+    try {
+      const next = await saveCurationImageSource(
+        page.page_id,
+        item.source_ref,
+        snapshot.snapshot_id,
+        draft.disposition,
+        draft.disposition === "included" ? draft.summary : null,
+        draft.disposition === "ignored" ? draft.ignoreReason : null,
+        draft.disposition === "ignored" ? draft.ignoreNote : null,
+      );
+      const remainingDrafts = Object.fromEntries(next.image_sources.items.map((candidate) => [
+        candidate.source_ref,
+        candidate.source_ref === item.source_ref
+          ? draftFromImage(candidate)
+          : drafts[candidate.source_ref] ?? draftFromImage(candidate),
+      ]));
+      applyCuration(next);
+      setDrafts(remainingDrafts);
+      const needsAttention = (candidate: CurationImageSource) => {
+        const effectiveDraft = remainingDrafts[candidate.source_ref] ?? draftFromImage(candidate);
+        return (
+          JSON.stringify(effectiveDraft) !== JSON.stringify(draftFromImage(candidate)) ||
+          !imageDraftComplete(effectiveDraft)
+        );
+      };
+      const nextItem = next.image_sources.items.find((candidate) => (
+        candidate.position > item.position && needsAttention(candidate)
+      )) ?? next.image_sources.items.find((candidate) => (
+        needsAttention(candidate)
+      ));
+      if (nextItem) {
+        setExpandedSourceRef(nextItem.source_ref);
+        setFocusSourceRef(nextItem.source_ref);
+        setAnnouncement(
+          `图片来源 ${String(item.position + 1).padStart(2, "0")} 已保存。` +
+          `请处理图片来源 ${String(nextItem.position + 1).padStart(2, "0")}。`,
+        );
+      } else {
+        setExpandedSourceRef(item.source_ref);
+        setAnnouncement("全部图片来源字段已保存；仍需显式完成来源审核。");
+        setFocusTarget("review");
+      }
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 本地图片处置仍保留。`
+          : "图片来源处置未能保存；本地修改仍保留。",
+      );
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  const focusBlocker = (blocker: CurationBlocker) => {
+    if (blocker.source_ref) {
+      setExpandedSourceRef(blocker.source_ref);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        const target = imageFieldRefs.current[blocker.source_ref!] ??
+          imageChoiceRefs.current[blocker.source_ref!];
+        target?.focus();
+      }));
+      return;
+    }
+    const target = blocker.code === "source_unsaved"
+      ? firstFieldRef.current
+      : blocker.code === "source_unconfirmed"
+        ? confirmRef.current
+        : blocker.code === "source_review_incomplete"
+          ? reviewRef.current
+          : null;
+    target?.focus();
   };
 
   const handleReview = async () => {
@@ -325,6 +632,11 @@ export function SourceReviewLog({
     );
   }
 
+  const disposedCount = curation.image_sources.items.filter((item) => (
+    imageDraftComplete(draftFromImage(item))
+  )).length;
+  const displayedImageBlockers = localImageBlockers(curation.image_sources.items, drafts);
+
   return (
     <div className="source-review-log" aria-busy={busy}>
       <header className="source-review-header">
@@ -359,8 +671,8 @@ export function SourceReviewLog({
               <h3 id="source-text-heading">文字来源</h3>
               <p>保留 AnyDoc 块的角色、顺序与段落边界</p>
             </div>
-            <PhaseStatus complete={Boolean(snapshot) && !dirty}>
-              {dirty ? "已修改，原确认失效" : snapshot ? "修改已保存" : "待保存"}
+            <PhaseStatus complete={Boolean(snapshot) && !textDirty}>
+              {textDirty ? "已修改，原确认失效" : snapshot ? "修改已保存" : "待保存"}
             </PhaseStatus>
           </header>
 
@@ -430,25 +742,10 @@ export function SourceReviewLog({
             </div>
           ) : null}
 
-          {original.images.length ? (
-            <div className="readonly-source-entry source-image-boundary">
-              <div>
-                <strong>图片来源</strong>
-                <span>{original.images.length} 项 · 尚待逐项处置</span>
-              </div>
-              {original.images.map((image) => (
-                <p key={`${image.reference_index}:${image.origin_part}`}>
-                  {image.origin_part} · {image.media_type}
-                  {image.alt_text ? ` · ${image.alt_text}` : " · 无替代文字"}
-                </p>
-              ))}
-            </div>
-          ) : null}
-
           <button
             type="button"
             className="source-action-button"
-            disabled={!pending || busy || (!dirty && Boolean(snapshot))}
+            disabled={!pending || busy || (!textDirty && Boolean(snapshot))}
             onClick={() => void handleSave()}
           >
             {operation === "save" ? "正在保存" : "保存修改"}
@@ -461,11 +758,11 @@ export function SourceReviewLog({
               <h3 id="source-confirm-heading">文字确认</h3>
               <p>字段已填不等于人已核对</p>
             </div>
-            <PhaseStatus complete={Boolean(snapshot?.source_confirmation) && !dirty}>
-              {dirty || !snapshot?.source_confirmation ? "待确认" : "已确认"}
+            <PhaseStatus complete={Boolean(snapshot?.source_confirmation) && !textDirty}>
+              {textDirty || !snapshot?.source_confirmation ? "待确认" : "已确认"}
             </PhaseStatus>
           </header>
-          {snapshot?.source_confirmation && !dirty ? (
+          {snapshot?.source_confirmation && !textDirty ? (
             <p className="source-audit-record">
               {snapshot.source_confirmation.actor_id} · {formatTime(snapshot.source_confirmation.confirmed_at)}
             </p>
@@ -477,12 +774,276 @@ export function SourceReviewLog({
             ref={confirmRef}
             className="source-action-button"
             disabled={
-              !pending || busy || dirty || !snapshot || Boolean(snapshot.source_confirmation)
+              !pending || busy || textDirty || !snapshot || Boolean(snapshot.source_confirmation)
             }
             onClick={() => void handleConfirm()}
           >
             {operation === "confirm" ? "正在确认" : "确认文字来源"}
           </button>
+        </section>
+
+        <section className="source-phase source-image-phase" aria-labelledby="source-image-heading">
+          <header>
+            <div>
+              <h3 id="source-image-heading">图片来源</h3>
+              <p>固定沿用 AnyDoc 页内引用顺序</p>
+            </div>
+            <PhaseStatus complete={disposedCount === curation.image_sources.total}>
+              {`${disposedCount} / ${curation.image_sources.total} 已处置`}
+            </PhaseStatus>
+          </header>
+
+          {!snapshot?.source_confirmation || textDirty ? (
+            <p className="source-image-locked">
+              先保存并确认文字来源，再逐项处置图片来源。
+            </p>
+          ) : curation.image_sources.total === 0 ? (
+            <div className="source-image-empty">
+              <strong>当前页没有图片来源</strong>
+              <span>可继续完成来源审核并批准当前页。</span>
+            </div>
+          ) : (
+            <div className="source-image-queue">
+              {curation.image_sources.items.map((item) => {
+                const number = String(item.position + 1).padStart(2, "0");
+                const draft = drafts[item.source_ref] ?? draftFromImage(item);
+                const expanded = expandedSourceRef === item.source_ref;
+                const itemDirty = imageDirtyRefs.includes(item.source_ref);
+                const savedComplete = imageDraftComplete(draftFromImage(item));
+                const dispositionLabel = item.disposition === "included"
+                  ? "保留"
+                  : item.disposition === "ignored"
+                    ? "忽略"
+                    : "未处置";
+                const previewFailed = previewFailures[item.source_ref];
+                const previewable = browserPreviewable(item.media_type);
+                const previewRevision = previewRevisions[item.source_ref] ?? 0;
+                return (
+                  <article
+                    className={`source-image-item ${expanded ? "is-expanded" : ""} ${
+                      savedComplete ? "is-complete" : "is-incomplete"
+                    }`}
+                    key={item.source_ref}
+                  >
+                    <button
+                      type="button"
+                      className="source-image-summary"
+                      aria-expanded={expanded}
+                      aria-controls={`source-image-${item.source_ref}`}
+                      aria-label={`图片来源 ${number}，${item.alt_text || "无替代文字"}，${
+                        itemDirty ? "修改未保存" : dispositionLabel
+                      }`}
+                      onClick={() => setExpandedSourceRef((current) => (
+                        current === item.source_ref ? null : item.source_ref
+                      ))}
+                    >
+                      <span className="source-image-number">{number}</span>
+                      <span className="source-image-summary-copy">
+                        <strong>{item.alt_text || "无替代文字"}</strong>
+                        <small>{item.origin_part}</small>
+                      </span>
+                      {item.duplicate_object ? (
+                        <span className="duplicate-object-chip">重复对象</span>
+                      ) : null}
+                      <span className={`source-image-disposition is-${item.disposition ?? "pending"}`}>
+                        {itemDirty ? "未保存" : dispositionLabel}
+                      </span>
+                    </button>
+
+                    {expanded ? (
+                      <div className="source-image-editor" id={`source-image-${item.source_ref}`}>
+                        <div className="source-image-preview">
+                          {previewable && !previewFailed ? (
+                            <>
+                              <img
+                                key={previewRevision}
+                                src={`${item.preview_url}${previewRevision ? `?retry=${previewRevision}` : ""}`}
+                                alt={`图片来源 ${number} 原始预览，${item.media_type}`}
+                                onLoad={(event) => {
+                                  const image = event.currentTarget;
+                                  setImageDimensions((current) => ({
+                                    ...current,
+                                    [item.source_ref]: `${image.naturalWidth} × ${image.naturalHeight} px`,
+                                  }));
+                                }}
+                                onError={() => setPreviewFailures((current) => ({
+                                  ...current,
+                                  [item.source_ref]: true,
+                                }))}
+                              />
+                              {!imageDimensions[item.source_ref] ? (
+                                <span className="source-preview-state">正在读取原始预览…</span>
+                              ) : null}
+                            </>
+                          ) : (
+                            <div
+                              className="source-preview-unavailable"
+                              role="img"
+                              aria-label={`图片来源 ${number} 无法在浏览器内预览，${item.media_type}`}
+                            >
+                              <strong>{previewFailed ? "原始预览加载失败" : "浏览器无法预览此媒体类型"}</strong>
+                              <span>{item.media_type} · 仍可依据来源元数据完成带审计的处置</span>
+                              {previewFailed ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPreviewFailures((current) => ({
+                                      ...current,
+                                      [item.source_ref]: false,
+                                    }));
+                                    setPreviewRevisions((current) => ({
+                                      ...current,
+                                      [item.source_ref]: previewRevision + 1,
+                                    }));
+                                  }}
+                                >
+                                  重试原始预览
+                                </button>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+
+                        <dl className="source-image-facts">
+                          <div><dt>来源部件</dt><dd>{item.origin_part}</dd></div>
+                          <div><dt>媒体类型</dt><dd>{item.media_type}</dd></div>
+                          <div><dt>字节大小</dt><dd>{formatBytes(item.size_bytes)}</dd></div>
+                          <div>
+                            <dt>完整性</dt>
+                            <dd className={`source-image-integrity is-${item.integrity}`}>
+                              {item.integrity === "verified"
+                                ? "SHA-256 已校验"
+                                : item.integrity === "hash_mismatch"
+                                  ? "哈希不一致"
+                                  : "原始字节缺失"}
+                            </dd>
+                          </div>
+                          <div><dt>像素尺寸</dt><dd>{imageDimensions[item.source_ref] ?? "预览后读取"}</dd></div>
+                          <div><dt>替代文字</dt><dd>{item.alt_text || "未提供"}</dd></div>
+                        </dl>
+
+                        <fieldset className="source-image-decision" disabled={!pending || busy || textDirty}>
+                          <legend>选择此来源的处置</legend>
+                          <div className="source-image-decision-grid">
+                            <label className={draft.disposition === "included" ? "is-selected" : ""}>
+                              <input
+                                ref={(node) => { imageChoiceRefs.current[item.source_ref] = node; }}
+                                type="radio"
+                                name={`disposition-${item.source_ref}`}
+                                aria-label="保留原始图片"
+                                checked={draft.disposition === "included"}
+                                onChange={() => updateImageDraft(item.source_ref, {
+                                  disposition: "included",
+                                  ignoreReason: null,
+                                  ignoreNote: "",
+                                })}
+                              />
+                              <span><strong>保留原始图片</strong><small>进入产物并形成视觉对象引用</small></span>
+                            </label>
+                            <label className={draft.disposition === "ignored" ? "is-selected" : ""}>
+                              <input
+                                type="radio"
+                                name={`disposition-${item.source_ref}`}
+                                aria-label="忽略此来源"
+                                checked={draft.disposition === "ignored"}
+                                onChange={() => updateImageDraft(item.source_ref, {
+                                  disposition: "ignored",
+                                  summary: "",
+                                })}
+                              />
+                              <span><strong>忽略此来源</strong><small>保留来源身份与审计，不进入产物</small></span>
+                            </label>
+                          </div>
+
+                          {draft.disposition === "included" ? (
+                            <div className="source-image-branch">
+                              <p className="source-original-contract">
+                                将以原始字节与媒体类型进入产物
+                              </p>
+                              <label>
+                                <span>自足 summary <strong aria-hidden="true">必填</strong></span>
+                                <textarea
+                                  ref={(node) => { imageFieldRefs.current[item.source_ref] = node; }}
+                                  aria-label={`图片来源 ${number} summary`}
+                                  rows={4}
+                                  value={draft.summary}
+                                  onChange={(event) => updateImageDraft(item.source_ref, {
+                                    summary: event.target.value,
+                                  })}
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+
+                          {draft.disposition === "ignored" ? (
+                            <div className="source-image-branch">
+                              <label>
+                                <span>忽略原因 <strong aria-hidden="true">必填</strong></span>
+                                <select
+                                  ref={(node) => {
+                                    if (draft.ignoreReason !== "other") {
+                                      imageFieldRefs.current[item.source_ref] = node;
+                                    }
+                                  }}
+                                  aria-label={`图片来源 ${number} 忽略原因`}
+                                  value={draft.ignoreReason ?? ""}
+                                  onChange={(event) => updateImageDraft(item.source_ref, {
+                                    ignoreReason: event.target.value as ImageIgnoreReason,
+                                    ignoreNote: event.target.value === "other" ? draft.ignoreNote : "",
+                                  })}
+                                >
+                                  <option value="">选择稳定原因</option>
+                                  {IGNORE_REASONS.map((reason) => (
+                                    <option key={reason.value} value={reason.value}>{reason.label}</option>
+                                  ))}
+                                </select>
+                              </label>
+                              {draft.ignoreReason === "other" ? (
+                                <label>
+                                  <span>其他原因说明 <strong aria-hidden="true">必填</strong></span>
+                                  <textarea
+                                    ref={(node) => { imageFieldRefs.current[item.source_ref] = node; }}
+                                    aria-label={`图片来源 ${number} 其他原因说明`}
+                                    rows={3}
+                                    value={draft.ignoreNote}
+                                    onChange={(event) => updateImageDraft(item.source_ref, {
+                                      ignoreNote: event.target.value,
+                                    })}
+                                  />
+                                </label>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </fieldset>
+
+                        {item.decided_by && !itemDirty ? (
+                          <p className="source-audit-record">
+                            {item.decided_by} · {item.decided_at ? formatTime(item.decided_at) : "时间未知"}
+                          </p>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="source-action-button"
+                          disabled={
+                            !pending || busy || textDirty || !draft.disposition || !itemDirty ||
+                            localImageBlockers([item], { [item.source_ref]: draft }).length > 0
+                          }
+                          onClick={() => void handleImageSave(item)}
+                        >
+                          {operation === "image" ? "正在保存此项" : "保存并处理下一项"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          )}
+          {imageDirty && snapshot?.source_review ? (
+            <p className="source-review-invalidated" role="status">
+              来源审核确认已失效
+            </p>
+          ) : null}
         </section>
 
         <section className="source-phase" aria-labelledby="source-review-heading">
@@ -501,8 +1062,8 @@ export function SourceReviewLog({
             </p>
           ) : (
             <p className="source-phase-copy">
-              {curation.image_sources.unresolved
-                ? `${curation.image_sources.unresolved} 个图片来源尚待逐项处置。`
+              {displayedImageBlockers.length
+                ? `${displayedImageBlockers.length} 个图片来源尚待逐项处置。`
                 : "文字确认后，可显式完成来源审核。"}
             </p>
           )}
@@ -512,7 +1073,7 @@ export function SourceReviewLog({
             className="source-action-button"
             disabled={
               !pending || busy || dirty || !snapshot?.source_confirmation ||
-              Boolean(snapshot.source_review) || curation.image_sources.unresolved > 0
+              Boolean(snapshot.source_review) || displayedImageBlockers.length > 0
             }
             onClick={() => void handleReview()}
           >
@@ -537,7 +1098,13 @@ export function SourceReviewLog({
         </header>
         {pending && blockers.length ? (
           <ul>
-            {blockers.map((blocker) => <li key={blocker.code}>{blocker.message}</li>)}
+            {blockers.map((blocker, index) => (
+              <li key={`${blocker.code}:${blocker.source_ref ?? index}`}>
+                <button type="button" onClick={() => focusBlocker(blocker)}>
+                  {blocker.message}
+                </button>
+              </li>
+            ))}
           </ul>
         ) : (
           <p className="review-gate-clear">
