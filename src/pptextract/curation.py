@@ -4,9 +4,13 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import sqlite3
 import uuid
+from io import BytesIO
 from typing import Any, cast
+
+from PIL import Image, UnidentifiedImageError
 
 from pptextract.config import Settings
 from pptextract.db import transaction
@@ -22,6 +26,19 @@ class CurationRequestError(Exception):
         self.message = message
 
 
+VISUAL_TYPES = {
+    "chart",
+    "diagram",
+    "map",
+    "table",
+    "screenshot",
+    "photo",
+    "illustration",
+    "other",
+}
+CAPTURE_PADDING_PX = 8
+
+
 def _read_current_page(
     connection: sqlite3.Connection, page_id: str
 ) -> sqlite3.Row:
@@ -29,7 +46,8 @@ def _read_current_page(
         """
         SELECT pv.page_version_id, pv.page_id, pv.document_id, pv.version_id,
                pv.page_number, pv.review_status, pv.source_content_json,
-               pv.current_snapshot_id
+               pv.current_snapshot_id, pv.render_sha256, pv.render_media_type,
+               pv.render_width_px, pv.render_height_px
         FROM page_versions AS pv
         JOIN documents AS d
           ON d.document_id = pv.document_id
@@ -354,6 +372,31 @@ def _image_source_blocker(item: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
+def _capture_visual_blockers(
+    connection: sqlite3.Connection, snapshot_id: str | None
+) -> list[dict[str, str]]:
+    if snapshot_id is None:
+        return []
+    rows = connection.execute(
+        """
+        SELECT visual_ref, position, summary
+        FROM curation_snapshot_visuals
+        WHERE snapshot_id = ? AND source_kind = 'capture' AND disposition = 'included'
+        ORDER BY position
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    return [
+        {
+            "code": "visual_summary_required",
+            "message": f"视觉对象 {index + 1:02d}：缺少 summary。",
+            "visual_ref": str(row["visual_ref"]),
+        }
+        for index, row in enumerate(rows)
+        if not str(row["summary"] or "").strip()
+    ]
+
+
 def read_curation_state(
     connection: sqlite3.Connection, page: sqlite3.Row
 ) -> dict[str, Any]:
@@ -367,6 +410,9 @@ def read_curation_state(
         for item in image_sources
         if (blocker := _image_source_blocker(item)) is not None
     ]
+    visual_blockers = _capture_visual_blockers(
+        connection, None if snapshot is None else str(snapshot["snapshot_id"])
+    )
     confirmation = None if snapshot is None else snapshot["source_confirmation"]
     review = None if snapshot is None else snapshot["source_review"]
     chunk_nonempty = bool(build_chunk_body(effective).strip())
@@ -380,6 +426,7 @@ def read_curation_state(
             {"code": "source_review_incomplete", "message": "来源审核尚未完成。"}
         )
     blockers.extend(image_blockers)
+    blockers.extend(visual_blockers)
     if not chunk_nonempty:
         blockers.append(
             {
@@ -568,13 +615,16 @@ def _copy_image_source_records(
         INSERT INTO curation_snapshot_visuals (
             snapshot_id, visual_ref, position, source_kind, disposition,
             summary, visual_type, bounds_json, source_visual_ref, confirmed,
-            source_image_ref, asset_sha256, asset_media_type, asset_size_bytes
+            source_image_ref, asset_sha256, asset_media_type, asset_size_bytes,
+            asset_width_px, asset_height_px
         )
         SELECT ?, visual_ref, position, source_kind, disposition,
                summary, visual_type, bounds_json, source_visual_ref, confirmed,
-               source_image_ref, asset_sha256, asset_media_type, asset_size_bytes
+               source_image_ref, asset_sha256, asset_media_type, asset_size_bytes,
+               asset_width_px, asset_height_px
         FROM curation_snapshot_visuals
-        WHERE snapshot_id = ? AND (? IS NULL OR source_image_ref <> ?)
+        WHERE snapshot_id = ?
+          AND (? IS NULL OR source_image_ref IS NULL OR source_image_ref <> ?)
         """,
         (
             target_snapshot_id,
@@ -874,6 +924,283 @@ def complete_source_review(
                 (uuid.uuid4().hex, snapshot_id, actor_id, timestamp()),
             )
         return read_curation_state(connection, page)
+
+
+def _copy_snapshot_gate_records(
+    connection: sqlite3.Connection,
+    *,
+    source_snapshot_id: str,
+    target_snapshot_id: str,
+) -> None:
+    confirmation = _read_confirmation(connection, source_snapshot_id)
+    if confirmation is not None:
+        connection.execute(
+            """
+            INSERT INTO curation_source_confirmations (
+                confirmation_id, snapshot_id, actor_id, confirmed_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                target_snapshot_id,
+                confirmation["actor_id"],
+                confirmation["confirmed_at"],
+            ),
+        )
+    review = _read_review(connection, source_snapshot_id)
+    if review is not None:
+        connection.execute(
+            """
+            INSERT INTO curation_source_reviews (
+                review_id, snapshot_id, actor_id, completed_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                target_snapshot_id,
+                review["actor_id"],
+                review["completed_at"],
+            ),
+        )
+
+
+def _normalized_capture_bounds(bounds: dict[str, float]) -> dict[str, float]:
+    normalized = {
+        key: float(bounds[key]) for key in ("left", "top", "width", "height")
+    }
+    left = normalized["left"]
+    top = normalized["top"]
+    width = normalized["width"]
+    height = normalized["height"]
+    if (
+        not all(math.isfinite(value) for value in normalized.values())
+        or left < 0
+        or top < 0
+        or width <= 0
+        or height <= 0
+        or left + width > 1
+        or top + height > 1
+    ):
+        raise CurationRequestError(
+            422,
+            "invalid_visual_bounds",
+            "框选范围必须是整页内具有有效面积的归一化坐标。",
+        )
+    return normalized
+
+
+def _crop_standard_render(
+    settings: Settings,
+    page: sqlite3.Row,
+    bounds: dict[str, float],
+) -> tuple[bytes, int, int]:
+    render_sha256 = page["render_sha256"]
+    if render_sha256 is None or page["render_media_type"] != "image/png":
+        raise CurationRequestError(
+            409, "standard_render_unavailable", "标准页渲染结果暂不可用于框选裁图。"
+        )
+    try:
+        render_path = LocalObjectStore(settings.object_store_path).path_for(
+            str(render_sha256)
+        )
+    except ValueError as error:
+        raise CurationRequestError(
+            409, "standard_render_unavailable", "标准页渲染结果暂不可用于框选裁图。"
+        ) from error
+    if not render_path.is_file():
+        raise CurationRequestError(
+            409, "standard_render_unavailable", "标准页渲染结果暂不可用于框选裁图。"
+        )
+    try:
+        with Image.open(render_path) as rendered:
+            rendered.load()
+            if rendered.format != "PNG":
+                raise CurationRequestError(
+                    409,
+                    "standard_render_unavailable",
+                    "标准页渲染结果不是可裁剪的 PNG。",
+                )
+            render_width, render_height = rendered.size
+            left_px = max(
+                0,
+                math.floor(bounds["left"] * render_width) - CAPTURE_PADDING_PX,
+            )
+            top_px = max(
+                0,
+                math.floor(bounds["top"] * render_height) - CAPTURE_PADDING_PX,
+            )
+            right_px = min(
+                render_width,
+                math.ceil((bounds["left"] + bounds["width"]) * render_width)
+                + CAPTURE_PADDING_PX,
+            )
+            bottom_px = min(
+                render_height,
+                math.ceil((bounds["top"] + bounds["height"]) * render_height)
+                + CAPTURE_PADDING_PX,
+            )
+            cropped = rendered.crop((left_px, top_px, right_px, bottom_px))
+            output = BytesIO()
+            cropped.save(output, format="PNG")
+    except (OSError, UnidentifiedImageError) as error:
+        raise CurationRequestError(
+            409, "standard_render_unavailable", "标准页渲染结果暂不可用于框选裁图。"
+        ) from error
+    return output.getvalue(), right_px - left_px, bottom_px - top_px
+
+
+def save_capture_visual(
+    settings: Settings,
+    *,
+    page_id: str,
+    actor_id: str,
+    base_snapshot_id: str,
+    summary: str,
+    visual_type: str | None,
+    bounds: dict[str, float],
+) -> dict[str, Any]:
+    normalized_summary = summary.strip()
+    if not normalized_summary:
+        raise CurationRequestError(
+            422, "visual_summary_required", "视觉对象必须填写自足 summary。"
+        )
+    if visual_type is not None and visual_type not in VISUAL_TYPES:
+        raise CurationRequestError(
+            422, "invalid_visual_type", "视觉对象类型不在初版可选集合中。"
+        )
+    normalized_bounds = _normalized_capture_bounds(bounds)
+    with transaction(settings) as connection:
+        page = _read_current_page(connection, page_id)
+        _assert_current_pending_snapshot(page, base_snapshot_id)
+        snapshot = _read_snapshot(connection, base_snapshot_id)
+        if snapshot is None:
+            raise CurationRequestError(409, "source_unsaved", "请先保存并审核来源。")
+        if _read_review(connection, base_snapshot_id) is None:
+            raise CurationRequestError(
+                409, "source_review_incomplete", "请先完成来源审核再框选视觉对象。"
+            )
+        capture_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM curation_snapshot_visuals
+            WHERE snapshot_id = ? AND source_kind = 'capture'
+            """,
+            (base_snapshot_id,),
+        ).fetchone()[0]
+        if int(capture_count) > 0:
+            raise CurationRequestError(
+                409, "capture_limit_reached", "本阶段只允许保存第一个框选视觉对象。"
+            )
+
+        asset_bytes, width_px, height_px = _crop_standard_render(
+            settings, page, normalized_bounds
+        )
+        stored = LocalObjectStore(settings.object_store_path).put(asset_bytes)
+        now = timestamp()
+        connection.execute(
+            """
+            INSERT INTO stored_objects (sha256, size_bytes, media_type, verified_at)
+            VALUES (?, ?, 'image/png', ?)
+            ON CONFLICT(sha256) DO UPDATE SET
+                size_bytes = excluded.size_bytes,
+                media_type = excluded.media_type,
+                verified_at = excluded.verified_at
+            """,
+            (stored.sha256, stored.size_bytes, now),
+        )
+        snapshot_id = uuid.uuid4().hex
+        connection.execute(
+            """
+            INSERT INTO curation_snapshots (
+                snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
+                overview, source_content_json, created_by, created_at
+            ) VALUES (?, ?, 'formal', ?, NULL, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                page["page_version_id"],
+                base_snapshot_id,
+                json.dumps(
+                    snapshot["source_content"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                actor_id,
+                now,
+            ),
+        )
+        _copy_image_source_records(
+            connection,
+            source_snapshot_id=base_snapshot_id,
+            target_snapshot_id=snapshot_id,
+        )
+        _copy_snapshot_gate_records(
+            connection,
+            source_snapshot_id=base_snapshot_id,
+            target_snapshot_id=snapshot_id,
+        )
+        position = int(
+            connection.execute(
+                """
+                SELECT COALESCE(MAX(position), -1) + 1
+                FROM (
+                    SELECT position
+                    FROM curation_snapshot_visuals
+                    WHERE snapshot_id = ?
+                    UNION ALL
+                    SELECT position
+                    FROM curation_snapshot_image_sources
+                    WHERE snapshot_id = ?
+                )
+                """,
+                (snapshot_id, snapshot_id),
+            ).fetchone()[0]
+        )
+        visual_ref = uuid.uuid4().hex
+        connection.execute(
+            """
+            INSERT INTO visual_objects (visual_ref, page_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (visual_ref, page["page_id"], now),
+        )
+        connection.execute(
+            """
+            INSERT INTO curation_snapshot_visuals (
+                snapshot_id, visual_ref, position, source_kind, disposition,
+                summary, visual_type, bounds_json, source_visual_ref, confirmed,
+                source_image_ref, asset_sha256, asset_media_type, asset_size_bytes,
+                asset_width_px, asset_height_px
+            ) VALUES (?, ?, ?, 'capture', 'included', ?, ?, ?, NULL, 1,
+                      NULL, ?, 'image/png', ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                visual_ref,
+                position,
+                normalized_summary,
+                visual_type,
+                json.dumps(normalized_bounds, sort_keys=True, separators=(",", ":")),
+                stored.sha256,
+                stored.size_bytes,
+                width_px,
+                height_px,
+            ),
+        )
+        updated = connection.execute(
+            """
+            UPDATE page_versions SET current_snapshot_id = ?
+            WHERE page_version_id = ? AND current_snapshot_id = ?
+            """,
+            (snapshot_id, page["page_version_id"], base_snapshot_id),
+        )
+        if updated.rowcount != 1:
+            raise CurationRequestError(
+                409,
+                "curation_snapshot_stale",
+                "此页已被其他会话更新，请重新加载后继续。",
+            )
+        return read_curation_state(connection, _read_current_page(connection, page_id))
 
 
 def _assert_current_pending_snapshot(page: sqlite3.Row, snapshot_id: str) -> None:

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from pptextract.api import create_app
 from pptextract.config import Settings
@@ -52,6 +55,12 @@ def _ingest_plain_text_page(
         _source: bytes, *, toolchain: object, pages: tuple[SourcePage, ...]
     ) -> tuple[StandardPageRender, ...]:
         del toolchain
+        image = Image.new("RGB", (100, 56))
+        image.putdata(
+            [(x, y, (x + y) % 256) for y in range(56) for x in range(100)]
+        )
+        encoded = BytesIO()
+        image.save(encoded, format="PNG")
         return tuple(
             StandardPageRender(
                 page_number=page.page_number,
@@ -59,7 +68,7 @@ def _ingest_plain_text_page(
                 dpi=144,
                 width_px=100,
                 height_px=56,
-                data=f"render-{page.page_number}".encode(),
+                data=encoded.getvalue(),
             )
             for page in pages
         )
@@ -731,3 +740,226 @@ def test_confirmed_empty_source_cannot_be_approved(
         }
     ]
     assert reviewed.json()["curation"]["can_approve"] is False
+
+
+def test_first_capture_visual_is_cropped_from_standard_render_and_frozen_in_new_snapshot(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(client, settings, monkeypatch)
+    page_id = str(page["page_id"])
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/snapshots",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["公开来源标题"],
+            "body": ["公开来源正文。"],
+        },
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-confirmation",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-review",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    reviewed_snapshot_id = state["current_snapshot"]["snapshot_id"]
+
+    missing_summary = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": reviewed_snapshot_id,
+            "summary": "  ",
+            "visual_type": "chart",
+            "bounds": {"left": 0.105, "top": 0.241, "width": 0.199, "height": 0.268},
+        },
+    )
+    assert missing_summary.status_code == 422
+    assert missing_summary.json()["error"]["code"] == "visual_summary_required"
+
+    invalid_type = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": reviewed_snapshot_id,
+            "summary": "折线展示公开指标随月份稳步上升。",
+            "visual_type": "future_unknown_type",
+            "bounds": {"left": 0.105, "top": 0.241, "width": 0.199, "height": 0.268},
+        },
+    )
+    assert invalid_type.status_code == 422
+    assert invalid_type.json()["error"]["code"] == "invalid_visual_type"
+
+    saved = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        headers={"X-Actor-ID": "curator-capture"},
+        json={
+            "base_snapshot_id": reviewed_snapshot_id,
+            "summary": "折线展示公开指标随月份稳步上升。",
+            "visual_type": "chart",
+            "bounds": {"left": 0.105, "top": 0.241, "width": 0.199, "height": 0.268},
+        },
+    )
+    assert saved.status_code == 201
+    saved_state = saved.json()["curation"]
+    assert saved_state["current_snapshot"]["snapshot_id"] != reviewed_snapshot_id
+    assert saved_state["current_snapshot"]["source_snapshot_id"] == reviewed_snapshot_id
+    assert saved_state["current_snapshot"]["source_confirmation"] is not None
+    assert saved_state["current_snapshot"]["source_review"] is not None
+    assert saved_state["blockers"] == []
+    assert saved_state["can_approve"] is True
+
+    detail = client.get(f"/api/v1/pages/{page_id}").json()
+    assert detail["annotation"]["visuals"] == [
+        {
+            "visual_ref": detail["annotation"]["visuals"][0]["visual_ref"],
+            "position": 0,
+            "source_kind": "capture",
+            "disposition": "included",
+            "summary": "折线展示公开指标随月份稳步上升。",
+            "visual_type": "chart",
+            "bounds": {"height": 0.268, "left": 0.105, "top": 0.241, "width": 0.199},
+            "source_visual_ref": None,
+            "confirmed": True,
+            "asset": {
+                "sha256": detail["annotation"]["visuals"][0]["asset"]["sha256"],
+                "media_type": "image/png",
+                "size_bytes": detail["annotation"]["visuals"][0]["asset"]["size_bytes"],
+                "width_px": 37,
+                "height_px": 32,
+                "byte_contract": "standard_render_crop",
+            },
+        }
+    ]
+    visual = detail["annotation"]["visuals"][0]
+    assert len(visual["visual_ref"]) == 32
+    assert visual["visual_ref"] != "01"
+    asset_sha256 = visual["asset"]["sha256"]
+    asset_path = settings.object_store_path / asset_sha256[:2] / asset_sha256
+    asset_bytes = asset_path.read_bytes()
+    assert hashlib.sha256(asset_bytes).hexdigest() == asset_sha256
+    with Image.open(BytesIO(asset_bytes)) as cropped:
+        assert cropped.format == "PNG"
+        assert cropped.size == (37, 32)
+        assert cropped.getpixel((0, 0)) == (2, 5, 7)
+        assert cropped.getpixel((36, 31)) == (38, 36, 74)
+
+    second_capture = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": saved_state["current_snapshot"]["snapshot_id"],
+            "summary": "本票不允许创建第二个视觉对象。",
+            "visual_type": None,
+            "bounds": {"left": 0.2, "top": 0.2, "width": 0.2, "height": 0.2},
+        },
+    )
+    assert second_capture.status_code == 409
+    assert second_capture.json()["error"]["code"] == "capture_limit_reached"
+
+    with connect(settings) as connection:
+        connection.execute(
+            """
+            UPDATE curation_snapshot_visuals
+            SET summary = ''
+            WHERE snapshot_id = ? AND visual_ref = ?
+            """,
+            (
+                saved_state["current_snapshot"]["snapshot_id"],
+                visual["visual_ref"],
+            ),
+        )
+
+    corrupted_state = client.get(f"/api/v1/pages/{page_id}").json()["curation"]
+    assert corrupted_state["can_approve"] is False
+    assert corrupted_state["blockers"] == [
+        {
+            "code": "visual_summary_required",
+            "message": "视觉对象 01：缺少 summary。",
+            "visual_ref": visual["visual_ref"],
+        }
+    ]
+    blocked_approval = client.post(
+        f"/api/v1/pages/{page_id}/approve",
+        headers={"X-Actor-ID": "curator-approver"},
+        json={"snapshot_id": saved_state["current_snapshot"]["snapshot_id"]},
+    )
+    assert blocked_approval.status_code == 409
+    assert blocked_approval.json()["error"]["code"] == "approval_blocked"
+
+
+def test_capture_position_does_not_conflict_when_an_ignored_image_is_later_included(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(
+        client,
+        settings,
+        monkeypatch,
+        content=NormalizedPageContent(
+            titles=("先忽略后保留图片",),
+            body=("框选视觉应保留独立顺序。",),
+            tables=(),
+            images=(
+                NormalizedImage(
+                    0,
+                    "可恢复的来源图片",
+                    "image/png",
+                    "ppt/media/restored.png",
+                    b"restored-source-image",
+                ),
+            ),
+            speaker_notes=(),
+        ),
+    )
+    page_id = str(page["page_id"])
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/snapshots",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["先忽略后保留图片"],
+            "body": ["框选视觉应保留独立顺序。"],
+        },
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-confirmation",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    source_ref = state["image_sources"]["items"][0]["source_ref"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/image-sources/{source_ref}",
+        json={
+            "base_snapshot_id": state["current_snapshot"]["snapshot_id"],
+            "disposition": "ignored",
+            "ignore_reason": "decorative",
+        },
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-review",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": state["current_snapshot"]["snapshot_id"],
+            "summary": "页面中的关键示意图补充了正文未表达的结构关系。",
+            "visual_type": "diagram",
+            "bounds": {"left": 0.1, "top": 0.1, "width": 0.4, "height": 0.4},
+        },
+    ).json()["curation"]
+
+    restored = client.post(
+        f"/api/v1/pages/{page_id}/curation/image-sources/{source_ref}",
+        json={
+            "base_snapshot_id": state["current_snapshot"]["snapshot_id"],
+            "disposition": "included",
+            "summary": "来源图片展示了可验证的公开产品外观。",
+        },
+    )
+    assert restored.status_code == 201
+    visuals = client.get(f"/api/v1/pages/{page_id}").json()["annotation"][
+        "visuals"
+    ]
+    assert [(visual["position"], visual["source_kind"]) for visual in visuals] == [
+        (0, "source_image"),
+        (1, "capture"),
+    ]

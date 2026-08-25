@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -513,6 +513,8 @@ def initialize_database(settings: Settings) -> None:
             "asset_sha256": "TEXT REFERENCES stored_objects(sha256)",
             "asset_media_type": "TEXT",
             "asset_size_bytes": "INTEGER",
+            "asset_width_px": "INTEGER",
+            "asset_height_px": "INTEGER",
         }
         for column, declaration in visual_additions.items():
             if column not in visual_columns:

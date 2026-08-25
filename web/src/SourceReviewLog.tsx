@@ -5,6 +5,7 @@ import {
   type CurationBlocker,
   type CurationImageSource,
   type CurationState,
+  type CurationVisual,
   completeCurationSourceReview,
   confirmCurationSource,
   type CurationPage,
@@ -225,12 +226,24 @@ export function SourceReviewLog({
   statusRef,
   onDirtyChange,
   onApproved,
+  externalCuration,
+  captureVisual,
+  focusApprovalNonce,
+  onCurationChange,
+  onDetailLoaded,
+  approvalPathReady,
 }: {
   page: CurationPage;
   arrivalAnnouncement: string | null;
   statusRef: RefObject<HTMLDivElement | null>;
   onDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
+  externalCuration: CurationState | null;
+  captureVisual: CurationVisual | null;
+  focusApprovalNonce: number;
+  onCurationChange: (curation: CurationState) => void;
+  onDetailLoaded: (detail: PageDetail) => void;
+  approvalPathReady: boolean;
 }) {
   const [detail, setDetail] = useState<PageDetail | null>(null);
   const [titles, setTitles] = useState<string[]>([]);
@@ -266,7 +279,10 @@ export function SourceReviewLog({
         const effective = normalizedSource(
           curation.current_snapshot?.source_content ?? original,
         );
-        setDetail({ ...payload, source_content: original, curation });
+        const normalizedDetail = { ...payload, source_content: original, curation };
+        setDetail(normalizedDetail);
+        onDetailLoaded(normalizedDetail);
+        onCurationChange(curation);
         setTitles(effective.titles);
         setBody(effective.body);
         setDrafts(imageDrafts(curation.image_sources.items));
@@ -290,7 +306,7 @@ export function SourceReviewLog({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [page.page_id, retryRevision]);
+  }, [onCurationChange, onDetailLoaded, page.page_id, retryRevision]);
 
   useEffect(() => load(), [load]);
 
@@ -386,7 +402,7 @@ export function SourceReviewLog({
     });
   }, [busy, curation, focusSourceRef]);
 
-  const applyCuration = (
+  const applyCuration = useCallback((
     next: CurationState,
     { preserveImageDrafts = false }: { preserveImageDrafts?: boolean } = {},
   ) => {
@@ -396,7 +412,20 @@ export function SourceReviewLog({
       setBody(next.current_snapshot.source_content.body);
     }
     if (!preserveImageDrafts) setDrafts(imageDrafts(next.image_sources.items));
-  };
+    onCurationChange(next);
+  }, [onCurationChange]);
+
+  useEffect(() => {
+    if (!externalCuration) return;
+    const incomingId = externalCuration.current_snapshot?.snapshot_id ?? null;
+    const currentId = curation?.current_snapshot?.snapshot_id ?? null;
+    if (incomingId !== currentId) applyCuration(externalCuration);
+  }, [applyCuration, curation?.current_snapshot?.snapshot_id, externalCuration]);
+
+  useEffect(() => {
+    if (!focusApprovalNonce || busy) return;
+    window.requestAnimationFrame(() => approveRef.current?.focus());
+  }, [busy, focusApprovalNonce]);
 
   const handleSave = async () => {
     if (!page.page_id || busy || (!textDirty && snapshot)) return;
@@ -580,7 +609,10 @@ export function SourceReviewLog({
   };
 
   const handleApprove = useCallback(async () => {
-    if (!page.page_id || !snapshot || dirty || busy || !curation?.can_approve) return;
+    if (
+      !page.page_id || !snapshot || dirty || busy || !curation?.can_approve ||
+      !approvalPathReady
+    ) return;
     setOperation("approve");
     setAnnouncement("正在冻结当前快照并记录批准结论…");
     try {
@@ -596,19 +628,22 @@ export function SourceReviewLog({
     } finally {
       setOperation(null);
     }
-  }, [busy, curation?.can_approve, dirty, onApproved, page.page_id, snapshot]);
+  }, [approvalPathReady, busy, curation?.can_approve, dirty, onApproved, page.page_id, snapshot]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
-      if (event.key.toLowerCase() !== "a" || !curation?.can_approve || dirty || busy) return;
+      if (
+        event.key.toLowerCase() !== "a" || !curation?.can_approve ||
+        !approvalPathReady || dirty || busy
+      ) return;
       event.preventDefault();
       void handleApprove();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, curation?.can_approve, dirty, handleApprove]);
+  }, [approvalPathReady, busy, curation?.can_approve, dirty, handleApprove]);
 
   if (loading) {
     return (
@@ -1080,6 +1115,30 @@ export function SourceReviewLog({
             {operation === "review" ? "正在完成审核" : "完成来源审核"}
           </button>
         </section>
+
+        {captureVisual ? (
+          <section className="source-phase capture-summary" aria-labelledby="capture-summary-heading">
+            <header>
+              <div>
+                <h3 id="capture-summary-heading">人工截图</h3>
+                <p>从标准页渲染结果裁出 · 不缩放</p>
+              </div>
+              <PhaseStatus complete={Boolean(captureVisual.summary?.trim())}>已保存</PhaseStatus>
+            </header>
+            <div className="capture-summary-row">
+              <span className="capture-summary-number">01</span>
+              <div>
+                <strong>{captureVisual.summary || "缺少 summary"}</strong>
+                <span>
+                  {captureVisual.visual_type || "未分类"}
+                  {captureVisual.asset?.width_px && captureVisual.asset?.height_px
+                    ? ` · ${captureVisual.asset.width_px} × ${captureVisual.asset.height_px} px`
+                    : ""}
+                </span>
+              </div>
+            </div>
+          </section>
+        ) : null}
       </div>
 
       <section className={`review-gate ${pending && blockers.length ? "is-blocked" : "is-clear"}`} aria-labelledby="review-gate-heading">
@@ -1091,10 +1150,22 @@ export function SourceReviewLog({
                 ? "批准结论已冻结"
                 : blockers.length
                   ? `${blockers.length} 项结构性阻塞`
-                  : "来源完整 · 无需截图"}
+                  : !approvalPathReady
+                    ? "等待来源完整性选择"
+                    : captureVisual
+                    ? "来源已补全 · 1 个视觉对象"
+                    : "来源完整 · 无需截图"}
             </p>
           </div>
-          <span>{!pending ? "已批准" : blockers.length ? "阻塞" : "可批准"}</span>
+          <span>
+            {!pending
+              ? "已批准"
+              : blockers.length
+                ? "阻塞"
+                : approvalPathReady
+                  ? "可批准"
+                  : "待选择"}
+          </span>
         </header>
         {pending && blockers.length ? (
           <ul>
@@ -1109,14 +1180,18 @@ export function SourceReviewLog({
         ) : (
           <p className="review-gate-clear">
             {pending
-              ? "当前确认来源可生成非空 Chunk 正文。"
+              ? approvalPathReady
+                ? "当前确认来源可生成非空 Chunk 正文。"
+                : "请在中央标准页渲染结果下方选择来源是否完整。"
               : "当前页面保留已批准快照及其来源审核记录。"}
           </p>
         )}
         <button
           type="button"
           ref={approveRef}
-          disabled={!pending || busy || dirty || !curation.can_approve}
+          disabled={
+            !pending || busy || dirty || !curation.can_approve || !approvalPathReady
+          }
           onClick={() => void handleApprove()}
         >
           {!pending

@@ -666,6 +666,12 @@ kbd {
   background: #276f70;
 }
 
+.filter-tabs button:disabled,
+.page-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .page-list {
   min-height: 0;
   padding: 8px;
@@ -1629,17 +1635,285 @@ kbd {
 }
 
 .page-render {
+  position: relative;
   width: min(94%, 960px);
   margin: 0;
 }
 
-.page-render img {
+.page-render-frame {
+  position: relative;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 16px 34px rgb(0 0 0 / 32%);
+}
+
+.page-render-frame img {
   display: block;
   width: 100%;
   max-height: calc(100vh - 190px);
   object-fit: contain;
   background: white;
-  box-shadow: 0 16px 34px rgb(0 0 0 / 32%);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.page-render.is-capture-mode .page-render-frame img {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.capture-range {
+  position: absolute;
+  z-index: 3;
+  min-width: 2px;
+  min-height: 2px;
+  border: 2px solid #9ee9e5;
+  background: transparent;
+  pointer-events: none;
+}
+
+.capture-range.is-temporary {
+  box-shadow: 0 0 0 200vmax rgb(11 16 19 / 46%);
+}
+
+.capture-range.is-saved {
+  border-color: #64bbb8;
+  box-shadow: inset 0 0 0 1px rgb(16 21 25 / 78%);
+}
+
+.capture-range > span {
+  position: absolute;
+  top: -25px;
+  left: -2px;
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 23px;
+  padding: 0 5px;
+  color: #0f2021;
+  background: #9ee9e5;
+  font: 800 11px/1 var(--data-font);
+  font-variant-numeric: tabular-nums;
+}
+
+.capture-decision {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid #3b474f;
+  border-radius: 8px;
+  color: #e7ebec;
+  background: #1b2227;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 24%);
+}
+
+.capture-decision > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.capture-decision strong {
+  font-size: 12px;
+}
+
+.capture-decision span {
+  color: #aab4b9;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.capture-decision > div:last-child,
+.capture-editor-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 7px;
+}
+
+.capture-decision button,
+.capture-editor-actions button {
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid #5c6870;
+  border-radius: 6px;
+  color: #dfe4e6;
+  background: #252d33;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.capture-decision button:hover,
+.capture-editor-actions button:hover:not(:disabled) {
+  background: #313b42;
+}
+
+.capture-decision button.is-primary,
+.capture-editor-actions button.is-primary {
+  border-color: #3e9291;
+  color: #fff;
+  background: #276f70;
+}
+
+.capture-decision button.is-primary:hover,
+.capture-editor-actions button.is-primary:hover:not(:disabled) {
+  background: #328184;
+}
+
+.capture-mode-instruction,
+.capture-stale-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #587b7b;
+  border-radius: 6px;
+  color: #e0f5f3;
+  background: #1c3132;
+  font-size: 10px;
+}
+
+.capture-mode-instruction span,
+.capture-stale-note {
+  color: #b6d6d4;
+}
+
+.capture-stale-note {
+  justify-content: flex-start;
+  border-color: #9b7329;
+  color: #ffe2a4;
+  background: #332816;
+}
+
+.capture-live-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.capture-editor {
+  position: fixed;
+  z-index: 100;
+  width: min(360px, calc(100vw - 24px));
+  padding: 14px;
+  border: 1px solid #839096;
+  border-radius: 10px;
+  color: #172026;
+  background: #f6f7f7;
+  box-shadow: 0 24px 56px rgb(0 0 0 / 44%);
+}
+
+.capture-editor > header {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid #c8ced1;
+}
+
+.capture-editor > header > span {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: #dffffd;
+  background: #276f70;
+  font: 800 11px/1 var(--data-font);
+}
+
+.capture-editor h2,
+.capture-editor header p {
+  margin: 0;
+}
+
+.capture-editor h2 {
+  font-size: 15px;
+  letter-spacing: -0.02em;
+}
+
+.capture-editor header p {
+  margin-top: 2px;
+  color: #657078;
+  font: 9px/1.4 var(--data-font);
+}
+
+.capture-editor > label {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  color: #344149;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.capture-editor > label strong {
+  color: #8d3027;
+  font-size: 9px;
+}
+
+.capture-editor > label small {
+  color: #657078;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.capture-editor textarea,
+.capture-editor select {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid #aeb7bb;
+  border-radius: 6px;
+  color: #172026;
+  background: #fff;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.capture-editor textarea {
+  resize: vertical;
+  caret-color: #276f70;
+}
+
+.capture-editor textarea[aria-invalid="true"] {
+  border-color: #a04d43;
+}
+
+.capture-field-help,
+.capture-field-error {
+  margin: 5px 0 0;
+  color: #657078;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.capture-field-error {
+  color: #8d3027;
+  font-weight: 700;
+}
+
+.capture-editor-actions {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.capture-editor-actions button {
+  color: #263239;
+  background: #e4e8e9;
+}
+
+.capture-editor-actions button:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .page-render figcaption {
@@ -1656,6 +1930,50 @@ kbd {
   overflow: auto;
   scrollbar-color: #9ca7ac #dfe3e4;
   scrollbar-width: thin;
+}
+
+.inspector-panel.is-interaction-locked {
+  opacity: 0.58;
+}
+
+.capture-summary-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid #70a5a3;
+  border-radius: 7px;
+  color: #173d3d;
+  background: #e2f0ef;
+}
+
+.capture-summary-number {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  color: #fff;
+  background: #276f70;
+  font: 800 10px/1 var(--data-font);
+}
+
+.capture-summary-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.capture-summary-row strong {
+  font-size: 11px;
+  line-height: 1.48;
+  overflow-wrap: anywhere;
+}
+
+.capture-summary-row span:last-child {
+  color: #527070;
+  font: 9px/1.45 var(--data-font);
+  font-variant-numeric: tabular-nums;
 }
 
 .source-registration {

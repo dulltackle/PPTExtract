@@ -64,7 +64,7 @@ try {
   const keepReview = keep.getByRole("button", { name: "完成来源审核" });
   await keepReview.waitFor();
   await keepReview.click();
-  await keep.getByText("来源完整 · 无需截图").waitFor();
+  await keep.getByRole("button", { name: "来源完整，直接审核" }).waitFor();
   checks.push("single-image-included");
   await keep.close();
 
@@ -78,7 +78,7 @@ try {
   );
   await ignore.getByRole("button", { name: "保存并处理下一项" }).click();
   await ignore.getByRole("button", { name: "完成来源审核" }).click();
-  await ignore.getByText("来源完整 · 无需截图").waitFor();
+  await ignore.getByRole("button", { name: "来源完整，直接审核" }).waitFor();
   checks.push("single-image-ignored");
   await ignore.close();
 
@@ -153,7 +153,7 @@ try {
     throw new Error("全部图片完成后焦点未移动到来源审核动作");
   }
   await mixedReview.click();
-  await mixed.getByText("来源完整 · 无需截图").waitFor();
+  await mixed.getByRole("button", { name: "来源完整，直接审核" }).waitFor();
   await mixed.getByRole("button", { name: /图片来源 01/ }).click();
   await mixed.getByRole("textbox", { name: "图片来源 01 summary" }).fill(
     "修改后的公开 summary 会撤销来源审核确认。",

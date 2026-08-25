@@ -117,6 +117,43 @@ export interface SourceImage {
 
 export type ImageDisposition = "included" | "ignored";
 
+export type VisualType =
+  | "chart"
+  | "diagram"
+  | "map"
+  | "table"
+  | "screenshot"
+  | "photo"
+  | "illustration"
+  | "other";
+
+export interface NormalizedBounds {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface CurationVisual {
+  visual_ref: string;
+  position: number;
+  source_kind: "source_image" | "capture";
+  disposition: "included" | "ignored";
+  summary: string | null;
+  visual_type: string | null;
+  bounds: NormalizedBounds | null;
+  source_visual_ref: string | null;
+  confirmed: boolean;
+  asset?: {
+    sha256: string;
+    media_type: string;
+    size_bytes: number;
+    width_px?: number;
+    height_px?: number;
+    byte_contract: "anydoc_original" | "standard_render_crop";
+  };
+}
+
 export type ImageIgnoreReason =
   | "decorative"
   | "duplicate_source"
@@ -174,6 +211,7 @@ export interface CurationBlocker {
     | "image_bytes_unavailable"
     | "image_hash_mismatch"
     | "image_media_type_unsupported"
+    | "visual_summary_required"
     | "chunk_body_empty";
   message: string;
   source_ref?: string;
@@ -199,6 +237,18 @@ export interface PageDetail {
   review_status: "pending" | "approved" | "excluded";
   source_content: SourceContent;
   curation?: CurationState;
+  annotation?: {
+    snapshot_id: string;
+    visuals: CurationVisual[];
+  } | null;
+  standard_render?: {
+    sha256: string;
+    media_type: string;
+    dpi: number;
+    width_px: number;
+    height_px: number;
+    url: string;
+  };
   rendering_warnings?: {
     summary: RenderingWarningSummary;
     warnings: RenderingWarning[];
@@ -510,6 +560,31 @@ export async function saveCurationImageSource(
     await readJson<{ curation: CurationState }>(
       response,
       "图片来源处置未能保存；本地修改仍保留。",
+    )
+  ).curation;
+}
+
+export async function saveCaptureVisual(
+  pageId: string,
+  baseSnapshotId: string,
+  summary: string,
+  visualType: VisualType | null,
+  bounds: NormalizedBounds,
+): Promise<CurationState> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/visuals`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      base_snapshot_id: baseSnapshotId,
+      summary,
+      visual_type: visualType,
+      bounds,
+    }),
+  });
+  return (
+    await readJson<{ curation: CurationState }>(
+      response,
+      "视觉对象未能保存；当前范围和表单内容仍保留。",
     )
   ).curation;
 }

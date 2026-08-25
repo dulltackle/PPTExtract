@@ -52,7 +52,7 @@ try {
   await page.getByText("已修改，原确认失效").waitFor();
 
   const bodyText = await page.locator("body").innerText();
-  for (const forbidden of ["overview", "VLM", "自动批准", "自动补全", "视觉对象", "框选"]) {
+  for (const forbidden of ["overview", "VLM", "自动批准", "自动补全", "自动候选框"]) {
     if (bodyText.includes(forbidden)) throw new Error(`工作台出现范围外入口：${forbidden}`);
   }
 
@@ -68,6 +68,11 @@ try {
     () => document.activeElement?.textContent?.trim() === "完成来源审核",
   );
   await review.click();
+  await page.getByRole("button", { name: "有缺口，在页面上框选" }).waitFor();
+  if ((await page.locator(".capture-range").count()) !== 0) {
+    throw new Error("来源审核完成后自动显示了候选框");
+  }
+  await page.getByRole("button", { name: "来源完整，直接审核" }).click();
   await page.getByText("来源完整 · 无需截图").waitFor();
   if (captureRoot) {
     await page.screenshot({ path: resolve(captureRoot, "curation-1440-ready.png") });

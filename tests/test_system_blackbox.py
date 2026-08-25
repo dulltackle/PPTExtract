@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import shutil
 import socket
@@ -14,6 +16,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 
 from tests.support.synthetic_pptx import (
     build_image_curation_presentation,
@@ -369,6 +372,115 @@ def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_b
         assert detail["review"]["source_version_id"] == identity["version_id"]
         assert detail["annotation"]["overview"] is None
         assert detail["annotation"]["visuals"] == []
+
+
+def test_first_capture_visual_is_created_and_verified_in_real_browser(
+    running_system: tuple[str, Path],
+) -> None:
+    base_url, data_root = running_system
+    project_root = Path(__file__).resolve().parents[1]
+    identities: list[dict[str, object]] = []
+    with httpx.Client(trust_env=False, timeout=60) as client:
+        for index, width in enumerate((1280, 1440), start=1):
+            accepted = client.post(
+                f"{base_url}/api/v1/documents",
+                headers={
+                    "X-Actor-ID": "blackbox-operator",
+                    "Idempotency-Key": f"browser-capture-visual-{width}",
+                },
+                files={
+                    "file": (
+                        f"public-capture-{width}.pptx",
+                        build_plain_text_presentation(
+                            title=f"公开框选验收页 {index}",
+                            body_text="文字来源不足，需要从标准页补充公开视觉结论。",
+                        ),
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    )
+                },
+            )
+            assert accepted.status_code == 202
+            identity = accepted.json()
+            deadline = time.monotonic() + 45
+            task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+            while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
+                time.sleep(0.1)
+                task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
+            assert task["status"] == "succeeded"
+            identities.append(identity)
+
+    routes = [
+        "/curation?document="
+        f"{identity['document_id']}&version={identity['version_id']}&page=1"
+        for identity in identities
+    ]
+    browser_result = subprocess.run(
+        ["node", "tests/capture-visual-blackbox.mjs", base_url, *routes],
+        cwd=project_root / "web",
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    report = json.loads(browser_result.stdout)
+    assert report["ok"] is True
+    assert report["checks"] == ["capture-viewport-1280", "capture-viewport-1440"]
+    assert len(report["savedBounds"]) == 2
+    for bounds in report["savedBounds"]:
+        assert bounds == pytest.approx(
+            {"left": 0.18, "top": 0.22, "width": 0.44, "height": 0.44},
+            abs=0.002,
+        )
+
+    visual_refs: list[str] = []
+    with httpx.Client(trust_env=False, timeout=10) as client:
+        pages = client.get(
+            f"{base_url}/api/v1/curation/pages", params={"review_status": "all"}
+        ).json()["pages"]
+        for identity in identities:
+            page = next(
+                candidate
+                for candidate in pages
+                if candidate["document_id"] == identity["document_id"]
+                and candidate["version_id"] == identity["version_id"]
+            )
+            detail = client.get(f"{base_url}/api/v1/pages/{page['page_id']}").json()
+            visual = next(
+                item
+                for item in detail["annotation"]["visuals"]
+                if item["source_kind"] == "capture"
+            )
+            visual_refs.append(visual["visual_ref"])
+            assert len(visual["visual_ref"]) == 32
+            assert visual["visual_ref"] != "01"
+            assert visual["summary"].startswith("公开折线展示")
+            assert visual["visual_type"] == "chart"
+            assert visual["confirmed"] is True
+            asset = visual["asset"]
+            assert asset["media_type"] == "image/png"
+            assert asset["byte_contract"] == "standard_render_crop"
+            render = detail["standard_render"]
+            bounds = visual["bounds"]
+            expected_left = max(0, math.floor(bounds["left"] * render["width_px"]) - 8)
+            expected_top = max(0, math.floor(bounds["top"] * render["height_px"]) - 8)
+            expected_right = min(
+                render["width_px"],
+                math.ceil((bounds["left"] + bounds["width"]) * render["width_px"]) + 8,
+            )
+            expected_bottom = min(
+                render["height_px"],
+                math.ceil((bounds["top"] + bounds["height"]) * render["height_px"]) + 8,
+            )
+            assert asset["width_px"] == expected_right - expected_left
+            assert asset["height_px"] == expected_bottom - expected_top
+            object_path = data_root / "objects" / asset["sha256"][:2] / asset["sha256"]
+            payload = object_path.read_bytes()
+            assert hashlib.sha256(payload).hexdigest() == asset["sha256"]
+            assert len(payload) == asset["size_bytes"]
+            with Image.open(object_path) as image:
+                assert image.format == "PNG"
+                assert image.size == (asset["width_px"], asset["height_px"])
+    assert len(set(visual_refs)) == 2
 
 
 def test_anydoc_image_sources_are_disposed_in_a_real_browser(

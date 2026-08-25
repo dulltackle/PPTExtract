@@ -552,6 +552,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "firecrawl-anydoc" },
+    { name = "pillow" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -560,7 +561,6 @@ dependencies = [
 dev = [
     { name = "httpx" },
     { name = "mypy" },
-    { name = "pillow" },
     { name = "pytest" },
     { name = "python-pptx" },
     { name = "ruff" },
@@ -570,6 +570,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "firecrawl-anydoc", specifier = "==0.1.9" },
+    { name = "pillow", specifier = "==11.3.0" },
     { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
 ]
@@ -578,7 +579,6 @@ requires-dist = [
 dev = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mypy", specifier = ">=1.15,<2" },
-    { name = "pillow", specifier = "==11.3.0" },
     { name = "pytest", specifier = ">=8.3,<9" },
     { name = "python-pptx", specifier = "==1.0.2" },
     { name = "ruff", specifier = ">=0.11,<1" },

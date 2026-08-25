@@ -20,6 +20,7 @@ from pptextract.curation import (
     confirm_source_snapshot,
     read_page_curation,
     read_source_image,
+    save_capture_visual,
     save_image_source_disposition,
     save_source_snapshot,
 )
@@ -96,6 +97,20 @@ class SaveImageSourceDisposition(BaseModel):
     ignore_note: str | None = Field(default=None, max_length=100_000)
 
 
+class NormalizedBounds(BaseModel):
+    left: float
+    top: float
+    width: float
+    height: float
+
+
+class SaveCaptureVisual(BaseModel):
+    base_snapshot_id: str = Field(min_length=1, max_length=128)
+    summary: str = Field(max_length=100_000)
+    visual_type: str | None = Field(default=None, max_length=128)
+    bounds: NormalizedBounds
+
+
 def _read_curation_snapshot(
     connection: sqlite3.Connection, snapshot_id: str | None
 ) -> dict[str, Any] | None:
@@ -114,7 +129,8 @@ def _read_curation_snapshot(
         """
         SELECT visual_ref, position, source_kind, disposition, summary,
                visual_type, bounds_json, source_visual_ref, confirmed,
-               source_image_ref, asset_sha256, asset_media_type, asset_size_bytes
+               source_image_ref, asset_sha256, asset_media_type, asset_size_bytes,
+               asset_width_px, asset_height_px
         FROM curation_snapshot_visuals
         WHERE snapshot_id = ? ORDER BY position
         """,
@@ -151,6 +167,23 @@ def _read_curation_snapshot(
                         },
                     }
                     if visual["source_kind"] == "source_image"
+                    else {}
+                ),
+                **(
+                    {
+                        "asset": {
+                            "sha256": visual["asset_sha256"],
+                            "media_type": visual["asset_media_type"],
+                            "size_bytes": visual["asset_size_bytes"],
+                            "width_px": visual["asset_width_px"],
+                            "height_px": visual["asset_height_px"],
+                            "byte_contract": "standard_render_crop",
+                        }
+                    }
+                    if (
+                        visual["source_kind"] == "capture"
+                        and visual["asset_sha256"] is not None
+                    )
                     else {}
                 ),
             }
@@ -1182,6 +1215,25 @@ def create_app(
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(content={"curation": curation})
+
+    @app.post("/api/v1/pages/{page_id}/curation/visuals", status_code=201)
+    async def create_capture_visual(
+        page_id: str, command: SaveCaptureVisual, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = save_capture_visual(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+                summary=command.summary,
+                visual_type=command.visual_type,
+                bounds=command.bounds.model_dump(),
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=201, content={"curation": curation})
 
     @app.post("/api/v1/pages/{page_id}/approve")
     async def approve_curation_page(

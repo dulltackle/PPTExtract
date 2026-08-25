@@ -1,15 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   confirmAllRenderingWarnings,
   confirmRenderingWarning,
+  type CurationState,
+  type CurationVisual,
   type CurationPage,
   enableHiddenPage,
   loadCurationPages,
   loadJob,
+  loadPageDetail,
   loadRenderingWarnings,
   OperatorError,
+  type NormalizedBounds,
+  type PageDetail,
   type RenderingWarning,
+  saveCaptureVisual,
+  type VisualType,
 } from "./api";
 import { SourceReviewLog } from "./SourceReviewLog";
 
@@ -66,6 +81,7 @@ function PageRail({
   filter,
   selectedKey,
   versionWarningSummary,
+  interactionLocked,
   onFilter,
   onSelect,
 }: {
@@ -73,6 +89,7 @@ function PageRail({
   filter: Filter;
   selectedKey: string | null;
   versionWarningSummary: CurationPage["version_rendering_warnings"];
+  interactionLocked: boolean;
   onFilter: (filter: Filter) => void;
   onSelect: (key: string) => void;
 }) {
@@ -90,6 +107,7 @@ function PageRail({
               type="button"
               className={filter === value ? "is-current" : ""}
               aria-pressed={filter === value}
+              disabled={interactionLocked}
               onClick={() => onFilter(value)}
             >
               {value === "pending" ? "待处理" : value === "all" ? "全部" : "渲染警告"}
@@ -139,6 +157,7 @@ function PageRail({
               key={key}
               aria-label={`第 ${page.page_number} 页，${title}，${status}${warningLabel}`}
               aria-current={selectedKey === key ? "true" : undefined}
+              disabled={interactionLocked}
               onClick={() => onSelect(key)}
             >
               <span className="page-number">{String(page.page_number).padStart(2, "0")}</span>
@@ -165,7 +184,223 @@ function PageRail({
   );
 }
 
-function EvidencePanel({ page }: { page: CurationPage | null }) {
+const VISUAL_TYPE_OPTIONS: Array<{ value: VisualType; label: string }> = [
+  { value: "chart", label: "图表" },
+  { value: "diagram", label: "示意图" },
+  { value: "map", label: "地图" },
+  { value: "table", label: "表格" },
+  { value: "screenshot", label: "界面截图" },
+  { value: "photo", label: "照片" },
+  { value: "illustration", label: "插图" },
+  { value: "other", label: "其他" },
+];
+
+function EvidencePanel({
+  page,
+  curation,
+  captureVisual,
+  onCurationChange,
+  onCaptureVisualChange,
+  onEditingChange,
+  onFocusApproval,
+}: {
+  page: CurationPage | null;
+  curation: CurationState | null;
+  captureVisual: CurationVisual | null;
+  onCurationChange: (curation: CurationState) => void;
+  onCaptureVisualChange: (visual: CurationVisual | null) => void;
+  onEditingChange: (editing: boolean) => void;
+  onFocusApproval: () => void;
+}) {
+  const [mode, setMode] = useState<"decision" | "selecting" | "editing">("decision");
+  const [selection, setSelection] = useState<NormalizedBounds | null>(null);
+  const [summary, setSummary] = useState("");
+  const [visualType, setVisualType] = useState<VisualType | "">("");
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [editorPosition, setEditorPosition] = useState<CSSProperties>({});
+  const imageRef = useRef<HTMLImageElement>(null);
+  const editorRef = useRef<HTMLElement>(null);
+  const summaryRef = useRef<HTMLTextAreaElement>(null);
+  const capturePathButtonRef = useRef<HTMLButtonElement>(null);
+  const dragStart = useRef<{ x: number; y: number } | null>(null);
+
+  const restorePathFocus = useCallback(() => {
+    window.requestAnimationFrame(() => capturePathButtonRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    setMode("decision");
+    setSelection(null);
+    setSummary("");
+    setVisualType("");
+    setSummaryError(null);
+    setAnnouncement(null);
+    setSaving(false);
+    onEditingChange(false);
+  }, [onEditingChange, page?.page_id]);
+
+  const captureBounds = captureVisual?.bounds ?? null;
+  const activeSelection = selection ?? captureBounds;
+  const sourceReviewed = Boolean(curation?.current_snapshot?.source_review);
+  const canChoosePath = Boolean(
+    page?.review_status === "pending" && sourceReviewed && !captureVisual,
+  );
+
+  const normalizedPoint = (
+    event: ReactPointerEvent<HTMLImageElement>,
+  ): { x: number; y: number } | null => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const updateSelection = (point: { x: number; y: number }) => {
+    const start = dragStart.current;
+    if (!start) return;
+    setSelection({
+      left: Math.min(start.x, point.x),
+      top: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    });
+  };
+
+  const positionEditor = useCallback(() => {
+    if (!selection || !imageRef.current) return;
+    const imageRect = imageRef.current.getBoundingClientRect();
+    const range = {
+      left: imageRect.left + selection.left * imageRect.width,
+      top: imageRect.top + selection.top * imageRect.height,
+      right: imageRect.left + (selection.left + selection.width) * imageRect.width,
+      bottom: imageRect.top + (selection.top + selection.height) * imageRect.height,
+    };
+    const gap = 14;
+    const margin = 12;
+    const width = editorRef.current?.offsetWidth || 360;
+    const height = editorRef.current?.offsetHeight || 330;
+    const candidates = [
+      { left: range.right + gap, top: range.top },
+      { left: range.left - gap - width, top: range.top },
+      { left: range.left, top: range.bottom + gap },
+      { left: range.left, top: range.top - gap - height },
+    ];
+    const chosen = candidates.find((candidate) => (
+      candidate.left >= margin && candidate.top >= margin &&
+      candidate.left + width <= window.innerWidth - margin &&
+      candidate.top + height <= window.innerHeight - margin
+    )) ?? candidates[0];
+    setEditorPosition({
+      left: Math.min(
+        window.innerWidth - width - margin,
+        Math.max(margin, chosen.left),
+      ),
+      top: Math.min(
+        window.innerHeight - height - margin,
+        Math.max(margin, chosen.top),
+      ),
+    });
+  }, [selection]);
+
+  useEffect(() => {
+    if (mode !== "editing") return;
+    const frame = window.requestAnimationFrame(() => {
+      positionEditor();
+      summaryRef.current?.focus();
+    });
+    window.addEventListener("resize", positionEditor);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", positionEditor);
+    };
+  }, [mode, positionEditor]);
+
+  useEffect(() => {
+    if (mode !== "selecting") return;
+    const cancelSelection = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setSelection(null);
+      setMode("decision");
+      setAnnouncement("已取消框选，返回来源完整性选择。");
+      restorePathFocus();
+    };
+    window.addEventListener("keydown", cancelSelection);
+    return () => window.removeEventListener("keydown", cancelSelection);
+  }, [mode, restorePathFocus]);
+
+  const cancelEditor = () => {
+    setSelection(null);
+    setMode("decision");
+    setSummary("");
+    setVisualType("");
+    setSummaryError(null);
+    setAnnouncement("已取消视觉对象 01，返回来源完整性选择。");
+    onEditingChange(false);
+    restorePathFocus();
+  };
+
+  const handleSave = async () => {
+    const snapshotId = curation?.current_snapshot?.snapshot_id;
+    if (!page?.page_id || !snapshotId || !selection || saving) return;
+    if (!summary.trim()) {
+      setSummaryError("summary 不能为空，请写成可独立理解的结论。");
+      window.requestAnimationFrame(() => summaryRef.current?.focus());
+      return;
+    }
+    setSaving(true);
+    setSummaryError(null);
+    setAnnouncement("正在裁出 PNG 并保存视觉对象 01…");
+    try {
+      const next = await saveCaptureVisual(
+        page.page_id,
+        snapshotId,
+        summary,
+        visualType || null,
+        selection,
+      );
+      onCurationChange(next);
+      onCaptureVisualChange({
+        visual_ref: "",
+        position: 0,
+        source_kind: "capture",
+        disposition: "included",
+        summary: summary.trim(),
+        visual_type: visualType || null,
+        bounds: selection,
+        source_visual_ref: null,
+        confirmed: true,
+      });
+      setMode("decision");
+      setSelection(null);
+      setAnnouncement("视觉对象 01 已保存，审核闸门已重新校验。");
+      onEditingChange(false);
+      onFocusApproval();
+      try {
+        const refreshed = await loadPageDetail(page.page_id);
+        const savedCapture = refreshed.annotation?.visuals.find(
+          (visual) => visual.source_kind === "capture",
+        ) ?? null;
+        if (savedCapture) onCaptureVisualChange(savedCapture);
+      } catch {
+        setAnnouncement(
+          "视觉对象 01 已保存；资产详情暂未刷新，可稍后刷新工作位。",
+        );
+      }
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 当前范围和表单内容仍保留，可重试。`
+          : "视觉对象未能保存；当前范围和表单内容仍保留，可重试。",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <section className="evidence-panel" aria-labelledby="evidence-heading">
       <header className="evidence-heading">
@@ -181,12 +416,206 @@ function EvidencePanel({ page }: { page: CurationPage | null }) {
         ) : page.hidden && !page.enabled ? (
           <HiddenRenderPlaceholder />
         ) : (
-          <figure className="page-render">
-            <img src={`/api/v1/pages/${page.page_id}/render`} alt={`第 ${page.page_number} 页标准页渲染结果`} />
+          <figure className={`page-render ${mode === "selecting" || mode === "editing" ? "is-capture-mode" : ""}`}>
+            <div className="page-render-frame">
+              <img
+                ref={imageRef}
+                src={`/api/v1/pages/${page.page_id}/render`}
+                alt={`第 ${page.page_number} 页标准页渲染结果`}
+                draggable={false}
+                onPointerDown={(event) => {
+                  if (mode !== "selecting") return;
+                  const point = normalizedPoint(event);
+                  if (!point) return;
+                  dragStart.current = point;
+                  setSelection({ left: point.x, top: point.y, width: 0, height: 0 });
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                }}
+                onPointerMove={(event) => {
+                  if (mode !== "selecting" || !dragStart.current) return;
+                  const point = normalizedPoint(event);
+                  if (point) updateSelection(point);
+                }}
+                onPointerUp={(event) => {
+                  if (mode !== "selecting" || !dragStart.current) return;
+                  const point = normalizedPoint(event);
+                  if (point) updateSelection(point);
+                  const start = dragStart.current;
+                  dragStart.current = null;
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  if (
+                    !point ||
+                    Math.abs(point.x - start.x) * rect.width < 4 ||
+                    Math.abs(point.y - start.y) * rect.height < 4
+                  ) {
+                    setSelection(null);
+                    setAnnouncement("范围太小，请重新框选。");
+                    return;
+                  }
+                  setSelection({
+                    left: Number(Math.min(start.x, point.x).toFixed(6)),
+                    top: Number(Math.min(start.y, point.y).toFixed(6)),
+                    width: Number(Math.abs(point.x - start.x).toFixed(6)),
+                    height: Number(Math.abs(point.y - start.y).toFixed(6)),
+                  });
+                  setMode("editing");
+                  setAnnouncement("已创建临时视觉对象 01，请填写自足 summary。");
+                  onEditingChange(true);
+                }}
+              />
+              {activeSelection ? (
+                <div
+                  className={`capture-range ${captureVisual ? "is-saved" : "is-temporary"}`}
+                  style={{
+                    left: `${activeSelection.left * 100}%`,
+                    top: `${activeSelection.top * 100}%`,
+                    width: `${activeSelection.width * 100}%`,
+                    height: `${activeSelection.height * 100}%`,
+                  }}
+                  aria-label="视觉对象 01 框选范围"
+                >
+                  <span>01</span>
+                </div>
+              ) : null}
+            </div>
             <figcaption>{page.title || `第 ${page.page_number} 页`}</figcaption>
+
+            {canChoosePath && mode === "decision" ? (
+              <div className="capture-decision" aria-label="选择来源完整性路径">
+                <div>
+                  <strong>来源审核已完成</strong>
+                  <span>标准页仍有未被文字与图片来源完整表达的内容吗？</span>
+                </div>
+                <div>
+                  <button type="button" onClick={onFocusApproval}>
+                    来源完整，直接审核
+                  </button>
+                  <button
+                    ref={capturePathButtonRef}
+                    type="button"
+                    className="is-primary"
+                    onClick={() => {
+                      setMode("selecting");
+                      setAnnouncement("框选模式已开启。请在标准页渲染结果上拖出缺失范围。");
+                    }}
+                  >
+                    有缺口，在页面上框选
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {mode === "selecting" ? (
+              <div className="capture-mode-instruction">
+                <strong>拖出缺失范围</strong>
+                <span>不会自动显示候选框 · Esc 取消</span>
+              </div>
+            ) : null}
+
+            {captureVisual && !sourceReviewed ? (
+              <div className="capture-stale-note" role="status">
+                已保存视觉对象 01；来源审核失效，重新完成审核后才能批准。
+              </div>
+            ) : null}
           </figure>
         )}
       </div>
+
+      <div
+        className="capture-live-status"
+        role={announcement ? "status" : undefined}
+        aria-live="polite"
+      >
+        {announcement}
+      </div>
+
+      {mode === "editing" && selection ? (
+        <section
+          ref={editorRef}
+          className="capture-editor"
+          style={editorPosition}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="capture-editor-heading"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEditor();
+              return;
+            }
+            if (event.key !== "Tab") return;
+            const controls = Array.from(
+              editorRef.current?.querySelectorAll<HTMLElement>(
+                "textarea, select, button:not([disabled]), [tabindex]:not([tabindex='-1'])",
+              ) ?? [],
+            );
+            if (!controls.length) return;
+            const first = controls[0];
+            const last = controls[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
+        >
+          <header>
+            <span>01</span>
+            <div>
+              <h2 id="capture-editor-heading">视觉对象 01</h2>
+              <p>范围将按整页归一化坐标保存</p>
+            </div>
+          </header>
+          <label>
+            <span>自足 summary <strong>必填</strong></span>
+            <textarea
+              ref={summaryRef}
+              aria-label="视觉对象 01 summary"
+              rows={4}
+              value={summary}
+              aria-invalid={Boolean(summaryError)}
+              aria-describedby={summaryError ? "capture-summary-error" : undefined}
+              onChange={(event) => {
+                setSummary(event.target.value);
+                if (summaryError && event.target.value.trim()) setSummaryError(null);
+              }}
+            />
+          </label>
+          {summaryError ? (
+            <p className="capture-field-error" id="capture-summary-error">
+              {summaryError}
+            </p>
+          ) : (
+            <p className="capture-field-help">写成脱离当前页面也能独立理解的事实结论。</p>
+          )}
+          <label>
+            <span>视觉类型 <small>可选</small></span>
+            <select
+              aria-label="视觉对象 01 类型"
+              value={visualType}
+              onChange={(event) => setVisualType(event.target.value as VisualType | "")}
+            >
+              <option value="">不指定</option>
+              {VISUAL_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <div className="capture-editor-actions">
+            <button type="button" disabled={saving} onClick={cancelEditor}>取消</button>
+            <button
+              type="button"
+              className="is-primary"
+              disabled={saving}
+              onClick={() => void handleSave()}
+            >
+              {saving ? "正在裁图并保存" : "保存并返回审核"}
+            </button>
+          </div>
+        </section>
+      ) : null}
     </section>
   );
 }
@@ -577,6 +1006,13 @@ function InspectorPanel({
   targetWarningId,
   onWarningSummaryChange,
   curationAnnouncement,
+  externalCuration,
+  captureVisual,
+  focusApprovalNonce,
+  interactionLocked,
+  onCurationChange,
+  onDetailLoaded,
+  approvalPathReady,
   onSourceDirtyChange,
   onApproved,
 }: {
@@ -592,11 +1028,22 @@ function InspectorPanel({
     pageSummary: NonNullable<CurationPage["rendering_warnings"]>,
   ) => void;
   curationAnnouncement: string | null;
+  externalCuration: CurationState | null;
+  captureVisual: CurationVisual | null;
+  focusApprovalNonce: number;
+  interactionLocked: boolean;
+  onCurationChange: (curation: CurationState) => void;
+  onDetailLoaded: (detail: PageDetail) => void;
+  approvalPathReady: boolean;
   onSourceDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
 }) {
   return (
-    <aside className="inspector-panel" aria-label="来源与策展日志">
+    <aside
+      className={`inspector-panel ${interactionLocked ? "is-interaction-locked" : ""}`}
+      aria-label="来源与策展日志"
+      inert={interactionLocked}
+    >
       {!page ? (
         <div className="inspector-empty">
           {curationAnnouncement ?? "选择一页后，这里会显示可追溯来源与可用动作。"}
@@ -623,6 +1070,12 @@ function InspectorPanel({
           statusRef={statusRef}
           onDirtyChange={onSourceDirtyChange}
           onApproved={onApproved}
+          externalCuration={externalCuration}
+          captureVisual={captureVisual}
+          focusApprovalNonce={focusApprovalNonce}
+          onCurationChange={onCurationChange}
+          onDetailLoaded={onDetailLoaded}
+          approvalPathReady={approvalPathReady}
         />
       )}
     </aside>
@@ -647,6 +1100,11 @@ export function CurationWorkbench() {
   const [operations, setOperations] = useState<Record<string, PageOperation>>({});
   const [sourceDirty, setSourceDirty] = useState(false);
   const [curationAnnouncement, setCurationAnnouncement] = useState<string | null>(null);
+  const [selectedCuration, setSelectedCuration] = useState<CurationState | null>(null);
+  const [captureVisual, setCaptureVisual] = useState<CurationVisual | null>(null);
+  const [captureEditing, setCaptureEditing] = useState(false);
+  const [focusApprovalNonce, setFocusApprovalNonce] = useState(0);
+  const [approvalPathReady, setApprovalPathReady] = useState(false);
   const request = useRef<AbortController | null>(null);
   const poll = useRef<AbortController | null>(null);
   const timer = useRef<number | null>(null);
@@ -701,24 +1159,48 @@ export function CurationWorkbench() {
   );
   const selectedOperation = selectedKey ? operations[selectedKey] : undefined;
 
+  useEffect(() => {
+    setSelectedCuration(null);
+    setCaptureVisual(null);
+    setCaptureEditing(false);
+    setApprovalPathReady(false);
+  }, [selectedKey]);
+
+  useEffect(() => {
+    if (!selectedCuration?.current_snapshot?.source_review) {
+      setApprovalPathReady(false);
+    } else if (captureVisual) {
+      setApprovalPathReady(true);
+    }
+  }, [captureVisual, selectedCuration?.current_snapshot?.source_review]);
+
+  const handleDetailLoaded = useCallback((detail: PageDetail) => {
+    setSelectedCuration(detail.curation ?? null);
+    setCaptureVisual(
+      detail.annotation?.visuals.find((visual) => visual.source_kind === "capture") ?? null,
+    );
+  }, []);
+
   const confirmDiscard = useCallback(() => {
     if (!sourceDirty) return true;
     return window.confirm("当前页仍有未保存的来源修改。放弃这些修改并继续吗？");
   }, [sourceDirty]);
 
   const handleSelect = useCallback((key: string) => {
+    if (captureEditing) return;
     if (!confirmDiscard()) return;
     setSourceDirty(false);
     setCurationAnnouncement(null);
     setSelectedKey(key);
-  }, [confirmDiscard]);
+  }, [captureEditing, confirmDiscard]);
 
   const handleFilter = useCallback((nextFilter: Filter) => {
+    if (captureEditing) return;
     if (!confirmDiscard()) return;
     setSourceDirty(false);
     setCurationAnnouncement(null);
     setFilter(nextFilter);
-  }, [confirmDiscard]);
+  }, [captureEditing, confirmDiscard]);
 
   const updateOperation = useCallback(
     (targetKey: string, update: Partial<PageOperation>) => {
@@ -924,10 +1406,22 @@ export function CurationWorkbench() {
         filter={filter}
         selectedKey={selectedKey}
         versionWarningSummary={selected?.version_rendering_warnings}
+        interactionLocked={captureEditing}
         onFilter={handleFilter}
         onSelect={handleSelect}
       />
-      <EvidencePanel page={selected} />
+      <EvidencePanel
+        page={selected}
+        curation={selectedCuration}
+        captureVisual={captureVisual}
+        onCurationChange={setSelectedCuration}
+        onCaptureVisualChange={setCaptureVisual}
+        onEditingChange={setCaptureEditing}
+        onFocusApproval={() => {
+          setApprovalPathReady(true);
+          setFocusApprovalNonce((value) => value + 1);
+        }}
+      />
       <InspectorPanel
         page={selected}
         submitting={selectedOperation?.submitting ?? false}
@@ -938,6 +1432,13 @@ export function CurationWorkbench() {
         targetWarningId={targetWarningId}
         onWarningSummaryChange={handleWarningSummaryChange}
         curationAnnouncement={curationAnnouncement}
+        externalCuration={selectedCuration}
+        captureVisual={captureVisual}
+        focusApprovalNonce={focusApprovalNonce}
+        interactionLocked={captureEditing}
+        onCurationChange={setSelectedCuration}
+        onDetailLoaded={handleDetailLoaded}
+        approvalPathReady={approvalPathReady}
         onSourceDirtyChange={setSourceDirty}
         onApproved={handleApproved}
       />

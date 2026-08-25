@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -216,12 +216,19 @@ describe("来源文字审核工作台", () => {
     const review = await screen.findByRole("button", { name: "完成来源审核" });
     await waitFor(() => expect(review).toHaveFocus());
     await userEvent.click(review);
-    expect(await screen.findByText("来源完整 · 无需截图")).toBeInTheDocument();
+    expect(await screen.findByText("等待来源完整性选择")).toBeInTheDocument();
 
     expect(screen.queryByText(/overview/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/VLM/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/自动批准|自动补全/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/视觉对象|框选/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/自动候选框/)).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "来源完整，直接审核" }),
+    );
+    expect(await screen.findByText("来源完整 · 无需截图")).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "批准并转到下一待处理页" }),
+    ).toHaveFocus());
 
     await userEvent.click(
       screen.getByRole("button", { name: "批准并转到下一待处理页" }),
@@ -229,6 +236,170 @@ describe("来源文字审核工作台", () => {
     expect(await screen.findByText("上一页已批准。已转到下一待处理页。")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" }))
       .toHaveValue("第二页来源标题");
+  });
+
+  it("来源有缺口时框选首个视觉对象、校验 summary 并返回批准动作", async () => {
+    const reviewedSnapshot = {
+      snapshot_id: "snapshot-reviewed",
+      source_content: originalSource,
+      source_confirmation: {
+        actor_id: "operator-zhang",
+        confirmed_at: "2026-08-24T18:00:00+00:00",
+      },
+      source_review: {
+        actor_id: "operator-zhang",
+        completed_at: "2026-08-24T18:01:00+00:00",
+      },
+    };
+    const capturedSnapshot = {
+      ...reviewedSnapshot,
+      snapshot_id: "snapshot-captured",
+    };
+    let captured = false;
+    let failCapturedDetailOnce = true;
+    let savedBody: Record<string, unknown> | null = null;
+    const detail = () => ({
+      page_id: "page-1",
+      page_number: 1,
+      review_status: "pending",
+      source_content: originalSource,
+      curation: curationState(captured ? capturedSnapshot : reviewedSnapshot),
+      annotation: captured
+        ? {
+            snapshot_id: "snapshot-captured",
+            visuals: [
+              {
+                visual_ref: "opaque-visual-ref",
+                position: 0,
+                source_kind: "capture",
+                disposition: "included",
+                summary: "折线展示公开指标随月份稳步上升。",
+                visual_type: "chart",
+                bounds: { left: 0.1, top: 0.2, width: 0.4, height: 0.4 },
+                source_visual_ref: null,
+                confirmed: true,
+                asset: {
+                  sha256: "a".repeat(64),
+                  media_type: "image/png",
+                  size_bytes: 512,
+                  width_px: 336,
+                  height_px: 196,
+                  byte_contract: "standard_render_crop",
+                },
+              },
+            ],
+          }
+        : { snapshot_id: "snapshot-reviewed", visuals: [] },
+      standard_render: {
+        sha256: "b".repeat(64),
+        media_type: "image/png",
+        dpi: 144,
+        width_px: 1600,
+        height_px: 900,
+        url: "/api/v1/pages/page-1/render",
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("/api/v1/curation/pages?review_status=pending")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }),
+        );
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        if (captured && failCapturedDetailOnce) {
+          failCapturedDetailOnce = false;
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: { message: "详情暂不可用" } }), {
+              status: 503,
+            }),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify(detail()), { status: 200 }));
+      }
+      if (url.endsWith("/curation/visuals") && init?.method === "POST") {
+        savedBody = JSON.parse(String(init.body));
+        captured = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ curation: curationState(capturedSnapshot) }),
+            { status: 201 },
+          ),
+        );
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    const gapButton = await screen.findByRole("button", {
+      name: "有缺口，在页面上框选",
+    });
+    expect(screen.queryByText("视觉对象 01")).not.toBeInTheDocument();
+    await userEvent.click(gapButton);
+
+    await userEvent.keyboard("{Escape}");
+    const gapButtonAfterSelectionCancel = screen.getByRole("button", {
+      name: "有缺口，在页面上框选",
+    });
+    await waitFor(() => expect(gapButtonAfterSelectionCancel).toHaveFocus());
+    await userEvent.click(gapButtonAfterSelectionCancel);
+
+    const image = screen.getByAltText("第 1 页标准页渲染结果");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      top: 100,
+      right: 900,
+      bottom: 550,
+      width: 800,
+      height: 450,
+      x: 100,
+      y: 100,
+      toJSON: () => ({}),
+    });
+    fireEvent.pointerDown(image, { pointerId: 1, clientX: 180, clientY: 190 });
+    fireEvent.pointerMove(image, { pointerId: 1, clientX: 500, clientY: 370 });
+    fireEvent.pointerUp(image, { pointerId: 1, clientX: 500, clientY: 370 });
+
+    let summary = await screen.findByRole("textbox", { name: "视觉对象 01 summary" });
+    await waitFor(() => expect(summary).toHaveFocus());
+    await userEvent.keyboard("{Escape}");
+    const gapButtonAfterEditorCancel = screen.getByRole("button", {
+      name: "有缺口，在页面上框选",
+    });
+    await waitFor(() => expect(gapButtonAfterEditorCancel).toHaveFocus());
+    await userEvent.click(gapButtonAfterEditorCancel);
+    fireEvent.pointerDown(image, { pointerId: 2, clientX: 180, clientY: 190 });
+    fireEvent.pointerMove(image, { pointerId: 2, clientX: 500, clientY: 370 });
+    fireEvent.pointerUp(image, { pointerId: 2, clientX: 500, clientY: 370 });
+
+    summary = await screen.findByRole("textbox", { name: "视觉对象 01 summary" });
+    await waitFor(() => expect(summary).toHaveFocus());
+    await userEvent.click(screen.getByRole("button", { name: "保存并返回审核" }));
+    expect(await screen.findByText("summary 不能为空，请写成可独立理解的结论。")).toBeInTheDocument();
+    await waitFor(() => expect(summary).toHaveFocus());
+
+    await userEvent.type(summary, "折线展示公开指标随月份稳步上升。");
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "视觉对象 01 类型" }),
+      "chart",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "保存并返回审核" }));
+
+    expect(await screen.findByText("折线展示公开指标随月份稳步上升。")).toBeInTheDocument();
+    expect(screen.getByText("视觉对象 01 已保存；资产详情暂未刷新，可稍后刷新工作位。")).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "批准并转到下一待处理页" }),
+    ).toHaveFocus());
+    expect(savedBody).toEqual({
+      base_snapshot_id: "snapshot-reviewed",
+      summary: "折线展示公开指标随月份稳步上升。",
+      visual_type: "chart",
+      bounds: { left: 0.1, top: 0.2, width: 0.4, height: 0.4 },
+    });
+    expect(screen.queryByText("opaque-visual-ref")).not.toBeInTheDocument();
   });
 
   it("切换页面前明确询问是否放弃未保存的来源修改", async () => {
@@ -485,7 +656,7 @@ describe("来源文字审核工作台", () => {
     const review = screen.getByRole("button", { name: "完成来源审核" });
     await waitFor(() => expect(review).toHaveFocus());
     await userEvent.click(review);
-    expect(await screen.findByText("来源完整 · 无需截图")).toBeInTheDocument();
+    expect(await screen.findByText("等待来源完整性选择")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /图片来源 01/ }));
     await userEvent.type(
