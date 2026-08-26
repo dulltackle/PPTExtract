@@ -426,6 +426,8 @@ def test_first_capture_visual_is_created_and_verified_in_real_browser(
     assert report["ok"] is True
     assert report["checks"] == ["capture-viewport-1280", "capture-viewport-1440"]
     assert len(report["savedBounds"]) == 2
+    assert len(report["mutationSnapshots"]) == 10
+    assert len(set(report["mutationSnapshots"])) == 10
     for bounds in report["savedBounds"]:
         assert bounds == pytest.approx(
             {"left": 0.18, "top": 0.22, "width": 0.44, "height": 0.44},

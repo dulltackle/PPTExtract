@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -211,6 +211,8 @@ def initialize_database(settings: Settings) -> None:
                 source_snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
                 overview TEXT,
                 source_content_json TEXT,
+                capture_required INTEGER NOT NULL DEFAULT 0
+                    CHECK (capture_required IN (0, 1)),
                 created_by TEXT,
                 created_at TEXT NOT NULL
             );
@@ -382,6 +384,16 @@ def initialize_database(settings: Settings) -> None:
         if 0 < existing_version < 3:
             _migrate_document_version_states(connection)
         _migrate_curation_snapshots(connection)
+        snapshot_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(curation_snapshots)")
+        }
+        if "capture_required" not in snapshot_columns:
+            connection.execute(
+                "ALTER TABLE curation_snapshots ADD COLUMN "
+                "capture_required INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (capture_required IN (0, 1))"
+            )
         job_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)")}
         if "error_json" not in job_columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN error_json TEXT")

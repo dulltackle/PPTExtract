@@ -92,6 +92,32 @@ def _ingest_plain_text_page(
     return page
 
 
+def _review_plain_text_page(
+    client: TestClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, dict[str, object]]:
+    page = _ingest_plain_text_page(client, settings, monkeypatch)
+    page_id = str(page["page_id"])
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/snapshots",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["公开来源标题"],
+            "body": ["公开来源正文。"],
+        },
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-confirmation",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    state = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-review",
+        json={"snapshot_id": state["current_snapshot"]["snapshot_id"]},
+    ).json()["curation"]
+    return page_id, state
+
+
 def test_plain_text_source_can_be_saved_confirmed_reviewed_and_approved_without_annotations(
     system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -844,18 +870,6 @@ def test_first_capture_visual_is_cropped_from_standard_render_and_frozen_in_new_
         assert cropped.getpixel((0, 0)) == (2, 5, 7)
         assert cropped.getpixel((36, 31)) == (38, 36, 74)
 
-    second_capture = client.post(
-        f"/api/v1/pages/{page_id}/curation/visuals",
-        json={
-            "base_snapshot_id": saved_state["current_snapshot"]["snapshot_id"],
-            "summary": "本票不允许创建第二个视觉对象。",
-            "visual_type": None,
-            "bounds": {"left": 0.2, "top": 0.2, "width": 0.2, "height": 0.2},
-        },
-    )
-    assert second_capture.status_code == 409
-    assert second_capture.json()["error"]["code"] == "capture_limit_reached"
-
     with connect(settings) as connection:
         connection.execute(
             """
@@ -885,6 +899,252 @@ def test_first_capture_visual_is_cropped_from_standard_render_and_frozen_in_new_
     )
     assert blocked_approval.status_code == 409
     assert blocked_approval.json()["error"]["code"] == "approval_blocked"
+
+
+def test_capture_visuals_can_be_added_and_edited_without_changing_identity(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page_id, state = _review_plain_text_page(client, settings, monkeypatch)
+    reviewed_snapshot_id = str(state["current_snapshot"]["snapshot_id"])
+
+    first = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": reviewed_snapshot_id,
+            "summary": "第一幅图展示公开指标的月度趋势。",
+            "visual_type": "chart",
+            "bounds": {"left": 0.1, "top": 0.1, "width": 0.3, "height": 0.3},
+        },
+    )
+    assert first.status_code == 201
+    first_payload = first.json()
+    first_snapshot_id = first_payload["curation"]["current_snapshot"]["snapshot_id"]
+    assert first_payload["annotation"]["snapshot_id"] == first_snapshot_id
+    first_visual = client.get(f"/api/v1/pages/{page_id}").json()["annotation"][
+        "visuals"
+    ][0]
+
+    second = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": first_snapshot_id,
+            "summary": "第二幅图展示公开地区分布。",
+            "visual_type": "map",
+            "bounds": {"left": 0.5, "top": 0.2, "width": 0.3, "height": 0.4},
+        },
+    )
+    assert second.status_code == 201
+    second_payload = second.json()
+    second_snapshot_id = second_payload["curation"]["current_snapshot"]["snapshot_id"]
+    assert second_payload["annotation"]["snapshot_id"] == second_snapshot_id
+    before_edit = client.get(f"/api/v1/pages/{page_id}").json()["annotation"][
+        "visuals"
+    ]
+    assert [visual["position"] for visual in before_edit] == [0, 1]
+
+    edited = client.patch(
+        f"/api/v1/pages/{page_id}/curation/visuals/{first_visual['visual_ref']}",
+        headers={"X-Actor-ID": "curator-editor"},
+        json={
+            "base_snapshot_id": second_snapshot_id,
+            "summary": "第一幅图展示公开指标逐月稳步增长。",
+            "visual_type": "diagram",
+            "bounds": {"left": 0.12, "top": 0.14, "width": 0.28, "height": 0.26},
+        },
+    )
+    assert edited.status_code == 201
+    edited_payload = edited.json()
+    edited_snapshot_id = edited_payload["curation"]["current_snapshot"]["snapshot_id"]
+    assert edited_payload["annotation"]["snapshot_id"] == edited_snapshot_id
+    assert edited_snapshot_id not in {
+        reviewed_snapshot_id,
+        first_snapshot_id,
+        second_snapshot_id,
+    }
+    current_visuals = client.get(f"/api/v1/pages/{page_id}").json()["annotation"][
+        "visuals"
+    ]
+    assert current_visuals[0]["visual_ref"] == first_visual["visual_ref"]
+    assert current_visuals[0]["summary"] == "第一幅图展示公开指标逐月稳步增长。"
+    assert current_visuals[0]["visual_type"] == "diagram"
+    assert current_visuals[0]["bounds"] == {
+        "height": 0.26,
+        "left": 0.12,
+        "top": 0.14,
+        "width": 0.28,
+    }
+    assert current_visuals[1] == before_edit[1]
+
+    stale_edit = client.patch(
+        f"/api/v1/pages/{page_id}/curation/visuals/{first_visual['visual_ref']}",
+        json={
+            "base_snapshot_id": second_snapshot_id,
+            "summary": "不应覆盖已保存修改。",
+            "visual_type": None,
+            "bounds": {"left": 0.2, "top": 0.2, "width": 0.2, "height": 0.2},
+        },
+    )
+    assert stale_edit.status_code == 409
+    assert stale_edit.json()["error"]["code"] == "curation_snapshot_stale"
+    assert client.get(f"/api/v1/pages/{page_id}").json()["annotation"]["visuals"] == current_visuals
+
+    with connect(settings) as connection:
+        historical = connection.execute(
+            """
+            SELECT summary, visual_type, bounds_json
+            FROM curation_snapshot_visuals
+            WHERE snapshot_id = ? AND visual_ref = ?
+            """,
+            (second_snapshot_id, first_visual["visual_ref"]),
+        ).fetchone()
+    assert historical is not None
+    assert historical["summary"] == "第一幅图展示公开指标的月度趋势。"
+    assert historical["visual_type"] == "chart"
+
+    approved = client.post(
+        f"/api/v1/pages/{page_id}/approve",
+        json={"snapshot_id": edited_snapshot_id},
+    )
+    assert approved.status_code == 200
+    frozen = client.patch(
+        f"/api/v1/pages/{page_id}/curation/visuals/{first_visual['visual_ref']}",
+        json={
+            "base_snapshot_id": edited_snapshot_id,
+            "summary": "冻结后不得修改。",
+            "visual_type": None,
+            "bounds": {"left": 0.1, "top": 0.1, "width": 0.2, "height": 0.2},
+        },
+    )
+    assert frozen.status_code == 409
+    assert frozen.json()["error"]["code"] == "page_not_pending"
+
+
+def test_capture_visuals_can_be_reordered_and_failed_move_keeps_saved_numbering(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page_id, state = _review_plain_text_page(client, settings, monkeypatch)
+    snapshot_id = str(state["current_snapshot"]["snapshot_id"])
+    for summary in ("第一幅人工截图。", "第二幅人工截图。", "第三幅人工截图。"):
+        response = client.post(
+            f"/api/v1/pages/{page_id}/curation/visuals",
+            json={
+                "base_snapshot_id": snapshot_id,
+                "summary": summary,
+                "visual_type": None,
+                "bounds": {"left": 0.1, "top": 0.1, "width": 0.2, "height": 0.2},
+            },
+        )
+        assert response.status_code == 201
+        snapshot_id = response.json()["curation"]["current_snapshot"]["snapshot_id"]
+
+    before = client.get(f"/api/v1/pages/{page_id}").json()["annotation"]["visuals"]
+    moved_ref = before[2]["visual_ref"]
+    moved = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals/{moved_ref}/move",
+        json={"base_snapshot_id": snapshot_id, "direction": "up"},
+    )
+    assert moved.status_code == 201
+    moved_payload = moved.json()
+    moved_snapshot_id = moved_payload["curation"]["current_snapshot"]["snapshot_id"]
+    assert moved_payload["annotation"]["snapshot_id"] == moved_snapshot_id
+    after = client.get(f"/api/v1/pages/{page_id}").json()["annotation"]["visuals"]
+    assert [visual["visual_ref"] for visual in after] == [
+        before[0]["visual_ref"],
+        before[2]["visual_ref"],
+        before[1]["visual_ref"],
+    ]
+    assert [visual["position"] for visual in after] == [0, 1, 2]
+
+    failed = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals/{moved_ref}/move",
+        json={"base_snapshot_id": snapshot_id, "direction": "up"},
+    )
+    assert failed.status_code == 409
+    assert failed.json()["error"]["code"] == "curation_snapshot_stale"
+    unchanged = client.get(f"/api/v1/pages/{page_id}").json()["annotation"]["visuals"]
+    assert unchanged == after
+    assert unchanged[1]["visual_ref"] == moved_ref
+    assert moved_snapshot_id != snapshot_id
+
+
+def test_deleting_last_capture_keeps_gap_blocked_until_source_is_marked_complete(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page_id, state = _review_plain_text_page(client, settings, monkeypatch)
+    reviewed_snapshot_id = str(state["current_snapshot"]["snapshot_id"])
+    created = client.post(
+        f"/api/v1/pages/{page_id}/curation/visuals",
+        json={
+            "base_snapshot_id": reviewed_snapshot_id,
+            "summary": "将被删除的人工截图。",
+            "visual_type": "screenshot",
+            "bounds": {"left": 0.2, "top": 0.2, "width": 0.4, "height": 0.4},
+        },
+    ).json()["curation"]
+    created_snapshot_id = str(created["current_snapshot"]["snapshot_id"])
+    visual_ref = client.get(f"/api/v1/pages/{page_id}").json()["annotation"][
+        "visuals"
+    ][0]["visual_ref"]
+
+    deleted = client.request(
+        "DELETE",
+        f"/api/v1/pages/{page_id}/curation/visuals/{visual_ref}",
+        headers={"X-Actor-ID": "curator-delete"},
+        json={"base_snapshot_id": created_snapshot_id},
+    )
+    assert deleted.status_code == 201
+    deleted_payload = deleted.json()
+    deleted_state = deleted_payload["curation"]
+    deleted_snapshot_id = deleted_state["current_snapshot"]["snapshot_id"]
+    assert deleted_payload["annotation"]["snapshot_id"] == deleted_snapshot_id
+    assert deleted_snapshot_id != created_snapshot_id
+    assert deleted_state["can_approve"] is False
+    assert deleted_state["blockers"] == [
+        {
+            "code": "capture_required",
+            "message": "来源仍有缺口：请重新框选视觉对象，或明确改选来源完整。",
+        }
+    ]
+    assert client.get(f"/api/v1/pages/{page_id}").json()["annotation"]["visuals"] == []
+
+    stale_delete = client.request(
+        "DELETE",
+        f"/api/v1/pages/{page_id}/curation/visuals/{visual_ref}",
+        json={"base_snapshot_id": created_snapshot_id},
+    )
+    assert stale_delete.status_code == 409
+    assert stale_delete.json()["error"]["code"] == "curation_snapshot_stale"
+
+    completed = client.post(
+        f"/api/v1/pages/{page_id}/curation/source-completeness",
+        json={"snapshot_id": deleted_snapshot_id},
+    )
+    assert completed.status_code == 201
+    completed_payload = completed.json()
+    completed_state = completed_payload["curation"]
+    assert completed_payload["annotation"]["snapshot_id"] == completed_state[
+        "current_snapshot"
+    ]["snapshot_id"]
+    assert completed_state["current_snapshot"]["snapshot_id"] != deleted_snapshot_id
+    assert completed_state["blockers"] == []
+    assert completed_state["can_approve"] is True
+
+    with connect(settings) as connection:
+        history = connection.execute(
+            """
+            SELECT snapshot_id, source_snapshot_id, capture_required
+            FROM curation_snapshots
+            WHERE page_version_id = (
+                SELECT page_version_id FROM page_versions WHERE page_id = ?
+            ) ORDER BY created_at, snapshot_id
+            """,
+            (page_id,),
+        ).fetchall()
+    assert len(history) == 4
+    assert [row["capture_required"] for row in history[-2:]] == [1, 0]
 
 
 def test_capture_position_does_not_conflict_when_an_ignored_image_is_later_included(

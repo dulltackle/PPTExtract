@@ -14,16 +14,20 @@ import {
   type CurationState,
   type CurationVisual,
   type CurationPage,
+  deleteCaptureVisual,
   enableHiddenPage,
   loadCurationPages,
   loadJob,
   loadPageDetail,
   loadRenderingWarnings,
+  markCaptureSourceComplete,
+  moveCaptureVisual,
   OperatorError,
   type NormalizedBounds,
   type PageDetail,
   type RenderingWarning,
   saveCaptureVisual,
+  updateCaptureVisual,
   type VisualType,
 } from "./api";
 import { SourceReviewLog } from "./SourceReviewLog";
@@ -60,6 +64,12 @@ function pageStatusLabel(page: CurationPage): string {
     : page.review_status === "approved"
       ? "已批准"
       : "已排除";
+}
+
+function focusAfterLiveAnnouncement(target: HTMLElement | null) {
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => target?.focus());
+  });
 }
 
 function HiddenRenderPlaceholder() {
@@ -195,24 +205,39 @@ const VISUAL_TYPE_OPTIONS: Array<{ value: VisualType; label: string }> = [
   { value: "other", label: "其他" },
 ];
 
+interface VisualEditorCommand {
+  kind: "add" | "edit";
+  visualRef: string | null;
+  trigger: HTMLElement | null;
+  nonce: number;
+}
+
 function EvidencePanel({
   page,
   curation,
-  captureVisual,
+  captureVisuals,
+  editorCommand,
+  focusCapturePathNonce,
   onCurationChange,
-  onCaptureVisualChange,
+  onCaptureVisualsChange,
+  onEditorCommandHandled,
   onEditingChange,
   onFocusApproval,
 }: {
   page: CurationPage | null;
   curation: CurationState | null;
-  captureVisual: CurationVisual | null;
+  captureVisuals: CurationVisual[];
+  editorCommand: VisualEditorCommand | null;
+  focusCapturePathNonce: number;
   onCurationChange: (curation: CurationState) => void;
-  onCaptureVisualChange: (visual: CurationVisual | null) => void;
+  onCaptureVisualsChange: (visuals: CurationVisual[]) => void;
+  onEditorCommandHandled: () => void;
   onEditingChange: (editing: boolean) => void;
   onFocusApproval: () => void;
 }) {
   const [mode, setMode] = useState<"decision" | "selecting" | "editing">("decision");
+  const [editingRef, setEditingRef] = useState<string | null>(null);
+  const [activeRef, setActiveRef] = useState<string | null>(null);
   const [selection, setSelection] = useState<NormalizedBounds | null>(null);
   const [summary, setSummary] = useState("");
   const [visualType, setVisualType] = useState<VisualType | "">("");
@@ -224,14 +249,41 @@ function EvidencePanel({
   const editorRef = useRef<HTMLElement>(null);
   const summaryRef = useRef<HTMLTextAreaElement>(null);
   const capturePathButtonRef = useRef<HTMLButtonElement>(null);
-  const dragStart = useRef<{ x: number; y: number } | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const dragOperation = useRef<{
+    kind: "create" | "move" | "resize";
+    start: { x: number; y: number };
+    original: NormalizedBounds | null;
+    handle?: "nw" | "ne" | "sw" | "se";
+  } | null>(null);
 
-  const restorePathFocus = useCallback(() => {
-    window.requestAnimationFrame(() => capturePathButtonRef.current?.focus());
+  const orderedVisuals = useMemo(
+    () => [...captureVisuals].sort((left, right) => left.position - right.position),
+    [captureVisuals],
+  );
+
+  const visualNumber = useCallback((visualRef: string | null) => {
+    if (visualRef === null) return orderedVisuals.length + 1;
+    const index = orderedVisuals.findIndex((visual) => visual.visual_ref === visualRef);
+    return index < 0 ? orderedVisuals.length + 1 : index + 1;
+  }, [orderedVisuals]);
+
+  const formatNumber = (value: number) => String(value).padStart(2, "0");
+
+  const restoreFocus = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const target = returnFocusRef.current?.isConnected
+        ? returnFocusRef.current
+        : capturePathButtonRef.current;
+      target?.focus();
+      returnFocusRef.current = null;
+    });
   }, []);
 
   useEffect(() => {
     setMode("decision");
+    setEditingRef(null);
+    setActiveRef(null);
     setSelection(null);
     setSummary("");
     setVisualType("");
@@ -241,17 +293,56 @@ function EvidencePanel({
     onEditingChange(false);
   }, [onEditingChange, page?.page_id]);
 
-  const captureBounds = captureVisual?.bounds ?? null;
-  const activeSelection = selection ?? captureBounds;
   const sourceReviewed = Boolean(curation?.current_snapshot?.source_review);
   const canChoosePath = Boolean(
-    page?.review_status === "pending" && sourceReviewed && !captureVisual,
+    page?.review_status === "pending" && sourceReviewed && orderedVisuals.length === 0,
   );
 
+  const openEditor = useCallback((visual: CurationVisual, trigger: HTMLElement | null) => {
+    if (page?.review_status !== "pending" || !visual.bounds) return;
+    returnFocusRef.current = trigger;
+    setEditingRef(visual.visual_ref);
+    setActiveRef(visual.visual_ref);
+    setSelection({ ...visual.bounds });
+    setSummary(visual.summary ?? "");
+    setVisualType((visual.visual_type as VisualType | null) ?? "");
+    setSummaryError(null);
+    setMode("editing");
+    setAnnouncement(`正在编辑视觉对象 ${formatNumber(visualNumber(visual.visual_ref))}。`);
+    onEditingChange(true);
+  }, [onEditingChange, page?.review_status, visualNumber]);
+
+  const startAdding = useCallback((trigger: HTMLElement | null) => {
+    if (page?.review_status !== "pending" || !sourceReviewed) return;
+    returnFocusRef.current = trigger;
+    setEditingRef(null);
+    setActiveRef(null);
+    setSelection(null);
+    setSummary("");
+    setVisualType("");
+    setSummaryError(null);
+    setMode("selecting");
+    setAnnouncement("框选模式已开启。请在标准页渲染结果上拖出缺失范围。");
+  }, [page?.review_status, sourceReviewed]);
+
+  useEffect(() => {
+    if (!editorCommand) return;
+    if (editorCommand.kind === "add") {
+      startAdding(editorCommand.trigger);
+    } else {
+      const visual = orderedVisuals.find(
+        (candidate) => candidate.visual_ref === editorCommand.visualRef,
+      );
+      if (visual) openEditor(visual, editorCommand.trigger);
+    }
+    onEditorCommandHandled();
+  }, [editorCommand, onEditorCommandHandled, openEditor, orderedVisuals, startAdding]);
+
   const normalizedPoint = (
-    event: ReactPointerEvent<HTMLImageElement>,
+    event: ReactPointerEvent<HTMLElement>,
   ): { x: number; y: number } | null => {
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = imageRef.current?.getBoundingClientRect();
+    if (!rect) return null;
     if (!rect.width || !rect.height) return null;
     return {
       x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
@@ -259,14 +350,50 @@ function EvidencePanel({
     };
   };
 
-  const updateSelection = (point: { x: number; y: number }) => {
-    const start = dragStart.current;
-    if (!start) return;
+  const updateDrag = (point: { x: number; y: number }) => {
+    const operation = dragOperation.current;
+    if (!operation) return;
+    if (operation.kind === "create") {
+      setSelection({
+        left: Math.min(operation.start.x, point.x),
+        top: Math.min(operation.start.y, point.y),
+        width: Math.abs(point.x - operation.start.x),
+        height: Math.abs(point.y - operation.start.y),
+      });
+      return;
+    }
+    const original = operation.original;
+    if (!original) return;
+    const dx = point.x - operation.start.x;
+    const dy = point.y - operation.start.y;
+    if (operation.kind === "move") {
+      setSelection({
+        ...original,
+        left: Math.min(1 - original.width, Math.max(0, original.left + dx)),
+        top: Math.min(1 - original.height, Math.max(0, original.top + dy)),
+      });
+      return;
+    }
+    const right = original.left + original.width;
+    const bottom = original.top + original.height;
+    const minimum = 0.005;
+    const nextLeft = operation.handle?.includes("w")
+      ? Math.min(right - minimum, Math.max(0, original.left + dx))
+      : original.left;
+    const nextTop = operation.handle?.includes("n")
+      ? Math.min(bottom - minimum, Math.max(0, original.top + dy))
+      : original.top;
+    const nextRight = operation.handle?.includes("e")
+      ? Math.max(original.left + minimum, Math.min(1, right + dx))
+      : right;
+    const nextBottom = operation.handle?.includes("s")
+      ? Math.max(original.top + minimum, Math.min(1, bottom + dy))
+      : bottom;
     setSelection({
-      left: Math.min(start.x, point.x),
-      top: Math.min(start.y, point.y),
-      width: Math.abs(point.x - start.x),
-      height: Math.abs(point.y - start.y),
+      left: nextLeft,
+      top: nextTop,
+      width: nextRight - nextLeft,
+      height: nextBottom - nextTop,
     });
   };
 
@@ -282,7 +409,7 @@ function EvidencePanel({
     const gap = 14;
     const margin = 12;
     const width = editorRef.current?.offsetWidth || 360;
-    const height = editorRef.current?.offsetHeight || 330;
+    const height = editorRef.current?.offsetHeight || 430;
     const candidates = [
       { left: range.right + gap, top: range.top },
       { left: range.left - gap - width, top: range.top },
@@ -308,16 +435,34 @@ function EvidencePanel({
 
   useEffect(() => {
     if (mode !== "editing") return;
+    const keepFocusInEditor = (event: FocusEvent) => {
+      if (editorRef.current?.contains(event.target as Node)) return;
+      summaryRef.current?.focus();
+    };
     const frame = window.requestAnimationFrame(() => {
       positionEditor();
       summaryRef.current?.focus();
     });
+    document.addEventListener("focusin", keepFocusInEditor);
     window.addEventListener("resize", positionEditor);
     return () => {
       window.cancelAnimationFrame(frame);
+      document.removeEventListener("focusin", keepFocusInEditor);
       window.removeEventListener("resize", positionEditor);
     };
   }, [mode, positionEditor]);
+
+  useEffect(() => {
+    if (!focusCapturePathNonce || !canChoosePath || mode !== "decision") return;
+    let focusFrame = 0;
+    const renderFrame = window.requestAnimationFrame(() => {
+      focusFrame = window.requestAnimationFrame(() => capturePathButtonRef.current?.focus());
+    });
+    return () => {
+      window.cancelAnimationFrame(renderFrame);
+      window.cancelAnimationFrame(focusFrame);
+    };
+  }, [canChoosePath, focusCapturePathNonce, mode]);
 
   useEffect(() => {
     if (mode !== "selecting") return;
@@ -325,27 +470,54 @@ function EvidencePanel({
       if (event.key !== "Escape") return;
       setSelection(null);
       setMode("decision");
-      setAnnouncement("已取消框选，返回来源完整性选择。");
-      restorePathFocus();
+      setAnnouncement(
+        orderedVisuals.length
+          ? "已取消追加框选；既有视觉对象保持不变。"
+          : "已取消框选，返回来源完整性选择。",
+      );
+      restoreFocus();
     };
     window.addEventListener("keydown", cancelSelection);
     return () => window.removeEventListener("keydown", cancelSelection);
-  }, [mode, restorePathFocus]);
+  }, [mode, orderedVisuals.length, restoreFocus]);
 
   const cancelEditor = () => {
+    const number = formatNumber(visualNumber(editingRef));
     setSelection(null);
     setMode("decision");
+    setEditingRef(null);
     setSummary("");
     setVisualType("");
     setSummaryError(null);
-    setAnnouncement("已取消视觉对象 01，返回来源完整性选择。");
+    setAnnouncement(
+      editingRef
+        ? `已放弃视觉对象 ${number} 的修改；已保存内容与顺序保持不变。`
+        : orderedVisuals.length
+          ? "已取消追加框选；既有视觉对象保持不变。"
+          : "已取消临时视觉对象，返回来源完整性选择。",
+    );
     onEditingChange(false);
-    restorePathFocus();
+    restoreFocus();
+  };
+
+  const nudgeSelection = (
+    field: "left" | "top" | "width" | "height",
+    delta: number,
+  ) => {
+    if (!selection) return;
+    const minimum = 0.005;
+    const next = { ...selection };
+    if (field === "left") next.left = Math.min(1 - next.width, Math.max(0, next.left + delta));
+    if (field === "top") next.top = Math.min(1 - next.height, Math.max(0, next.top + delta));
+    if (field === "width") next.width = Math.min(1 - next.left, Math.max(minimum, next.width + delta));
+    if (field === "height") next.height = Math.min(1 - next.top, Math.max(minimum, next.height + delta));
+    setSelection(next);
   };
 
   const handleSave = async () => {
     const snapshotId = curation?.current_snapshot?.snapshot_id;
     if (!page?.page_id || !snapshotId || !selection || saving) return;
+    const number = formatNumber(visualNumber(editingRef));
     if (!summary.trim()) {
       setSummaryError("summary 不能为空，请写成可独立理解的结论。");
       window.requestAnimationFrame(() => summaryRef.current?.focus());
@@ -353,19 +525,30 @@ function EvidencePanel({
     }
     setSaving(true);
     setSummaryError(null);
-    setAnnouncement("正在裁出 PNG 并保存视觉对象 01…");
+    setAnnouncement(`正在裁出 PNG 并保存视觉对象 ${number}…`);
     try {
-      const next = await saveCaptureVisual(
-        page.page_id,
-        snapshotId,
-        summary,
-        visualType || null,
-        selection,
-      );
-      onCurationChange(next);
-      onCaptureVisualChange({
-        visual_ref: "",
-        position: 0,
+      const result = editingRef
+        ? await updateCaptureVisual(
+            page.page_id,
+            editingRef,
+            snapshotId,
+            summary,
+            visualType || null,
+            selection,
+          )
+        : await saveCaptureVisual(
+            page.page_id,
+            snapshotId,
+            summary,
+            visualType || null,
+            selection,
+          );
+      onCurationChange(result.curation);
+      const optimistic: CurationVisual = {
+        visual_ref: editingRef ?? `pending-${Date.now()}`,
+        position: editingRef
+          ? orderedVisuals.find((visual) => visual.visual_ref === editingRef)?.position ?? orderedVisuals.length
+          : Math.max(-1, ...orderedVisuals.map((visual) => visual.position)) + 1,
         source_kind: "capture",
         disposition: "included",
         summary: summary.trim(),
@@ -373,21 +556,28 @@ function EvidencePanel({
         bounds: selection,
         source_visual_ref: null,
         confirmed: true,
-      });
+      };
+      const nextVisuals = result.visuals?.filter((visual) => visual.source_kind === "capture")
+        ?? (editingRef
+          ? orderedVisuals.map((visual) => visual.visual_ref === editingRef ? optimistic : visual)
+          : [...orderedVisuals, optimistic]);
+      onCaptureVisualsChange(nextVisuals);
       setMode("decision");
+      setActiveRef(editingRef ?? optimistic.visual_ref);
+      setEditingRef(null);
       setSelection(null);
-      setAnnouncement("视觉对象 01 已保存，审核闸门已重新校验。");
+      setAnnouncement(`视觉对象 ${number} 已保存，审核闸门已重新校验。`);
       onEditingChange(false);
       onFocusApproval();
-      try {
+      if (!result.visuals) try {
         const refreshed = await loadPageDetail(page.page_id);
-        const savedCapture = refreshed.annotation?.visuals.find(
+        const savedCaptures = refreshed.annotation?.visuals.filter(
           (visual) => visual.source_kind === "capture",
-        ) ?? null;
-        if (savedCapture) onCaptureVisualChange(savedCapture);
+        ) ?? [];
+        onCaptureVisualsChange(savedCaptures);
       } catch {
         setAnnouncement(
-          "视觉对象 01 已保存；资产详情暂未刷新，可稍后刷新工作位。",
+          `视觉对象 ${number} 已保存；资产详情暂未刷新，可稍后刷新工作位。`,
         );
       }
     } catch (cause) {
@@ -399,6 +589,44 @@ function EvidencePanel({
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleDragMove = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!dragOperation.current) return;
+    const point = normalizedPoint(event);
+    if (point) updateDrag(point);
+  };
+
+  const handleDragEnd = (event: ReactPointerEvent<HTMLElement>) => {
+    const operation = dragOperation.current;
+    if (!operation) return;
+    const point = normalizedPoint(event);
+    if (point) updateDrag(point);
+    dragOperation.current = null;
+    if (operation.kind !== "create") return;
+    const rect = imageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    if (
+      !point ||
+      Math.abs(point.x - operation.start.x) * rect.width < 4 ||
+      Math.abs(point.y - operation.start.y) * rect.height < 4
+    ) {
+      setSelection(null);
+      setAnnouncement("范围太小，请重新框选。");
+      return;
+    }
+    const nextSelection = {
+      left: Number(Math.min(operation.start.x, point.x).toFixed(6)),
+      top: Number(Math.min(operation.start.y, point.y).toFixed(6)),
+      width: Number(Math.abs(point.x - operation.start.x).toFixed(6)),
+      height: Number(Math.abs(point.y - operation.start.y).toFixed(6)),
+    };
+    setSelection(nextSelection);
+    setMode("editing");
+    setAnnouncement(
+      `已创建临时视觉对象 ${formatNumber(visualNumber(null))}，请填写自足 summary。`,
+    );
+    onEditingChange(true);
   };
 
   return (
@@ -416,8 +644,12 @@ function EvidencePanel({
         ) : page.hidden && !page.enabled ? (
           <HiddenRenderPlaceholder />
         ) : (
-          <figure className={`page-render ${mode === "selecting" || mode === "editing" ? "is-capture-mode" : ""}`}>
-            <div className="page-render-frame">
+          <figure className={`page-render ${mode === "selecting" || mode === "editing" ? "is-capture-mode" : ""} ${mode === "editing" ? "has-open-editor" : ""}`}>
+            <div
+              className="page-render-frame"
+              onPointerMove={handleDragMove}
+              onPointerUp={handleDragEnd}
+            >
               <img
                 ref={imageRef}
                 src={`/api/v1/pages/${page.page_id}/render`}
@@ -427,54 +659,82 @@ function EvidencePanel({
                   if (mode !== "selecting") return;
                   const point = normalizedPoint(event);
                   if (!point) return;
-                  dragStart.current = point;
+                  dragOperation.current = { kind: "create", start: point, original: null };
                   setSelection({ left: point.x, top: point.y, width: 0, height: 0 });
                   event.currentTarget.setPointerCapture?.(event.pointerId);
                 }}
-                onPointerMove={(event) => {
-                  if (mode !== "selecting" || !dragStart.current) return;
-                  const point = normalizedPoint(event);
-                  if (point) updateSelection(point);
-                }}
-                onPointerUp={(event) => {
-                  if (mode !== "selecting" || !dragStart.current) return;
-                  const point = normalizedPoint(event);
-                  if (point) updateSelection(point);
-                  const start = dragStart.current;
-                  dragStart.current = null;
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  if (
-                    !point ||
-                    Math.abs(point.x - start.x) * rect.width < 4 ||
-                    Math.abs(point.y - start.y) * rect.height < 4
-                  ) {
-                    setSelection(null);
-                    setAnnouncement("范围太小，请重新框选。");
-                    return;
-                  }
-                  setSelection({
-                    left: Number(Math.min(start.x, point.x).toFixed(6)),
-                    top: Number(Math.min(start.y, point.y).toFixed(6)),
-                    width: Number(Math.abs(point.x - start.x).toFixed(6)),
-                    height: Number(Math.abs(point.y - start.y).toFixed(6)),
-                  });
-                  setMode("editing");
-                  setAnnouncement("已创建临时视觉对象 01，请填写自足 summary。");
-                  onEditingChange(true);
-                }}
+                onPointerMove={handleDragMove}
+                onPointerUp={handleDragEnd}
               />
-              {activeSelection ? (
-                <div
-                  className={`capture-range ${captureVisual ? "is-saved" : "is-temporary"}`}
+              {orderedVisuals.map((visual, index) => visual.bounds ? (
+                <button
+                  type="button"
+                  key={visual.visual_ref}
+                  data-visual-ref={visual.visual_ref}
+                  disabled={page.review_status !== "pending" || (mode === "editing" && activeRef !== visual.visual_ref)}
+                  tabIndex={mode === "editing" ? -1 : undefined}
+                  className={`capture-range is-saved ${activeRef === visual.visual_ref ? "is-active" : "is-secondary"}`}
                   style={{
-                    left: `${activeSelection.left * 100}%`,
-                    top: `${activeSelection.top * 100}%`,
-                    width: `${activeSelection.width * 100}%`,
-                    height: `${activeSelection.height * 100}%`,
+                    left: `${(editingRef === visual.visual_ref && selection ? selection : visual.bounds).left * 100}%`,
+                    top: `${(editingRef === visual.visual_ref && selection ? selection : visual.bounds).top * 100}%`,
+                    width: `${(editingRef === visual.visual_ref && selection ? selection : visual.bounds).width * 100}%`,
+                    height: `${(editingRef === visual.visual_ref && selection ? selection : visual.bounds).height * 100}%`,
                   }}
-                  aria-label="视觉对象 01 框选范围"
+                  aria-label={`视觉对象 ${formatNumber(index + 1)} 框选范围，${visual.summary ?? "缺少 summary"}`}
+                  onClick={(event) => {
+                    if (mode !== "editing") openEditor(visual, event.currentTarget);
+                  }}
+                  onPointerDown={(event) => {
+                    if (page.review_status !== "pending" || !visual.bounds) return;
+                    if (mode === "editing" && activeRef !== visual.visual_ref) return;
+                    if (mode === "editing") event.preventDefault();
+                    else openEditor(visual, event.currentTarget);
+                    const point = normalizedPoint(event);
+                    if (!point) return;
+                    dragOperation.current = {
+                      kind: "move",
+                      start: point,
+                      original: mode === "editing" && selection
+                        ? { ...selection }
+                        : { ...visual.bounds },
+                    };
+                    event.currentTarget.setPointerCapture?.(event.pointerId);
+                  }}
                 >
-                  <span>01</span>
+                  <span>{formatNumber(index + 1)}</span>
+                  {editingRef === visual.visual_ref ? (["nw", "ne", "sw", "se"] as const).map((handle) => (
+                    <span
+                      key={handle}
+                      className={`capture-resize-handle is-${handle}`}
+                      aria-hidden="true"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        const point = normalizedPoint(event);
+                        if (!point || !selection) return;
+                        dragOperation.current = {
+                          kind: "resize",
+                          start: point,
+                          original: { ...selection },
+                          handle,
+                        };
+                        event.currentTarget.setPointerCapture?.(event.pointerId);
+                      }}
+                    />
+                  )) : null}
+                </button>
+              ) : null)}
+              {editingRef === null && selection ? (
+                <div
+                  className="capture-range is-temporary is-active"
+                  style={{
+                    left: `${selection.left * 100}%`,
+                    top: `${selection.top * 100}%`,
+                    width: `${selection.width * 100}%`,
+                    height: `${selection.height * 100}%`,
+                  }}
+                  aria-label={`临时视觉对象 ${formatNumber(visualNumber(null))} 框选范围`}
+                >
+                  <span>{formatNumber(visualNumber(null))}</span>
                 </div>
               ) : null}
             </div>
@@ -494,10 +754,7 @@ function EvidencePanel({
                     ref={capturePathButtonRef}
                     type="button"
                     className="is-primary"
-                    onClick={() => {
-                      setMode("selecting");
-                      setAnnouncement("框选模式已开启。请在标准页渲染结果上拖出缺失范围。");
-                    }}
+                    onClick={(event) => startAdding(event.currentTarget)}
                   >
                     有缺口，在页面上框选
                   </button>
@@ -512,9 +769,9 @@ function EvidencePanel({
               </div>
             ) : null}
 
-            {captureVisual && !sourceReviewed ? (
+            {orderedVisuals.length > 0 && !sourceReviewed ? (
               <div className="capture-stale-note" role="status">
-                已保存视觉对象 01；来源审核失效，重新完成审核后才能批准。
+                已保存 {orderedVisuals.length} 个视觉对象；来源审核失效，重新完成审核后才能批准。
               </div>
             ) : null}
           </figure>
@@ -528,6 +785,17 @@ function EvidencePanel({
       >
         {announcement}
       </div>
+
+      {mode === "editing" && selection ? (
+        <div
+          className="capture-editor-backdrop"
+          aria-hidden="true"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            summaryRef.current?.focus();
+          }}
+        />
+      ) : null}
 
       {mode === "editing" && selection ? (
         <section
@@ -562,17 +830,17 @@ function EvidencePanel({
           }}
         >
           <header>
-            <span>01</span>
+            <span>{formatNumber(visualNumber(editingRef))}</span>
             <div>
-              <h2 id="capture-editor-heading">视觉对象 01</h2>
-              <p>范围将按整页归一化坐标保存</p>
+              <h2 id="capture-editor-heading">视觉对象 {formatNumber(visualNumber(editingRef))}</h2>
+              <p>{editingRef ? "修改将生成新策展快照" : "范围将按整页归一化坐标保存"}</p>
             </div>
           </header>
           <label>
             <span>自足 summary <strong>必填</strong></span>
             <textarea
               ref={summaryRef}
-              aria-label="视觉对象 01 summary"
+              aria-label={`视觉对象 ${formatNumber(visualNumber(editingRef))} summary`}
               rows={4}
               value={summary}
               aria-invalid={Boolean(summaryError)}
@@ -593,7 +861,7 @@ function EvidencePanel({
           <label>
             <span>视觉类型 <small>可选</small></span>
             <select
-              aria-label="视觉对象 01 类型"
+              aria-label={`视觉对象 ${formatNumber(visualNumber(editingRef))} 类型`}
               value={visualType}
               onChange={(event) => setVisualType(event.target.value as VisualType | "")}
             >
@@ -603,15 +871,28 @@ function EvidencePanel({
               ))}
             </select>
           </label>
+          <fieldset className="capture-bounds-controls">
+            <legend>范围微调</legend>
+            <button type="button" onClick={() => nudgeSelection("left", -0.001)}>左移</button>
+            <button type="button" onClick={() => nudgeSelection("top", -0.001)}>上移</button>
+            <button type="button" onClick={() => nudgeSelection("top", 0.001)}>下移</button>
+            <button type="button" onClick={() => nudgeSelection("left", 0.001)}>右移</button>
+            <button type="button" onClick={() => nudgeSelection("width", -0.001)}>缩窄</button>
+            <button type="button" onClick={() => nudgeSelection("width", 0.001)}>加宽</button>
+            <button type="button" onClick={() => nudgeSelection("height", -0.001)}>减高</button>
+            <button type="button" onClick={() => nudgeSelection("height", 0.001)}>增高</button>
+          </fieldset>
           <div className="capture-editor-actions">
-            <button type="button" disabled={saving} onClick={cancelEditor}>取消</button>
+            <button type="button" disabled={saving} onClick={cancelEditor}>
+              {editingRef ? "放弃修改" : "取消"}
+            </button>
             <button
               type="button"
               className="is-primary"
               disabled={saving}
               onClick={() => void handleSave()}
             >
-              {saving ? "正在裁图并保存" : "保存并返回审核"}
+              {saving ? "正在裁图并保存" : editingRef ? "保存修改" : "保存并返回审核"}
             </button>
           </div>
         </section>
@@ -1007,12 +1288,18 @@ function InspectorPanel({
   onWarningSummaryChange,
   curationAnnouncement,
   externalCuration,
-  captureVisual,
+  captureVisuals,
   focusApprovalNonce,
   interactionLocked,
+  visualOperation,
   onCurationChange,
   onDetailLoaded,
   approvalPathReady,
+  onAddCapture,
+  onEditCapture,
+  onMoveCapture,
+  onDeleteCapture,
+  onMarkSourceComplete,
   onSourceDirtyChange,
   onApproved,
 }: {
@@ -1029,12 +1316,23 @@ function InspectorPanel({
   ) => void;
   curationAnnouncement: string | null;
   externalCuration: CurationState | null;
-  captureVisual: CurationVisual | null;
+  captureVisuals: CurationVisual[];
   focusApprovalNonce: number;
   interactionLocked: boolean;
+  visualOperation: string | null;
   onCurationChange: (curation: CurationState) => void;
   onDetailLoaded: (detail: PageDetail) => void;
   approvalPathReady: boolean;
+  onAddCapture: (trigger: HTMLElement) => void;
+  onEditCapture: (visualRef: string, trigger: HTMLElement) => void;
+  onMoveCapture: (
+    visualRef: string,
+    direction: "up" | "down",
+    number: number,
+    trigger: HTMLElement,
+  ) => void;
+  onDeleteCapture: (visualRef: string, number: number, trigger: HTMLElement) => void;
+  onMarkSourceComplete: (trigger: HTMLElement) => void;
   onSourceDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
 }) {
@@ -1071,11 +1369,17 @@ function InspectorPanel({
           onDirtyChange={onSourceDirtyChange}
           onApproved={onApproved}
           externalCuration={externalCuration}
-          captureVisual={captureVisual}
+          captureVisuals={captureVisuals}
           focusApprovalNonce={focusApprovalNonce}
           onCurationChange={onCurationChange}
           onDetailLoaded={onDetailLoaded}
           approvalPathReady={approvalPathReady}
+          visualOperation={visualOperation}
+          onAddCapture={onAddCapture}
+          onEditCapture={onEditCapture}
+          onMoveCapture={onMoveCapture}
+          onDeleteCapture={onDeleteCapture}
+          onMarkSourceComplete={onMarkSourceComplete}
         />
       )}
     </aside>
@@ -1101,14 +1405,24 @@ export function CurationWorkbench() {
   const [sourceDirty, setSourceDirty] = useState(false);
   const [curationAnnouncement, setCurationAnnouncement] = useState<string | null>(null);
   const [selectedCuration, setSelectedCuration] = useState<CurationState | null>(null);
-  const [captureVisual, setCaptureVisual] = useState<CurationVisual | null>(null);
+  const [captureVisuals, setCaptureVisuals] = useState<CurationVisual[]>([]);
   const [captureEditing, setCaptureEditing] = useState(false);
+  const [editorCommand, setEditorCommand] = useState<VisualEditorCommand | null>(null);
+  const [visualOperation, setVisualOperation] = useState<string | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<{
+    visualRef: string;
+    number: number;
+    trigger: HTMLElement;
+  } | null>(null);
   const [focusApprovalNonce, setFocusApprovalNonce] = useState(0);
+  const [focusCapturePathNonce, setFocusCapturePathNonce] = useState(0);
   const [approvalPathReady, setApprovalPathReady] = useState(false);
   const request = useRef<AbortController | null>(null);
   const poll = useRef<AbortController | null>(null);
   const timer = useRef<number | null>(null);
   const statusRef = useRef<HTMLDivElement>(null);
+  const deleteDialogRef = useRef<HTMLElement>(null);
+  const deleteSubmitRef = useRef<HTMLButtonElement>(null);
   const selectedKeyRef = useRef<string | null>(null);
   selectedKeyRef.current = selectedKey;
 
@@ -1161,23 +1475,28 @@ export function CurationWorkbench() {
 
   useEffect(() => {
     setSelectedCuration(null);
-    setCaptureVisual(null);
+    setCaptureVisuals([]);
     setCaptureEditing(false);
+    setEditorCommand(null);
+    setVisualOperation(null);
+    setDeleteCandidate(null);
     setApprovalPathReady(false);
   }, [selectedKey]);
 
   useEffect(() => {
     if (!selectedCuration?.current_snapshot?.source_review) {
       setApprovalPathReady(false);
-    } else if (captureVisual) {
+    } else if (captureVisuals.length > 0) {
       setApprovalPathReady(true);
     }
-  }, [captureVisual, selectedCuration?.current_snapshot?.source_review]);
+  }, [captureVisuals.length, selectedCuration?.current_snapshot?.source_review]);
 
   const handleDetailLoaded = useCallback((detail: PageDetail) => {
     setSelectedCuration(detail.curation ?? null);
-    setCaptureVisual(
-      detail.annotation?.visuals.find((visual) => visual.source_kind === "capture") ?? null,
+    setCaptureVisuals(
+      detail.annotation?.visuals
+        .filter((visual) => visual.source_kind === "capture")
+        .sort((left, right) => left.position - right.position) ?? [],
     );
   }, []);
 
@@ -1385,6 +1704,157 @@ export function CurationWorkbench() {
     );
   }, [filter, loadPages]);
 
+  const applyVisualMutation = useCallback((result: {
+    curation: CurationState;
+    visuals: CurationVisual[] | null;
+  }) => {
+    setSelectedCuration(result.curation);
+    if (result.visuals) {
+      setCaptureVisuals(
+        result.visuals
+          .filter((visual) => visual.source_kind === "capture")
+          .sort((left, right) => left.position - right.position),
+      );
+    }
+  }, []);
+
+  const requestAddCapture = useCallback((trigger: HTMLElement) => {
+    setEditorCommand({ kind: "add", visualRef: null, trigger, nonce: Date.now() });
+  }, []);
+
+  const requestEditCapture = useCallback((visualRef: string, trigger: HTMLElement) => {
+    setEditorCommand({ kind: "edit", visualRef, trigger, nonce: Date.now() });
+  }, []);
+
+  const handleMoveCapture = useCallback(async (
+    visualRef: string,
+    direction: "up" | "down",
+    number: number,
+    trigger: HTMLElement,
+  ) => {
+    const pageId = selected?.page_id;
+    const snapshotId = selectedCuration?.current_snapshot?.snapshot_id;
+    if (!pageId || !snapshotId || visualOperation) return;
+    setVisualOperation(`${visualRef}:move`);
+    setCurationAnnouncement(`正在${direction === "up" ? "上移" : "下移"}视觉对象 ${String(number).padStart(2, "0")}…`);
+    try {
+      const result = await moveCaptureVisual(pageId, visualRef, snapshotId, direction);
+      applyVisualMutation(result);
+      const nextNumber = direction === "up" ? number - 1 : number + 1;
+      setCurationAnnouncement(
+        `视觉对象 ${String(number).padStart(2, "0")} 已${direction === "up" ? "上移" : "下移"}到第 ${nextNumber} 位。`,
+      );
+      focusAfterLiveAnnouncement(trigger);
+    } catch (cause) {
+      setCurationAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 原顺序与原编号仍保留，可重试。`
+          : "视觉对象排序失败；原顺序与原编号仍保留，可重试。",
+      );
+      focusAfterLiveAnnouncement(trigger);
+    } finally {
+      setVisualOperation(null);
+    }
+  }, [applyVisualMutation, selected?.page_id, selectedCuration?.current_snapshot?.snapshot_id, visualOperation]);
+
+  const requestDeleteCapture = useCallback((
+    visualRef: string,
+    number: number,
+    trigger: HTMLElement,
+  ) => {
+    setDeleteCandidate({ visualRef, number, trigger });
+    setCaptureEditing(true);
+  }, []);
+
+  const closeDeleteDialog = useCallback(() => {
+    const trigger = deleteCandidate?.trigger ?? null;
+    setDeleteCandidate(null);
+    setCaptureEditing(false);
+    window.requestAnimationFrame(() => trigger?.focus());
+  }, [deleteCandidate]);
+
+  useEffect(() => {
+    if (!deleteCandidate) return;
+    const frame = window.requestAnimationFrame(() => deleteSubmitRef.current?.focus());
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || visualOperation) return;
+      event.preventDefault();
+      closeDeleteDialog();
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [closeDeleteDialog, deleteCandidate, visualOperation]);
+
+  const handleDeleteCapture = useCallback(async () => {
+    const pageId = selected?.page_id;
+    const snapshotId = selectedCuration?.current_snapshot?.snapshot_id;
+    if (!deleteCandidate || !pageId || !snapshotId || visualOperation) return;
+    setVisualOperation(`${deleteCandidate.visualRef}:delete`);
+    try {
+      const result = await deleteCaptureVisual(
+        pageId,
+        deleteCandidate.visualRef,
+        snapshotId,
+      );
+      applyVisualMutation(result);
+      const remaining = result.visuals?.filter(
+        (visual) => visual.source_kind === "capture",
+      ).length ?? Math.max(0, captureVisuals.length - 1);
+      setApprovalPathReady(remaining > 0);
+      if (remaining > 0) setFocusApprovalNonce((value) => value + 1);
+      else setFocusCapturePathNonce((value) => value + 1);
+      setCurationAnnouncement(
+        remaining
+          ? `视觉对象 ${String(deleteCandidate.number).padStart(2, "0")} 已删除；其余对象已重新编号。`
+          : "最后一个视觉对象已删除；来源仍有缺口，请重新框选或改选来源完整。",
+      );
+      setDeleteCandidate(null);
+      setCaptureEditing(false);
+    } catch (cause) {
+      setCurationAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 原对象与原编号仍保留，可重试。`
+          : "视觉对象删除失败；原对象与原编号仍保留，可重试。",
+      );
+      focusAfterLiveAnnouncement(deleteSubmitRef.current);
+    } finally {
+      setVisualOperation(null);
+    }
+  }, [
+    applyVisualMutation,
+    captureVisuals.length,
+    deleteCandidate,
+    selected?.page_id,
+    selectedCuration?.current_snapshot?.snapshot_id,
+    visualOperation,
+  ]);
+
+  const handleMarkSourceComplete = useCallback(async (trigger: HTMLElement) => {
+    const pageId = selected?.page_id;
+    const snapshotId = selectedCuration?.current_snapshot?.snapshot_id;
+    if (!pageId || !snapshotId || visualOperation) return;
+    setVisualOperation("source-complete");
+    try {
+      const result = await markCaptureSourceComplete(pageId, snapshotId);
+      applyVisualMutation(result);
+      setApprovalPathReady(true);
+      setFocusApprovalNonce((value) => value + 1);
+      setCurationAnnouncement("已明确改选来源完整；来源缺口阻塞已解除。");
+    } catch (cause) {
+      setCurationAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 来源缺口仍保持阻塞，可重试。`
+          : "来源完整性未能更新；来源缺口仍保持阻塞，可重试。",
+      );
+      focusAfterLiveAnnouncement(trigger);
+    } finally {
+      setVisualOperation(null);
+    }
+  }, [applyVisualMutation, selected?.page_id, selectedCuration?.current_snapshot?.snapshot_id, visualOperation]);
+
   if (error) {
     return (
       <main className="curation-load-state">
@@ -1400,7 +1870,12 @@ export function CurationWorkbench() {
   }
 
   return (
-    <main className="curation-workspace" aria-busy={loading}>
+    <>
+    <main
+      className={`curation-workspace ${captureEditing ? "has-protected-operation" : ""}`}
+      aria-busy={loading}
+      inert={deleteCandidate ? true : undefined}
+    >
       <PageRail
         pages={pages}
         filter={filter}
@@ -1413,9 +1888,12 @@ export function CurationWorkbench() {
       <EvidencePanel
         page={selected}
         curation={selectedCuration}
-        captureVisual={captureVisual}
+        captureVisuals={captureVisuals}
+        editorCommand={editorCommand}
+        focusCapturePathNonce={focusCapturePathNonce}
         onCurationChange={setSelectedCuration}
-        onCaptureVisualChange={setCaptureVisual}
+        onCaptureVisualsChange={setCaptureVisuals}
+        onEditorCommandHandled={() => setEditorCommand(null)}
         onEditingChange={setCaptureEditing}
         onFocusApproval={() => {
           setApprovalPathReady(true);
@@ -1433,15 +1911,85 @@ export function CurationWorkbench() {
         onWarningSummaryChange={handleWarningSummaryChange}
         curationAnnouncement={curationAnnouncement}
         externalCuration={selectedCuration}
-        captureVisual={captureVisual}
+        captureVisuals={captureVisuals}
         focusApprovalNonce={focusApprovalNonce}
         interactionLocked={captureEditing}
+        visualOperation={visualOperation}
         onCurationChange={setSelectedCuration}
         onDetailLoaded={handleDetailLoaded}
         approvalPathReady={approvalPathReady}
+        onAddCapture={requestAddCapture}
+        onEditCapture={requestEditCapture}
+        onMoveCapture={(visualRef, direction, number, trigger) => {
+          void handleMoveCapture(visualRef, direction, number, trigger);
+        }}
+        onDeleteCapture={requestDeleteCapture}
+        onMarkSourceComplete={(trigger) => void handleMarkSourceComplete(trigger)}
         onSourceDirtyChange={setSourceDirty}
         onApproved={handleApproved}
       />
     </main>
+    {deleteCandidate ? (
+      <div
+        className="dialog-backdrop capture-delete-backdrop"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !visualOperation) closeDeleteDialog();
+        }}
+      >
+        <section
+          ref={deleteDialogRef}
+          className="capture-delete-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="capture-delete-heading"
+          onKeyDown={(event) => {
+            if (event.key !== "Tab") return;
+            const controls = Array.from(
+              deleteDialogRef.current?.querySelectorAll<HTMLButtonElement>(
+                "button:not([disabled])",
+              ) ?? [],
+            );
+            if (!controls.length) return;
+            const first = controls[0];
+            const last = controls[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
+        >
+          <header>
+            <span>{String(deleteCandidate.number).padStart(2, "0")}</span>
+            <div>
+              <h2 id="capture-delete-heading">
+                删除视觉对象 {String(deleteCandidate.number).padStart(2, "0")}？
+              </h2>
+              <p>删除会生成新的不可变策展快照，历史快照仍保留。</p>
+            </div>
+          </header>
+          <p>
+            此操作不会合并范围。若范围不完整，请删除后重新框选覆盖完整内容的大范围。
+          </p>
+          <div className="capture-editor-actions">
+            <button type="button" disabled={Boolean(visualOperation)} onClick={closeDeleteDialog}>
+              返回检查
+            </button>
+            <button
+              ref={deleteSubmitRef}
+              type="button"
+              className="is-danger"
+              disabled={Boolean(visualOperation)}
+              onClick={() => void handleDeleteCapture()}
+            >
+              {visualOperation ? "正在删除" : `确认删除视觉对象 ${String(deleteCandidate.number).padStart(2, "0")}`}
+            </button>
+          </div>
+        </section>
+      </div>
+    ) : null}
+    </>
   );
 }

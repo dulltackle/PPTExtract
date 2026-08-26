@@ -20,6 +20,7 @@ const browser = await chromium.launch({
 
 const checks = [];
 const savedBounds = [];
+const mutationSnapshots = [];
 
 async function prepareReviewedPage(page) {
   await page.getByRole("heading", { name: "来源日志" }).waitFor();
@@ -36,6 +37,8 @@ async function prepareReviewedPage(page) {
 }
 
 async function exercise(route, viewport) {
+  let stage = "打开工作位";
+  try {
   const page = await browser.newPage({ viewport });
   page.setDefaultTimeout(30_000);
   await page.goto(`${baseUrl}${route}`, { waitUntil: "domcontentloaded", timeout: 10_000 });
@@ -108,8 +111,13 @@ async function exercise(route, viewport) {
   const requestPromise = page.waitForRequest((request) => (
     request.url().includes("/curation/visuals") && request.method() === "POST"
   ));
+  const firstSaveResponse = page.waitForResponse((response) => (
+    response.url().includes("/curation/visuals") &&
+    response.request().method() === "POST" && response.status() === 201
+  ));
   await page.getByRole("button", { name: "保存并返回审核" }).click();
   const request = await requestPromise;
+  mutationSnapshots.push((await (await firstSaveResponse).json()).curation.current_snapshot.snapshot_id);
   const payload = request.postDataJSON();
   savedBounds.push(payload.bounds);
   for (const [field, expected] of Object.entries({
@@ -124,6 +132,202 @@ async function exercise(route, viewport) {
   }
   await page.getByRole("heading", { name: "人工截图" }).waitFor();
   await page.getByText(new RegExp(`${viewport.width}px 验收视口`)).waitFor();
+
+  stage = "追加第二个视觉对象";
+  await page.getByRole("button", { name: "再截一个" }).click();
+  await page.locator(".capture-mode-instruction").waitFor();
+  const secondImageBox = await render.boundingBox();
+  if (!secondImageBox) throw new Error(`${viewport.width}px 追加框选时标准页没有尺寸`);
+  const secondStart = {
+    x: secondImageBox.x + secondImageBox.width * 0.56,
+    y: secondImageBox.y + secondImageBox.height * 0.16,
+  };
+  const secondEnd = {
+    x: secondImageBox.x + secondImageBox.width * 0.84,
+    y: secondImageBox.y + secondImageBox.height * 0.46,
+  };
+  await page.mouse.move(secondStart.x, secondStart.y);
+  await page.mouse.down();
+  await page.mouse.move(secondEnd.x, secondEnd.y, { steps: 4 });
+  await page.mouse.up();
+  const secondEditor = page.getByRole("dialog", { name: "视觉对象 02" });
+  await secondEditor.waitFor();
+  await page.getByRole("textbox", { name: "视觉对象 02 summary" })
+    .fill(`公开分布图展示 ${viewport.width}px 视口中的地区差异。`);
+  await page.getByRole("combobox", { name: "视觉对象 02 类型" }).selectOption("map");
+  if (captureRoot) {
+    await page.screenshot({
+      path: resolve(captureRoot, `capture-multiple-${viewport.width}.png`),
+      fullPage: true,
+    });
+  }
+  const secondSaveResponse = page.waitForResponse((response) => (
+    response.url().endsWith("/curation/visuals") &&
+    response.request().method() === "POST" && response.status() === 201
+  ));
+  await secondEditor.getByRole("button", { name: "保存并返回审核" }).click();
+  mutationSnapshots.push((await (await secondSaveResponse).json()).curation.current_snapshot.snapshot_id);
+  await page.getByRole("button", { name: "编辑视觉对象 02" }).waitFor();
+  if ((await page.locator(".capture-range").count()) !== 2) {
+    throw new Error(`${viewport.width}px 保存第二个对象后未同时显示两个范围`);
+  }
+
+  stage = "编辑第二个视觉对象";
+  await page.getByRole("button", { name: "编辑视觉对象 02" }).click();
+  const editDialog = page.getByRole("dialog", { name: "视觉对象 02" });
+  await editDialog.waitFor();
+  const editedSummary = page.getByRole("textbox", { name: "视觉对象 02 summary" });
+  await editedSummary.fill(`公开分布图展示 ${viewport.width}px 视口中的地区差异，已人工复核。`);
+  const activeRange = page.getByRole("button", { name: /视觉对象 02 框选范围/ });
+  const widthBeforePointerResize = await activeRange.evaluate(
+    (element) => Number.parseFloat(element.style.width),
+  );
+  const southeastHandle = page.locator(".capture-resize-handle.is-se");
+  const handleBox = await southeastHandle.boundingBox();
+  if (!handleBox) throw new Error(`${viewport.width}px 缩放控制点不可见`);
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 8, handleBox.y + handleBox.height / 2 + 8);
+  await page.mouse.up();
+  const widthAfterPointerResize = await activeRange.evaluate(
+    (element) => Number.parseFloat(element.style.width),
+  );
+  if (widthAfterPointerResize <= widthBeforePointerResize) {
+    throw new Error(`${viewport.width}px 拖动缩放控制点未调整范围`);
+  }
+  const nudge = editDialog.getByRole("button", { name: "右移" });
+  await nudge.focus();
+  await page.keyboard.press("Enter");
+  stage = "验证编辑失败保留范围与表单";
+  const editFailurePattern = "**/api/v1/pages/*/curation/visuals/*";
+  const rejectEdit = async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    return route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "simulated_failure", message: "模拟编辑失败。" } }),
+    });
+  };
+  await page.route(editFailurePattern, rejectEdit);
+  await editDialog.getByRole("button", { name: "保存修改" }).click();
+  await page.getByText(/模拟编辑失败。 当前范围和表单内容仍保留/).waitFor();
+  const failedDraftSummary = await editedSummary.inputValue();
+  if (failedDraftSummary !== `公开分布图展示 ${viewport.width}px 视口中的地区差异，已人工复核。`) {
+    throw new Error(`${viewport.width}px 编辑失败后表单内容发生变化：${failedDraftSummary}`);
+  }
+  const failedDraftLeft = await page.getByRole("button", {
+    name: /视觉对象 02 框选范围/,
+  }).evaluate((element) => Number.parseFloat(element.style.left));
+  if (Math.abs(failedDraftLeft - 56.1) > 0.01) {
+    throw new Error(`${viewport.width}px 编辑失败后键盘微调范围未保留`);
+  }
+  await page.unroute(editFailurePattern, rejectEdit);
+
+  stage = "保存第二个视觉对象的编辑";
+  const editResponse = page.waitForResponse((response) => (
+    response.url().includes("/curation/visuals/") &&
+    response.request().method() === "PATCH" && response.status() === 201
+  ));
+  await editDialog.getByRole("button", { name: "保存修改" }).click();
+  mutationSnapshots.push((await (await editResponse).json()).curation.current_snapshot.snapshot_id);
+  await page.getByText(/已人工复核/).waitFor();
+
+  stage = "上移第二个视觉对象";
+  const moveButton = page.getByRole("button", { name: "视觉对象 02 上移" });
+  const secondRefBeforeFailedMove = await page.getByRole("button", {
+    name: /视觉对象 02 框选范围/,
+  }).getAttribute("data-visual-ref");
+  const moveFailurePattern = "**/api/v1/pages/*/curation/visuals/*/move";
+  const rejectMove = (route) => route.fulfill({
+    status: 409,
+    contentType: "application/json",
+    body: JSON.stringify({ error: { code: "simulated_failure", message: "模拟排序失败。" } }),
+  });
+  await page.route(moveFailurePattern, rejectMove);
+  await moveButton.click();
+  await page.getByText(/模拟排序失败。 原顺序与原编号仍保留/).waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "视觉对象 02 上移");
+  const secondRefAfterFailedMove = await page.getByRole("button", {
+    name: /视觉对象 02 框选范围/,
+  }).getAttribute("data-visual-ref");
+  if (!secondRefBeforeFailedMove || secondRefAfterFailedMove !== secondRefBeforeFailedMove) {
+    throw new Error(`${viewport.width}px 排序失败后可见编号发生变化`);
+  }
+  await page.unroute(moveFailurePattern, rejectMove);
+
+  const moveResponse = page.waitForResponse((response) => (
+    response.url().endsWith("/move") && response.status() === 201
+  ));
+  await moveButton.focus();
+  await page.keyboard.press("Enter");
+  mutationSnapshots.push((await (await moveResponse).json()).curation.current_snapshot.snapshot_id);
+  await page.getByText("视觉对象 02 已上移到第 1 位。").waitFor();
+  const firstSummary = page.getByRole("button", { name: "编辑视觉对象 01" });
+  if (!(await firstSummary.textContent()).includes("已人工复核")) {
+    throw new Error(`${viewport.width}px 排序成功后右栏编号未原子更新`);
+  }
+  const firstCentralRef = await page.getByRole("button", {
+    name: /视觉对象 01 框选范围/,
+  }).getAttribute("data-visual-ref");
+  if (!firstCentralRef) throw new Error(`${viewport.width}px 中央排序编号缺少稳定对象身份`);
+
+  stage = "取消并确认删除排序后的第一个视觉对象";
+  const deleteButton = page.getByRole("button", { name: "删除视觉对象 01", exact: true });
+  stage = "打开删除确认弹窗";
+  await deleteButton.click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除视觉对象 01？" });
+  await deleteDialog.waitFor();
+  stage = "按 Escape 取消删除";
+  await page.keyboard.press("Escape");
+  await deleteDialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "删除视觉对象 01");
+  stage = "再次打开删除确认弹窗";
+  await deleteButton.click();
+  await deleteDialog.waitFor();
+  stage = "确认删除排序后的第一个视觉对象";
+  const deleteFailurePattern = "**/api/v1/pages/*/curation/visuals/*";
+  const rejectDelete = async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    return route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "simulated_failure", message: "模拟删除失败。" } }),
+    });
+  };
+  await page.route(deleteFailurePattern, rejectDelete);
+  const confirmDelete = page.getByRole("button", { name: "确认删除视觉对象 01" });
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "确认删除视觉对象 01");
+  await page.keyboard.press("Enter");
+  await page.getByText(/模拟删除失败。 原对象与原编号仍保留/).waitFor();
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "确认删除视觉对象 01");
+  if ((await page.locator(".capture-range").count()) !== 2 || !(await deleteDialog.isVisible())) {
+    throw new Error(`${viewport.width}px 删除失败后对象或确认上下文未保留`);
+  }
+  await page.unroute(deleteFailurePattern, rejectDelete);
+
+  stage = "删除排序后的第一个视觉对象";
+  const deleteResponse = page.waitForResponse((response) => (
+    response.url().includes("/curation/visuals/") &&
+    response.request().method() === "DELETE"
+  ));
+  await confirmDelete.click();
+  const completedDeleteResponse = await deleteResponse;
+  if (completedDeleteResponse.status() !== 201) {
+    throw new Error(
+      `${viewport.width}px 删除请求返回 ${completedDeleteResponse.status()}：${await completedDeleteResponse.text()}`,
+    );
+  }
+  mutationSnapshots.push((await completedDeleteResponse.json()).curation.current_snapshot.snapshot_id);
+  stage = "等待删除后的重新编号公告";
+  await page.getByText(/已删除；其余对象已重新编号/).waitFor();
+  stage = "核对删除后的对象身份与焦点";
+  if ((await page.locator(".capture-range").count()) !== 1) {
+    throw new Error(`${viewport.width}px 删除后未保留并重新编号剩余对象`);
+  }
+  if ((await page.getByRole("button", { name: "编辑视觉对象 01" }).textContent()).includes("已人工复核")) {
+    throw new Error(`${viewport.width}px 删除目标错误或排序后的对象身份未保持`);
+  }
+
   const approve = page.getByRole("button", { name: "批准并转到下一待处理页" });
   await page.waitForFunction(() => (
     document.activeElement?.textContent?.trim() === "批准并转到下一待处理页"
@@ -140,12 +344,17 @@ async function exercise(route, viewport) {
   }
   checks.push(`capture-viewport-${viewport.width}`);
   await page.close();
+  } catch (error) {
+    process.stderr.write(`BLACKBOX_STAGE=${viewport.width}:${stage}\n`);
+    error.message = `${viewport.width}px ${stage}：${error.message}`;
+    throw error;
+  }
 }
 
 try {
   await exercise(routes[0], { width: 1280, height: 900 });
   await exercise(routes[1], { width: 1440, height: 1024 });
-  process.stdout.write(JSON.stringify({ ok: true, checks, savedBounds }));
+  process.stdout.write(JSON.stringify({ ok: true, checks, savedBounds, mutationSnapshots }));
 } finally {
   await browser.close();
 }

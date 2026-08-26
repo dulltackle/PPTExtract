@@ -227,11 +227,17 @@ export function SourceReviewLog({
   onDirtyChange,
   onApproved,
   externalCuration,
-  captureVisual,
+  captureVisuals,
   focusApprovalNonce,
   onCurationChange,
   onDetailLoaded,
   approvalPathReady,
+  visualOperation,
+  onAddCapture,
+  onEditCapture,
+  onMoveCapture,
+  onDeleteCapture,
+  onMarkSourceComplete,
 }: {
   page: CurationPage;
   arrivalAnnouncement: string | null;
@@ -239,11 +245,22 @@ export function SourceReviewLog({
   onDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
   externalCuration: CurationState | null;
-  captureVisual: CurationVisual | null;
+  captureVisuals: CurationVisual[];
   focusApprovalNonce: number;
   onCurationChange: (curation: CurationState) => void;
   onDetailLoaded: (detail: PageDetail) => void;
   approvalPathReady: boolean;
+  visualOperation: string | null;
+  onAddCapture: (trigger: HTMLElement) => void;
+  onEditCapture: (visualRef: string, trigger: HTMLElement) => void;
+  onMoveCapture: (
+    visualRef: string,
+    direction: "up" | "down",
+    number: number,
+    trigger: HTMLElement,
+  ) => void;
+  onDeleteCapture: (visualRef: string, number: number, trigger: HTMLElement) => void;
+  onMarkSourceComplete: (trigger: HTMLElement) => void;
 }) {
   const [detail, setDetail] = useState<PageDetail | null>(null);
   const [titles, setTitles] = useState<string[]>([]);
@@ -634,6 +651,7 @@ export function SourceReviewLog({
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (document.querySelector("[aria-modal='true']")) return;
       if (
         event.key.toLowerCase() !== "a" || !curation?.can_approve ||
         !approvalPathReady || dirty || busy
@@ -1116,27 +1134,97 @@ export function SourceReviewLog({
           </button>
         </section>
 
-        {captureVisual ? (
+        {captureVisuals.length > 0 || blockers.some((blocker) => blocker.code === "capture_required") ? (
           <section className="source-phase capture-summary" aria-labelledby="capture-summary-heading">
             <header>
               <div>
                 <h3 id="capture-summary-heading">人工截图</h3>
-                <p>从标准页渲染结果裁出 · 不缩放</p>
+                <p>语义顺序由可见编号确定 · AnyDoc 引用顺序不变</p>
               </div>
-              <PhaseStatus complete={Boolean(captureVisual.summary?.trim())}>已保存</PhaseStatus>
+              <PhaseStatus complete={captureVisuals.length > 0}>
+                {captureVisuals.length ? `${captureVisuals.length} 个已保存` : "来源有缺口"}
+              </PhaseStatus>
             </header>
-            <div className="capture-summary-row">
-              <span className="capture-summary-number">01</span>
-              <div>
-                <strong>{captureVisual.summary || "缺少 summary"}</strong>
-                <span>
-                  {captureVisual.visual_type || "未分类"}
-                  {captureVisual.asset?.width_px && captureVisual.asset?.height_px
-                    ? ` · ${captureVisual.asset.width_px} × ${captureVisual.asset.height_px} px`
-                    : ""}
-                </span>
-              </div>
+            <div className="capture-summary-list">
+              {captureVisuals.map((captureVisual, index) => {
+                const number = index + 1;
+                const label = String(number).padStart(2, "0");
+                const operationKey = `${captureVisual.visual_ref}:`;
+                return (
+                  <article className="capture-summary-row" key={captureVisual.visual_ref}>
+                    <span className="capture-summary-number">{label}</span>
+                    <button
+                      type="button"
+                      className="capture-summary-main"
+                      aria-label={`编辑视觉对象 ${label}`}
+                      disabled={!pending || visualOperation !== null}
+                      onClick={(event) => onEditCapture(captureVisual.visual_ref, event.currentTarget)}
+                    >
+                      <strong>{captureVisual.summary || "缺少 summary"}</strong>
+                      <span>
+                        {captureVisual.visual_type || "未分类"}
+                        {captureVisual.asset?.width_px && captureVisual.asset?.height_px
+                          ? ` · ${captureVisual.asset.width_px} × ${captureVisual.asset.height_px} px`
+                          : ""}
+                      </span>
+                    </button>
+                    {pending ? (
+                      <div className="capture-summary-actions">
+                        <button
+                          type="button"
+                          aria-label={`视觉对象 ${label} 上移`}
+                          disabled={index === 0 || visualOperation !== null}
+                          onClick={(event) => onMoveCapture(
+                            captureVisual.visual_ref,
+                            "up",
+                            number,
+                            event.currentTarget,
+                          )}
+                        >上移</button>
+                        <button
+                          type="button"
+                          aria-label={`视觉对象 ${label} 下移`}
+                          disabled={index === captureVisuals.length - 1 || visualOperation !== null}
+                          onClick={(event) => onMoveCapture(
+                            captureVisual.visual_ref,
+                            "down",
+                            number,
+                            event.currentTarget,
+                          )}
+                        >下移</button>
+                        <button
+                          type="button"
+                          className="is-danger"
+                          aria-label={`删除视觉对象 ${label}`}
+                          disabled={visualOperation?.startsWith(operationKey) ?? false}
+                          onClick={(event) => onDeleteCapture(
+                            captureVisual.visual_ref,
+                            number,
+                            event.currentTarget,
+                          )}
+                        >删除</button>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
             </div>
+            {pending ? (
+              <div className="capture-summary-footer">
+                <button
+                  type="button"
+                  disabled={visualOperation !== null}
+                  onClick={(event) => onAddCapture(event.currentTarget)}
+                >{captureVisuals.length ? "再截一个" : "重新框选"}</button>
+                {captureVisuals.length === 0 ? (
+                  <button
+                    type="button"
+                    disabled={visualOperation !== null}
+                    onClick={(event) => onMarkSourceComplete(event.currentTarget)}
+                  >改选来源完整</button>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         ) : null}
       </div>
@@ -1152,8 +1240,8 @@ export function SourceReviewLog({
                   ? `${blockers.length} 项结构性阻塞`
                   : !approvalPathReady
                     ? "等待来源完整性选择"
-                    : captureVisual
-                    ? "来源已补全 · 1 个视觉对象"
+                    : captureVisuals.length
+                    ? `来源已补全 · ${captureVisuals.length} 个视觉对象`
                     : "来源完整 · 无需截图"}
             </p>
           </div>

@@ -18,11 +18,15 @@ from pptextract.curation import (
     approve_page,
     complete_source_review,
     confirm_source_snapshot,
+    delete_capture_visual,
+    mark_capture_source_complete,
+    move_capture_visual,
     read_page_curation,
     read_source_image,
     save_capture_visual,
     save_image_source_disposition,
     save_source_snapshot,
+    update_capture_visual,
 )
 from pptextract.db import connect, database_path_is_local, initialize_database, transaction
 from pptextract.ingest_workflow import (
@@ -111,6 +115,15 @@ class SaveCaptureVisual(BaseModel):
     bounds: NormalizedBounds
 
 
+class DeleteCaptureVisual(BaseModel):
+    base_snapshot_id: str = Field(min_length=1, max_length=128)
+
+
+class MoveCaptureVisual(BaseModel):
+    base_snapshot_id: str = Field(min_length=1, max_length=128)
+    direction: str
+
+
 def _read_curation_snapshot(
     connection: sqlite3.Connection, snapshot_id: str | None
 ) -> dict[str, Any] | None:
@@ -190,6 +203,16 @@ def _read_curation_snapshot(
             for visual in visuals
         ],
     }
+
+
+def _visual_mutation_content(
+    settings: Settings, curation: dict[str, Any]
+) -> dict[str, Any]:
+    snapshot = curation.get("current_snapshot")
+    snapshot_id = None if snapshot is None else snapshot.get("snapshot_id")
+    with connect(settings) as connection:
+        annotation = _read_curation_snapshot(connection, snapshot_id)
+    return {"curation": curation, "annotation": annotation}
 
 
 def create_app(
@@ -1233,7 +1256,106 @@ def create_app(
             )
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
-        return JSONResponse(status_code=201, content={"curation": curation})
+        return JSONResponse(
+            status_code=201, content=_visual_mutation_content(resolved, curation)
+        )
+
+    @app.patch(
+        "/api/v1/pages/{page_id}/curation/visuals/{visual_ref}", status_code=201
+    )
+    async def edit_capture_visual(
+        page_id: str,
+        visual_ref: str,
+        command: SaveCaptureVisual,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = update_capture_visual(
+                resolved,
+                page_id=page_id,
+                visual_ref=visual_ref,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+                summary=command.summary,
+                visual_type=command.visual_type,
+                bounds=command.bounds.model_dump(),
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(
+            status_code=201, content=_visual_mutation_content(resolved, curation)
+        )
+
+    @app.delete(
+        "/api/v1/pages/{page_id}/curation/visuals/{visual_ref}", status_code=201
+    )
+    async def remove_capture_visual(
+        page_id: str,
+        visual_ref: str,
+        command: DeleteCaptureVisual,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = delete_capture_visual(
+                resolved,
+                page_id=page_id,
+                visual_ref=visual_ref,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(
+            status_code=201, content=_visual_mutation_content(resolved, curation)
+        )
+
+    @app.post(
+        "/api/v1/pages/{page_id}/curation/visuals/{visual_ref}/move",
+        status_code=201,
+    )
+    async def reorder_capture_visual(
+        page_id: str,
+        visual_ref: str,
+        command: MoveCaptureVisual,
+        request: Request,
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = move_capture_visual(
+                resolved,
+                page_id=page_id,
+                visual_ref=visual_ref,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+                direction=command.direction,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(
+            status_code=201, content=_visual_mutation_content(resolved, curation)
+        )
+
+    @app.post(
+        "/api/v1/pages/{page_id}/curation/source-completeness", status_code=201
+    )
+    async def mark_page_source_complete(
+        page_id: str, command: SnapshotCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            curation = mark_capture_source_complete(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                snapshot_id=command.snapshot_id,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(
+            status_code=201, content=_visual_mutation_content(resolved, curation)
+        )
 
     @app.post("/api/v1/pages/{page_id}/approve")
     async def approve_curation_page(

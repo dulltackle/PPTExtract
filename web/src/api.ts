@@ -212,6 +212,7 @@ export interface CurationBlocker {
     | "image_hash_mismatch"
     | "image_media_type_unsupported"
     | "visual_summary_required"
+    | "capture_required"
     | "chunk_body_empty";
   message: string;
   source_ref?: string;
@@ -253,6 +254,11 @@ export interface PageDetail {
     summary: RenderingWarningSummary;
     warnings: RenderingWarning[];
   };
+}
+
+export interface VisualMutationResult {
+  curation: CurationState;
+  visuals: CurationVisual[] | null;
 }
 
 export interface PublicationPreflight {
@@ -570,7 +576,7 @@ export async function saveCaptureVisual(
   summary: string,
   visualType: VisualType | null,
   bounds: NormalizedBounds,
-): Promise<CurationState> {
+): Promise<VisualMutationResult> {
   const response = await fetch(`/api/v1/pages/${pageId}/curation/visuals`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
@@ -581,12 +587,90 @@ export async function saveCaptureVisual(
       bounds,
     }),
   });
-  return (
-    await readJson<{ curation: CurationState }>(
-      response,
-      "视觉对象未能保存；当前范围和表单内容仍保留。",
-    )
-  ).curation;
+  const payload = await readJson<{
+    curation: CurationState;
+    annotation?: { visuals: CurationVisual[] } | null;
+  }>(response, "视觉对象未能保存；当前范围和表单内容仍保留。");
+  return { curation: payload.curation, visuals: payload.annotation?.visuals ?? null };
+}
+
+export async function updateCaptureVisual(
+  pageId: string,
+  visualRef: string,
+  baseSnapshotId: string,
+  summary: string,
+  visualType: VisualType | null,
+  bounds: NormalizedBounds,
+): Promise<VisualMutationResult> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/visuals/${visualRef}`, {
+    method: "PATCH",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      base_snapshot_id: baseSnapshotId,
+      summary,
+      visual_type: visualType,
+      bounds,
+    }),
+  });
+  const payload = await readJson<{
+    curation: CurationState;
+    annotation?: { visuals: CurationVisual[] } | null;
+  }>(response, "视觉对象修改未能保存；当前范围和表单内容仍保留。");
+  return { curation: payload.curation, visuals: payload.annotation?.visuals ?? null };
+}
+
+export async function deleteCaptureVisual(
+  pageId: string,
+  visualRef: string,
+  baseSnapshotId: string,
+): Promise<VisualMutationResult> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/visuals/${visualRef}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ base_snapshot_id: baseSnapshotId }),
+  });
+  const payload = await readJson<{
+    curation: CurationState;
+    annotation?: { visuals: CurationVisual[] } | null;
+  }>(response, "视觉对象删除失败；原对象与原编号仍保留。");
+  return { curation: payload.curation, visuals: payload.annotation?.visuals ?? null };
+}
+
+export async function moveCaptureVisual(
+  pageId: string,
+  visualRef: string,
+  baseSnapshotId: string,
+  direction: "up" | "down",
+): Promise<VisualMutationResult> {
+  const response = await fetch(
+    `/api/v1/pages/${pageId}/curation/visuals/${visualRef}/move`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ base_snapshot_id: baseSnapshotId, direction }),
+    },
+  );
+  const payload = await readJson<{
+    curation: CurationState;
+    annotation?: { visuals: CurationVisual[] } | null;
+  }>(response, "视觉对象排序失败；原顺序与原编号仍保留。");
+  return { curation: payload.curation, visuals: payload.annotation?.visuals ?? null };
+}
+
+export async function markCaptureSourceComplete(
+  pageId: string,
+  snapshotId: string,
+): Promise<VisualMutationResult> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/source-completeness`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ snapshot_id: snapshotId }),
+  });
+  const payload = await readJson<{
+    curation: CurationState;
+    annotation?: { visuals: CurationVisual[] } | null;
+  }>(response, "来源完整性未能更新；来源缺口仍保持阻塞。");
+  return { curation: payload.curation, visuals: payload.annotation?.visuals ?? null };
 }
 
 async function submitSnapshotCommand(

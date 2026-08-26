@@ -209,7 +209,10 @@ describe("来源文字审核工作台", () => {
     await userEvent.type(body, "人工修订正文。");
     expect(screen.getByText("已修改，原确认失效")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    const saveEdit = screen.getAllByRole("button", { name: "保存修改" })
+      .find((button) => !(button as HTMLButtonElement).disabled);
+    expect(saveEdit).toBeDefined();
+    await userEvent.click(saveEdit!);
     const confirm = await screen.findByRole("button", { name: "确认文字来源" });
     await waitFor(() => expect(confirm).toHaveFocus());
     await userEvent.click(confirm);
@@ -400,6 +403,312 @@ describe("来源文字审核工作台", () => {
       bounds: { left: 0.1, top: 0.2, width: 0.4, height: 0.4 },
     });
     expect(screen.queryByText("opaque-visual-ref")).not.toBeInTheDocument();
+  });
+
+  it("以同一编号编辑、排序和确认删除多个人工截图视觉对象", async () => {
+    const reviewedSnapshot = {
+      snapshot_id: "snapshot-2",
+      source_content: originalSource,
+      source_confirmation: {
+        actor_id: "operator-zhang",
+        confirmed_at: "2026-08-24T18:00:00+00:00",
+      },
+      source_review: {
+        actor_id: "operator-zhang",
+        completed_at: "2026-08-24T18:01:00+00:00",
+      },
+    };
+    const visual = (
+      visualRef: string,
+      position: number,
+      summary: string,
+      bounds: { left: number; top: number; width: number; height: number },
+    ) => ({
+      visual_ref: visualRef,
+      position,
+      source_kind: "capture",
+      disposition: "included",
+      summary,
+      visual_type: "chart",
+      bounds,
+      source_visual_ref: null,
+      confirmed: true,
+    });
+    let visuals = [
+      visual("visual-a", 0, "第一幅公开趋势图。", {
+        left: 0.08, top: 0.12, width: 0.32, height: 0.3,
+      }),
+      visual("visual-b", 1, "第二幅公开分布图。", {
+        left: 0.5, top: 0.24, width: 0.34, height: 0.38,
+      }),
+    ];
+    let snapshotId = "snapshot-2";
+    let mutationCount = 0;
+    let editedBody: Record<string, unknown> | null = null;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("/api/v1/curation/pages?review_status=pending")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }),
+        );
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: originalSource,
+          curation: curationState({ ...reviewedSnapshot, snapshot_id: snapshotId }),
+          annotation: { snapshot_id: snapshotId, visuals },
+          standard_render: {
+            sha256: "b".repeat(64),
+            media_type: "image/png",
+            dpi: 144,
+            width_px: 1600,
+            height_px: 900,
+            url: "/api/v1/pages/page-1/render",
+          },
+        }), { status: 200 }));
+      }
+      if (url.endsWith("/visual-b/move") && init?.method === "POST") {
+        mutationCount += 1;
+        snapshotId = `snapshot-move-${mutationCount}`;
+        visuals = [
+          { ...visuals[1], position: 0 },
+          { ...visuals[0], position: 1 },
+        ];
+        return Promise.resolve(new Response(JSON.stringify({
+          curation: curationState({ ...reviewedSnapshot, snapshot_id: snapshotId }),
+          annotation: { snapshot_id: snapshotId, visuals },
+        }), { status: 201 }));
+      }
+      if (url.endsWith("/visual-b") && init?.method === "PATCH") {
+        editedBody = JSON.parse(String(init.body));
+        mutationCount += 1;
+        snapshotId = `snapshot-edit-${mutationCount}`;
+        visuals = visuals.map((item) => item.visual_ref === "visual-b"
+          ? {
+              ...item,
+              summary: String(editedBody?.summary),
+              bounds: editedBody?.bounds as typeof item.bounds,
+            }
+          : item);
+        return Promise.resolve(new Response(JSON.stringify({
+          curation: curationState({ ...reviewedSnapshot, snapshot_id: snapshotId }),
+          annotation: { snapshot_id: snapshotId, visuals },
+        }), { status: 201 }));
+      }
+      if ((url.endsWith("/visual-b") || url.endsWith("/visual-a")) && init?.method === "DELETE") {
+        const deletedRef = url.endsWith("/visual-b") ? "visual-b" : "visual-a";
+        mutationCount += 1;
+        snapshotId = `snapshot-delete-${mutationCount}`;
+        visuals = visuals
+          .filter((item) => item.visual_ref !== deletedRef)
+          .map((item, position) => ({ ...item, position }));
+        const nextCuration = curationState({ ...reviewedSnapshot, snapshot_id: snapshotId });
+        if (visuals.length === 0) {
+          nextCuration.blockers.push({
+            code: "capture_required",
+            message: "来源仍有缺口：请重新框选视觉对象，或明确改选来源完整。",
+          });
+          nextCuration.can_approve = false;
+        }
+        return Promise.resolve(new Response(JSON.stringify({
+          curation: nextCuration,
+          annotation: { snapshot_id: snapshotId, visuals },
+        }), { status: 201 }));
+      }
+      throw new Error(`未覆盖的请求：${url} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+    const editSecond = await screen.findByRole("button", { name: "编辑视觉对象 02" });
+    expect(screen.getByRole("button", { name: /视觉对象 01 框选范围/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /视觉对象 02 框选范围/ })).toBeInTheDocument();
+
+    await userEvent.click(editSecond);
+    const summary = await screen.findByRole("textbox", { name: "视觉对象 02 summary" });
+    expect(summary).toHaveValue("第二幅公开分布图。");
+    expect(screen.getByRole("button", { name: /视觉对象 01 框选范围/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /视觉对象 02 框选范围/ })).toHaveAttribute("tabindex", "-1");
+    screen.getByRole("button", { name: /视觉对象 01 框选范围/ }).focus();
+    await waitFor(() => expect(summary).toHaveFocus());
+    await userEvent.clear(summary);
+    await userEvent.type(summary, "未保存的本地修改。");
+    await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(editSecond).toHaveFocus());
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining("/visual-b"),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+
+    await userEvent.click(editSecond);
+    const restoredSummary = await screen.findByRole("textbox", { name: "视觉对象 02 summary" });
+    expect(restoredSummary).toHaveValue("第二幅公开分布图。");
+    await userEvent.clear(restoredSummary);
+    await userEvent.type(restoredSummary, "第二幅公开分布图已复核。");
+    const nudgeRight = screen.getByRole("button", { name: "右移" });
+    nudgeRight.focus();
+    await userEvent.keyboard("{Enter}");
+    const saveVisualEdit = screen.getAllByRole("button", { name: "保存修改" })
+      .find((button) => !(button as HTMLButtonElement).disabled);
+    expect(saveVisualEdit).toBeDefined();
+    await userEvent.click(saveVisualEdit!);
+    await waitFor(() => expect(editedBody).toEqual(expect.objectContaining({
+      base_snapshot_id: "snapshot-2",
+      summary: "第二幅公开分布图已复核。",
+      bounds: { left: 0.501, top: 0.24, width: 0.34, height: 0.38 },
+    })));
+
+    await userEvent.click(screen.getByRole("button", { name: "视觉对象 01 上移" }));
+    await userEvent.click(screen.getByRole("button", { name: "视觉对象 02 上移" }));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "编辑视觉对象 01" }),
+    ).toHaveTextContent("第二幅公开分布图已复核。"));
+    expect(screen.getByRole("button", { name: /视觉对象 01 框选范围/ }))
+      .toHaveAttribute("data-visual-ref", "visual-b");
+    expect(await screen.findByText("视觉对象 02 已上移到第 1 位。")).toBeInTheDocument();
+
+    const deleteButton = screen.getByRole("button", { name: "删除视觉对象 01" });
+    await userEvent.click(deleteButton);
+    const confirm = await screen.findByRole("dialog", { name: "删除视觉对象 01？" });
+    expect(confirm).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "确认删除视觉对象 01" }),
+    ).toHaveFocus());
+    expect(screen.getAllByRole("button", { name: /第 1 页/ })[0]).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(deleteButton).toHaveFocus());
+    expect(screen.queryByRole("dialog", { name: "删除视觉对象 01？" })).not.toBeInTheDocument();
+    await userEvent.click(deleteButton);
+    await userEvent.click(await screen.findByRole("button", { name: "确认删除视觉对象 01" }));
+    expect(await screen.findByText("视觉对象 01 已删除；其余对象已重新编号。")).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "批准并转到下一待处理页" }),
+    ).toHaveFocus());
+    expect(screen.getAllByRole("button", { name: /视觉对象 01 框选范围/ })).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "删除视觉对象 01" }));
+    await userEvent.click(await screen.findByRole("button", { name: "确认删除视觉对象 01" }));
+    expect(await screen.findByText("最后一个视觉对象已删除；来源仍有缺口，请重新框选或改选来源完整。")).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "有缺口，在页面上框选" }),
+    ).toHaveFocus());
+    expect(screen.getByText("来源仍有缺口：请重新框选视觉对象，或明确改选来源完整。")).toBeInTheDocument();
+  });
+
+  it("视觉对象变更失败时保留表单、范围、顺序、编号和焦点", async () => {
+    const reviewedSnapshot = {
+      snapshot_id: "snapshot-failure",
+      source_content: originalSource,
+      source_confirmation: {
+        actor_id: "operator-zhang",
+        confirmed_at: "2026-08-24T18:00:00+00:00",
+      },
+      source_review: {
+        actor_id: "operator-zhang",
+        completed_at: "2026-08-24T18:01:00+00:00",
+      },
+    };
+    const visuals = [
+      {
+        visual_ref: "visual-a",
+        position: 0,
+        source_kind: "capture",
+        disposition: "included",
+        summary: "第一幅原始图。",
+        visual_type: "chart",
+        bounds: { left: 0.08, top: 0.12, width: 0.32, height: 0.3 },
+        source_visual_ref: null,
+        confirmed: true,
+      },
+      {
+        visual_ref: "visual-b",
+        position: 1,
+        source_kind: "capture",
+        disposition: "included",
+        summary: "第二幅原始图。",
+        visual_type: "map",
+        bounds: { left: 0.5, top: 0.24, width: 0.34, height: 0.38 },
+        source_visual_ref: null,
+        confirmed: true,
+      },
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("/api/v1/curation/pages?review_status=pending")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }));
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: originalSource,
+          curation: curationState(reviewedSnapshot),
+          annotation: { snapshot_id: reviewedSnapshot.snapshot_id, visuals },
+          standard_render: {
+            sha256: "c".repeat(64),
+            media_type: "image/png",
+            dpi: 144,
+            width_px: 1600,
+            height_px: 900,
+            url: "/api/v1/pages/page-1/render",
+          },
+        }), { status: 200 }));
+      }
+      const error = (message: string) => Promise.resolve(new Response(JSON.stringify({
+        error: { code: "simulated_failure", message },
+      }), { status: 409 }));
+      if (url.endsWith("/visual-a") && init?.method === "PATCH") {
+        return error("模拟编辑失败。");
+      }
+      if (url.endsWith("/visual-b/move") && init?.method === "POST") {
+        return error("模拟排序失败。");
+      }
+      if (url.endsWith("/visual-a") && init?.method === "DELETE") {
+        return error("模拟删除失败。");
+      }
+      throw new Error(`未覆盖的请求：${url} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑视觉对象 01" }));
+    const summary = await screen.findByRole("textbox", { name: "视觉对象 01 summary" });
+    await userEvent.clear(summary);
+    await userEvent.type(summary, "失败后必须保留的本地表单。");
+    await userEvent.click(screen.getByRole("button", { name: "右移" }));
+    const saveEdit = screen.getAllByRole("button", { name: "保存修改" })
+      .find((button) => !(button as HTMLButtonElement).disabled);
+    expect(saveEdit).toBeDefined();
+    await userEvent.click(saveEdit!);
+    expect(await screen.findByText(/模拟编辑失败。 当前范围和表单内容仍保留/)).toBeInTheDocument();
+    expect(summary).toHaveValue("失败后必须保留的本地表单。");
+    expect(screen.getByRole("button", { name: /视觉对象 01 框选范围/ }))
+      .toHaveStyle({ left: "8.1%" });
+
+    await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    const moveButton = screen.getByRole("button", { name: "视觉对象 02 上移" });
+    await userEvent.click(moveButton);
+    expect(await screen.findByText(/模拟排序失败。 原顺序与原编号仍保留/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑视觉对象 01" })).toHaveTextContent("第一幅原始图。");
+    expect(screen.getByRole("button", { name: "编辑视觉对象 02" })).toHaveTextContent("第二幅原始图。");
+    await waitFor(() => expect(moveButton).toHaveFocus());
+
+    await userEvent.click(screen.getByRole("button", { name: "删除视觉对象 01" }));
+    const confirmDelete = await screen.findByRole("button", { name: "确认删除视觉对象 01" });
+    await userEvent.click(confirmDelete);
+    expect(await screen.findByText(/模拟删除失败。 原对象与原编号仍保留/)).toBeInTheDocument();
+    await waitFor(() => expect(confirmDelete).toHaveFocus());
+    expect(document.querySelectorAll("[data-visual-ref]")).toHaveLength(2);
+    expect(document.querySelector("[data-visual-ref='visual-a']")).not.toBeNull();
+    expect(document.querySelector("[data-visual-ref='visual-b']")).not.toBeNull();
   });
 
   it("切换页面前明确询问是否放弃未保存的来源修改", async () => {

@@ -2303,7 +2303,7 @@ def _clone_curation_snapshot(
         return None
     source = connection.execute(
         """
-        SELECT overview, source_content_json, created_by
+        SELECT overview, source_content_json, capture_required, created_by
         FROM curation_snapshots WHERE snapshot_id = ?
         """,
         (source_snapshot_id,),
@@ -2315,8 +2315,8 @@ def _clone_curation_snapshot(
         """
         INSERT INTO curation_snapshots (
             snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
-            overview, source_content_json, created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            overview, source_content_json, capture_required, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot_id,
@@ -2325,6 +2325,7 @@ def _clone_curation_snapshot(
             source_snapshot_id,
             source["overview"],
             source["source_content_json"],
+            source["capture_required"] if preserve_visual_refs else 0,
             source["created_by"],
             now,
         ),

@@ -231,6 +231,7 @@ export function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (document.querySelector("[aria-modal='true']")) return;
       if (!isMapping && event.key.toLowerCase() === "r") {
         event.preventDefault();
         refresh();
