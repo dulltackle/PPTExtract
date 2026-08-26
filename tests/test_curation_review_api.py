@@ -37,6 +37,7 @@ def _ingest_plain_text_page(
     monkeypatch: pytest.MonkeyPatch,
     *,
     content: NormalizedPageContent | None = None,
+    idempotency_key: str = "curation-review-source",
 ) -> dict[str, object]:
     normalized = content or NormalizedPageContent(
         titles=("公开来源标题",),
@@ -76,7 +77,7 @@ def _ingest_plain_text_page(
     monkeypatch.setattr("pptextract.ingest_workflow.render_standard_pages", render)
     accepted = client.post(
         "/api/v1/documents",
-        headers={"Idempotency-Key": "curation-review-source"},
+        headers={"Idempotency-Key": idempotency_key},
         files={
             "file": (
                 "public-curation-review.pptx",
@@ -87,9 +88,167 @@ def _ingest_plain_text_page(
     )
     assert accepted.status_code == 202
     assert run_once(settings) is True
-    page = client.get("/api/v1/curation/pages").json()["pages"][0]
+    page = next(
+        candidate
+        for candidate in client.get("/api/v1/curation/pages").json()["pages"]
+        if candidate["document_id"] == accepted.json()["document_id"]
+    )
     assert page["page_id"]
     return page
+
+
+def test_pending_page_can_be_excluded_without_source_review_and_reopened_with_audit_history(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(client, settings, monkeypatch)
+    page_id = str(page["page_id"])
+
+    excluded = client.post(
+        f"/api/v1/pages/{page_id}/exclude",
+        headers={"X-Actor-ID": "curator-exclude"},
+        json={"reason": "irrelevant", "note": "与当前知识库无关。"},
+    )
+
+    assert excluded.status_code == 200
+    assert excluded.json()["review"] == {
+        "status": "excluded",
+        "reviewed_by": "curator-exclude",
+        "reviewed_at": excluded.json()["review"]["reviewed_at"],
+        "source_version_id": page["version_id"],
+        "inherited_from_page_version_id": None,
+        "snapshot_id": None,
+        "exclusion_reason": "irrelevant",
+        "exclusion_note": "与当前知识库无关。",
+    }
+    detail = client.get(f"/api/v1/pages/{page_id}").json()
+    assert detail["review"]["status"] == "excluded"
+    assert detail["review"]["exclusion_reason"] == "irrelevant"
+
+    frozen = client.post(
+        f"/api/v1/pages/{page_id}/exclude",
+        json={"reason": "duplicate", "note": None},
+    )
+    assert frozen.status_code == 409
+    assert frozen.json()["error"]["code"] == "page_not_pending"
+
+    reopened = client.post(
+        f"/api/v1/pages/{page_id}/reopen",
+        headers={"X-Actor-ID": "curator-reopen"},
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["review"] == {
+        "status": "pending",
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "source_version_id": None,
+        "inherited_from_page_version_id": None,
+        "snapshot_id": None,
+        "exclusion_reason": None,
+        "exclusion_note": None,
+    }
+    assert client.get(f"/api/v1/pages/{page_id}").json()["review"]["status"] == "pending"
+
+    with connect(settings) as connection:
+        events = connection.execute(
+            """
+            SELECT event_type, actor_id, reason, note
+            FROM page_review_events
+            WHERE page_version_id = (
+                SELECT page_version_id FROM page_versions WHERE page_id = ?
+            )
+            ORDER BY occurred_at, rowid
+            """,
+            (page_id,),
+        ).fetchall()
+    assert [dict(event) for event in events] == [
+        {
+            "event_type": "excluded",
+            "actor_id": "curator-exclude",
+            "reason": "irrelevant",
+            "note": "与当前知识库无关。",
+        },
+        {
+            "event_type": "reopened",
+            "actor_id": "curator-reopen",
+            "reason": None,
+            "note": None,
+        },
+    ]
+
+
+def test_batch_exclusion_reports_each_page_and_keeps_conflicts_visible(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    first = _ingest_plain_text_page(
+        client,
+        settings,
+        monkeypatch,
+        idempotency_key="curation-batch-first",
+    )
+    second = _ingest_plain_text_page(
+        client,
+        settings,
+        monkeypatch,
+        idempotency_key="curation-batch-second",
+    )
+    first_id = str(first["page_id"])
+    second_id = str(second["page_id"])
+    already_frozen = client.post(
+        f"/api/v1/pages/{second_id}/exclude",
+        json={"reason": "duplicate", "note": None},
+    )
+    assert already_frozen.status_code == 200
+
+    batched = client.post(
+        "/api/v1/pages/batch-exclude",
+        headers={"X-Actor-ID": "curator-batch"},
+        json={
+            "page_ids": [first_id, second_id],
+            "reason": "no_meaningful_content",
+            "note": "统一批次处置。",
+        },
+    )
+
+    assert batched.status_code == 207
+    assert batched.json() == {
+        "requested": 2,
+        "excluded": [first_id],
+        "failed": [
+            {
+                "page_id": second_id,
+                "code": "page_not_pending",
+                "message": "此页已不再是待处理状态。",
+            }
+        ],
+        "complete": False,
+    }
+    with connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT pv.page_id, events.event_type, events.actor_id, events.reason
+            FROM page_review_events AS events
+            JOIN page_versions AS pv ON pv.page_version_id = events.page_version_id
+            WHERE pv.page_id IN (?, ?)
+            ORDER BY pv.page_id, events.occurred_at, events.rowid
+            """,
+            (first_id, second_id),
+        ).fetchall()
+    by_page = {
+        page_id: [dict(row) for row in rows if row["page_id"] == page_id]
+        for page_id in (first_id, second_id)
+    }
+    assert by_page[first_id] == [
+        {
+            "page_id": first_id,
+            "event_type": "excluded",
+            "actor_id": "curator-batch",
+            "reason": "no_meaningful_content",
+        }
+    ]
+    assert len(by_page[second_id]) == 1
+    assert by_page[second_id][0]["reason"] == "duplicate"
 
 
 def _review_plain_text_page(

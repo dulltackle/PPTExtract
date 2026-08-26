@@ -378,6 +378,13 @@ def test_unchanged_page_inherits_formal_annotation_and_original_review(
         "exclusion_note": None,
     }
     assert detail["review"]["inherited_from_page_version_id"] is not None
+    inherited_pages = client.get(
+        "/api/v1/curation/pages", params={"review_status": "inherited"}
+    )
+    assert inherited_pages.status_code == 200
+    inherited_payload = inherited_pages.json()["pages"]
+    assert [item["page_id"] for item in inherited_payload] == [inherited["page_id"]]
+    assert inherited_payload[0]["review"] == detail["review"]
     assert detail["annotation"]["source_snapshot_id"] == source_snapshot_id
     assert detail["annotation"]["overview"] == "经人工确认的结论"
     assert detail["annotation"]["visuals"] == [

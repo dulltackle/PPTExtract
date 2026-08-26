@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -287,7 +287,9 @@ def initialize_database(settings: Settings) -> None:
                 event_id TEXT PRIMARY KEY,
                 page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
                 event_type TEXT NOT NULL CHECK (
-                    event_type IN ('approved', 'excluded', 'inherited', 'prefilled')
+                    event_type IN (
+                        'approved', 'excluded', 'reopened', 'inherited', 'prefilled'
+                    )
                 ),
                 actor_id TEXT,
                 occurred_at TEXT NOT NULL,
@@ -535,6 +537,8 @@ def initialize_database(settings: Settings) -> None:
                 )
         if existing_version < 14:
             _backfill_page_version_image_sources(connection)
+        if 0 < existing_version < 17:
+            _migrate_page_review_events_for_reopen(connection)
         for row in connection.execute(
             "SELECT job_id, payload_json FROM jobs WHERE kind = 'document.ingest'"
         ):
@@ -555,6 +559,41 @@ def initialize_database(settings: Settings) -> None:
             """
         )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _migrate_page_review_events_for_reopen(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        BEGIN IMMEDIATE;
+        DROP TABLE IF EXISTS page_review_events_v17;
+        CREATE TABLE page_review_events_v17 (
+            event_id TEXT PRIMARY KEY,
+            page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+            event_type TEXT NOT NULL CHECK (
+                event_type IN (
+                    'approved', 'excluded', 'reopened', 'inherited', 'prefilled'
+                )
+            ),
+            actor_id TEXT,
+            occurred_at TEXT NOT NULL,
+            source_version_id TEXT REFERENCES document_versions(version_id),
+            source_page_version_id TEXT REFERENCES page_versions(page_version_id),
+            snapshot_id TEXT REFERENCES curation_snapshots(snapshot_id),
+            reason TEXT,
+            note TEXT
+        );
+        INSERT INTO page_review_events_v17 (
+            event_id, page_version_id, event_type, actor_id, occurred_at,
+            source_version_id, source_page_version_id, snapshot_id, reason, note
+        )
+        SELECT event_id, page_version_id, event_type, actor_id, occurred_at,
+               source_version_id, source_page_version_id, snapshot_id, reason, note
+        FROM page_review_events;
+        DROP TABLE page_review_events;
+        ALTER TABLE page_review_events_v17 RENAME TO page_review_events;
+        COMMIT;
+        """
+    )
 
 
 def _backfill_page_version_image_sources(connection: sqlite3.Connection) -> None:

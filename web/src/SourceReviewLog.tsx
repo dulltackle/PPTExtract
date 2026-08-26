@@ -9,11 +9,14 @@ import {
   completeCurationSourceReview,
   confirmCurationSource,
   type CurationPage,
+  excludeCurationPage,
+  type ExclusionReason,
   type ImageDisposition,
   type ImageIgnoreReason,
   loadPageDetail,
   OperatorError,
   type PageDetail,
+  reopenCurationPage,
   saveCurationSnapshot,
   saveCurationImageSource,
   type SourceContent,
@@ -32,6 +35,14 @@ const IGNORE_REASONS: Array<{ value: ImageIgnoreReason; label: string }> = [
   { value: "expressed_elsewhere", label: "其他来源已完整表达" },
   { value: "not_relevant", label: "与页面知识无关" },
   { value: "corrupt_or_unverifiable", label: "内容损坏或无法核验" },
+  { value: "other", label: "其他" },
+];
+
+const EXCLUSION_REASONS: Array<{ value: ExclusionReason; label: string }> = [
+  { value: "no_meaningful_content", label: "无有意义内容" },
+  { value: "duplicate", label: "重复内容" },
+  { value: "irrelevant", label: "与知识库无关" },
+  { value: "unreadable", label: "无法可靠阅读" },
   { value: "other", label: "其他" },
 ];
 
@@ -226,6 +237,8 @@ export function SourceReviewLog({
   statusRef,
   onDirtyChange,
   onApproved,
+  onExcluded,
+  onReopened,
   externalCuration,
   captureVisuals,
   focusApprovalNonce,
@@ -244,6 +257,8 @@ export function SourceReviewLog({
   statusRef: RefObject<HTMLDivElement | null>;
   onDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
+  onExcluded: () => Promise<void>;
+  onReopened: () => Promise<void>;
   externalCuration: CurationState | null;
   captureVisuals: CurationVisual[];
   focusApprovalNonce: number;
@@ -274,13 +289,20 @@ export function SourceReviewLog({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryRevision, setRetryRevision] = useState(0);
-  const [operation, setOperation] = useState<"save" | "image" | "confirm" | "review" | "approve" | null>(null);
+  const [operation, setOperation] = useState<"save" | "image" | "confirm" | "review" | "approve" | "exclude" | "reopen" | null>(null);
   const [focusTarget, setFocusTarget] = useState<"confirm" | "review" | "approve" | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(arrivalAnnouncement);
+  const [exclusionReason, setExclusionReason] = useState<ExclusionReason | "">("");
+  const [exclusionNote, setExclusionNote] = useState("");
+  const [showReopen, setShowReopen] = useState(false);
   const firstFieldRef = useRef<HTMLTextAreaElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
+  const exclusionReasonRef = useRef<HTMLSelectElement>(null);
+  const reopenTriggerRef = useRef<HTMLButtonElement>(null);
+  const reopenDialogRef = useRef<HTMLElement>(null);
+  const reopenSubmitRef = useRef<HTMLButtonElement>(null);
   const imageChoiceRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const imageFieldRefs = useRef<Record<string, HTMLElement | null>>({});
 
@@ -311,6 +333,9 @@ export function SourceReviewLog({
         setImageDimensions({});
         setPreviewFailures({});
         setPreviewRevisions({});
+        setExclusionReason("");
+        setExclusionNote("");
+        setShowReopen(false);
         window.requestAnimationFrame(() => firstFieldRef.current?.focus());
       })
       .catch((cause) => {
@@ -393,7 +418,7 @@ export function SourceReviewLog({
   }, [body, curation, drafts, imageDirty, imageDirtyRefs, original, textDirty, titles]);
   const snapshot = curation?.current_snapshot ?? null;
   const busy = operation !== null;
-  const pending = page.review_status === "pending";
+  const pending = (detail?.review_status ?? page.review_status) === "pending";
 
   useEffect(() => {
     if (busy || !focusTarget) return;
@@ -647,21 +672,123 @@ export function SourceReviewLog({
     }
   }, [approvalPathReady, busy, curation?.can_approve, dirty, onApproved, page.page_id, snapshot]);
 
+  const handleExclude = useCallback(async () => {
+    if (!page.page_id || !pending || !exclusionReason || busy) return;
+    setOperation("exclude");
+    setAnnouncement("正在记录整页排除原因并冻结当前页面…");
+    try {
+      const result = await excludeCurationPage(
+        page.page_id,
+        exclusionReason,
+        exclusionNote.trim() || null,
+      );
+      setDetail((current) => current ? {
+        ...current,
+        review_status: "excluded",
+        review: result.review,
+      } : current);
+      setAnnouncement("页面已排除，正在转到下一待处理页。");
+      await onExcluded();
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 当前原因和补充说明仍保留，可重试。`
+          : "排除未完成；当前原因和补充说明仍保留，可重试。",
+      );
+    } finally {
+      setOperation(null);
+    }
+  }, [busy, exclusionNote, exclusionReason, onExcluded, page.page_id, pending]);
+
+  const closeReopenDialog = useCallback(() => {
+    setShowReopen(false);
+    window.requestAnimationFrame(() => reopenTriggerRef.current?.focus());
+  }, []);
+
+  const openReopenDialog = useCallback(() => {
+    if (pending || busy) return;
+    setShowReopen(true);
+  }, [busy, pending]);
+
+  const handleReopen = useCallback(async () => {
+    if (!page.page_id || pending || busy) return;
+    setOperation("reopen");
+    try {
+      const result = await reopenCurationPage(page.page_id);
+      setDetail((current) => current ? {
+        ...current,
+        review_status: "pending",
+        review: result.review,
+      } : current);
+      setShowReopen(false);
+      setAnnouncement("页面已重新打开，恢复为待处理并解锁编辑。");
+      await onReopened();
+      window.requestAnimationFrame(() => firstFieldRef.current?.focus());
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 页面仍保持冻结，可重试。`
+          : "重新打开未完成；页面仍保持冻结，可重试。",
+      );
+      window.requestAnimationFrame(() => reopenSubmitRef.current?.focus());
+    } finally {
+      setOperation(null);
+    }
+  }, [busy, onReopened, page.page_id, pending]);
+
+  useEffect(() => {
+    if (!showReopen) return;
+    const frame = window.requestAnimationFrame(() => reopenSubmitRef.current?.focus());
+    const handleDialogKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        closeReopenDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(
+        reopenDialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? [],
+      );
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleDialogKey);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleDialogKey);
+    };
+  }, [busy, closeReopenDialog, showReopen]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
       if (document.querySelector("[aria-modal='true']")) return;
-      if (
-        event.key.toLowerCase() !== "a" || !curation?.can_approve ||
-        !approvalPathReady || dirty || busy
-      ) return;
-      event.preventDefault();
-      void handleApprove();
+      const key = event.key.toLowerCase();
+      if (key === "x" && pending && !busy) {
+        event.preventDefault();
+        exclusionReasonRef.current?.focus();
+      } else if (key === "r" && !pending && !busy) {
+        event.preventDefault();
+        openReopenDialog();
+      } else if (
+        key === "a" && curation?.can_approve && approvalPathReady && !dirty && !busy
+      ) {
+        event.preventDefault();
+        void handleApprove();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [approvalPathReady, busy, curation?.can_approve, dirty, handleApprove]);
+  }, [approvalPathReady, busy, curation?.can_approve, dirty, handleApprove, openReopenDialog, pending]);
 
   if (loading) {
     return (
@@ -689,9 +816,14 @@ export function SourceReviewLog({
     imageDraftComplete(draftFromImage(item))
   )).length;
   const displayedImageBlockers = localImageBlockers(curation.image_sources.items, drafts);
+  const review = detail.review ?? page.review ?? null;
+  const frozenStatus = review?.status ?? detail.review_status;
+  const frozenLabel = frozenStatus === "excluded" ? "已排除" : "已批准";
+  const frozenCopy = frozenStatus === "excluded" ? "排除结论已冻结" : "批准结论已冻结";
 
   return (
-    <div className="source-review-log" aria-busy={busy}>
+    <>
+    <div className="source-review-log" aria-busy={busy} inert={showReopen ? true : undefined}>
       <header className="source-review-header">
         <div>
           <h2>来源日志</h2>
@@ -700,8 +832,8 @@ export function SourceReviewLog({
             <span>原始提取与当前编辑值并置</span>
           </p>
         </div>
-        <span className={`pending-chip ${pending ? "" : "is-approved"}`}>
-          {pending ? "待处理" : "已批准"}
+        <span className={`pending-chip ${pending ? "" : frozenStatus === "excluded" ? "is-excluded" : "is-approved"}`}>
+          {pending ? "待处理" : frozenLabel}
         </span>
       </header>
 
@@ -1235,7 +1367,7 @@ export function SourceReviewLog({
             <h3 id="review-gate-heading">页面结论</h3>
             <p>
               {!pending
-                ? "批准结论已冻结"
+                ? frozenCopy
                 : blockers.length
                   ? `${blockers.length} 项结构性阻塞`
                   : !approvalPathReady
@@ -1247,7 +1379,7 @@ export function SourceReviewLog({
           </div>
           <span>
             {!pending
-              ? "已批准"
+              ? frozenLabel
               : blockers.length
                 ? "阻塞"
                 : approvalPathReady
@@ -1271,24 +1403,108 @@ export function SourceReviewLog({
               ? approvalPathReady
                 ? "当前确认来源可生成非空 Chunk 正文。"
                 : "请在中央标准页渲染结果下方选择来源是否完整。"
-              : "当前页面保留已批准快照及其来源审核记录。"}
+              : `当前页面保留${frozenLabel}结论及其来源审核记录。`}
           </p>
         )}
-        <button
-          type="button"
-          ref={approveRef}
-          disabled={
-            !pending || busy || dirty || !curation.can_approve || !approvalPathReady
-          }
-          onClick={() => void handleApprove()}
-        >
-          {!pending
-            ? "页面已批准"
-            : operation === "approve"
-              ? "正在批准"
-              : "批准并转到下一待处理页"}
-        </button>
+        {!pending && review ? (
+          <dl className="frozen-review-facts">
+            <div><dt>原结论</dt><dd>{frozenLabel}</dd></div>
+            {review.inherited_from_page_version_id ? (
+              <div><dt>继承来源</dt><dd>{review.inherited_from_page_version_id}</dd></div>
+            ) : null}
+            <div><dt>原策展人员</dt><dd>{review.reviewed_by ?? "历史记录未署名"}</dd></div>
+            <div><dt>结论时间</dt><dd>{review.reviewed_at ? formatTime(review.reviewed_at) : "历史记录未提供时间"}</dd></div>
+            {review.exclusion_reason ? (
+              <div><dt>排除原因</dt><dd>{EXCLUSION_REASONS.find((item) => item.value === review.exclusion_reason)?.label ?? review.exclusion_reason}</dd></div>
+            ) : null}
+            {review.exclusion_note ? <div><dt>补充说明</dt><dd>{review.exclusion_note}</dd></div> : null}
+          </dl>
+        ) : null}
+        {pending ? (
+          <div className="review-decision-actions">
+            <button
+              type="button"
+              ref={approveRef}
+              disabled={busy || dirty || !curation.can_approve || !approvalPathReady}
+              onClick={() => void handleApprove()}
+            >
+              {operation === "approve" ? "正在批准" : "批准并转到下一待处理页"}
+            </button>
+            <div className="page-exclusion-form">
+              <label>
+                <span>整页排除原因</span>
+                <select
+                  ref={exclusionReasonRef}
+                  aria-label="整页排除原因"
+                  value={exclusionReason}
+                  disabled={busy}
+                  onChange={(event) => setExclusionReason(event.target.value as ExclusionReason | "")}
+                >
+                  <option value="">请选择规定原因</option>
+                  {EXCLUSION_REASONS.map((reason) => (
+                    <option key={reason.value} value={reason.value}>{reason.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>补充说明（可选）</span>
+                <textarea
+                  aria-label="整页排除补充说明"
+                  rows={2}
+                  value={exclusionNote}
+                  disabled={busy}
+                  onChange={(event) => setExclusionNote(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="is-danger"
+                disabled={busy || !exclusionReason}
+                onClick={() => void handleExclude()}
+              >
+                {operation === "exclude" ? "正在排除" : "排除并转到下一待处理页"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            ref={reopenTriggerRef}
+            type="button"
+            className="reopen-page-button"
+            disabled={busy}
+            onClick={openReopenDialog}
+          >重新打开此页</button>
+        )}
       </section>
     </div>
+    {showReopen ? (
+      <div
+        className="dialog-backdrop reopen-page-backdrop"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !busy) closeReopenDialog();
+        }}
+      >
+        <section
+          ref={reopenDialogRef}
+          className="reopen-page-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reopen-page-heading"
+        >
+          <h2 id="reopen-page-heading">重新打开第 {page.page_number} 页？</h2>
+          <p>页面将恢复为待处理并解锁编辑。原结论不会改写，只保留在审计历史中。</p>
+          <div>
+            <button type="button" disabled={busy} onClick={closeReopenDialog}>取消，保持冻结</button>
+            <button
+              ref={reopenSubmitRef}
+              type="button"
+              disabled={busy}
+              onClick={() => void handleReopen()}
+            >{operation === "reopen" ? "正在重新打开" : "确认重新打开"}</button>
+          </div>
+        </section>
+      </div>
+    ) : null}
+    </>
   );
 }

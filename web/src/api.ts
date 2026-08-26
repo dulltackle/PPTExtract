@@ -68,18 +68,38 @@ export interface EnablementState {
   error: JobError | null;
 }
 
+export type ReviewStatus = "pending" | "approved" | "excluded";
+
+export type ExclusionReason =
+  | "no_meaningful_content"
+  | "duplicate"
+  | "irrelevant"
+  | "unreadable"
+  | "other";
+
+export interface PageReview {
+  status: ReviewStatus;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  source_version_id: string | null;
+  inherited_from_page_version_id: string | null;
+  exclusion_reason: ExclusionReason | null;
+  exclusion_note: string | null;
+}
+
 export interface CurationPage {
   page_id: string | null;
   chunk_id: string | null;
   document_id: string;
   version_id: string;
   page_number: number;
-  review_status: "pending" | "approved" | "excluded" | null;
+  review_status: ReviewStatus | null;
   title: string | null;
   hidden: boolean;
   enabled: boolean;
   source_reference: SourceReference;
   enablement: EnablementState | null;
+  review?: PageReview | null;
   rendering_warnings?: RenderingWarningSummary;
   version_rendering_warnings?: RenderingWarningSummary;
 }
@@ -235,7 +255,8 @@ export interface CurationState {
 export interface PageDetail {
   page_id: string;
   page_number: number;
-  review_status: "pending" | "approved" | "excluded";
+  review_status: ReviewStatus;
+  review?: PageReview;
   source_content: SourceContent;
   curation?: CurationState;
   annotation?: {
@@ -467,7 +488,7 @@ export async function confirmPageMapping(
 }
 
 export async function loadCurationPages(
-  reviewStatus: "pending" | "all" | "rendering-warnings",
+  reviewStatus: "pending" | "inherited" | "all" | "rendering-warnings",
   signal?: AbortSignal,
 ): Promise<CurationPage[]> {
   let response: Response;
@@ -723,6 +744,58 @@ export async function approveCurationPage(
   return readJson<{ review: { status: "approved" }; chunk_body: string }>(
     response,
     "批准未完成；页面仍保留在待处理队列。",
+  );
+}
+
+export async function excludeCurationPage(
+  pageId: string,
+  reason: ExclusionReason,
+  note: string | null,
+): Promise<{ review: PageReview & { status: "excluded" } }> {
+  const response = await fetch(`/api/v1/pages/${pageId}/exclude`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ reason, note }),
+  });
+  return readJson<{ review: PageReview & { status: "excluded" } }>(
+    response,
+    "排除未完成；页面仍保留在待处理队列。",
+  );
+}
+
+export async function reopenCurationPage(
+  pageId: string,
+): Promise<{ review: PageReview & { status: "pending" } }> {
+  const response = await fetch(`/api/v1/pages/${pageId}/reopen`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<{ review: PageReview & { status: "pending" } }>(
+    response,
+    "重新打开未完成；页面仍保持冻结。",
+  );
+}
+
+export interface BatchExclusionResult {
+  requested: number;
+  excluded: string[];
+  failed: Array<{ page_id: string; code: string; message: string }>;
+  complete: boolean;
+}
+
+export async function batchExcludeCurationPages(
+  pageIds: string[],
+  reason: ExclusionReason,
+  note: string | null,
+): Promise<BatchExclusionResult> {
+  const response = await fetch("/api/v1/pages/batch-exclude", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ page_ids: pageIds, reason, note }),
+  });
+  return readJson<BatchExclusionResult>(
+    response,
+    "批量排除未完成；已选页面保持不变，可重试。",
   );
 }
 

@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import {
+  batchExcludeCurationPages,
   confirmAllRenderingWarnings,
   confirmRenderingWarning,
   type CurationState,
@@ -24,6 +25,7 @@ import {
   moveCaptureVisual,
   OperatorError,
   type NormalizedBounds,
+  type ExclusionReason,
   type PageDetail,
   type RenderingWarning,
   saveCaptureVisual,
@@ -32,11 +34,25 @@ import {
 } from "./api";
 import { SourceReviewLog } from "./SourceReviewLog";
 
-type Filter = "pending" | "all" | "rendering-warnings";
+type Filter = "pending" | "inherited" | "all" | "rendering-warnings";
 
 interface PageOperation {
   submitting: boolean;
   announcement: string | null;
+}
+
+const EXCLUSION_REASON_OPTIONS: Array<{ value: ExclusionReason; label: string }> = [
+  { value: "no_meaningful_content", label: "无有意义内容" },
+  { value: "duplicate", label: "重复内容" },
+  { value: "irrelevant", label: "与知识库无关" },
+  { value: "unreadable", label: "无法可靠阅读" },
+  { value: "other", label: "其他" },
+];
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(
+    target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']"),
+  );
 }
 
 const phaseLabels: Record<string, string> = {
@@ -92,17 +108,36 @@ function PageRail({
   selectedKey,
   versionWarningSummary,
   interactionLocked,
+  selectedForBatch,
+  batchReason,
+  batchNote,
+  batchSubmitting,
+  batchAnnouncement,
   onFilter,
   onSelect,
+  onToggleBatch,
+  onBatchReason,
+  onBatchNote,
+  onBatchExclude,
 }: {
   pages: CurationPage[];
   filter: Filter;
   selectedKey: string | null;
   versionWarningSummary: CurationPage["version_rendering_warnings"];
   interactionLocked: boolean;
+  selectedForBatch: Set<string>;
+  batchReason: ExclusionReason | "";
+  batchNote: string;
+  batchSubmitting: boolean;
+  batchAnnouncement: string | null;
   onFilter: (filter: Filter) => void;
   onSelect: (key: string) => void;
+  onToggleBatch: (key: string, selected: boolean) => void;
+  onBatchReason: (reason: ExclusionReason | "") => void;
+  onBatchNote: (note: string) => void;
+  onBatchExclude: () => void;
 }) {
+  const selectedCount = selectedForBatch.size;
   return (
     <aside className="page-rail" aria-label="页清单">
       <div className="page-rail-heading">
@@ -111,7 +146,7 @@ function PageRail({
           <p>{pages.length} 页可见</p>
         </div>
         <div className="filter-tabs" aria-label="页清单筛选">
-          {(["pending", "all", "rendering-warnings"] as const).map((value) => (
+          {(["pending", "inherited", "all", "rendering-warnings"] as const).map((value) => (
             <button
               key={value}
               type="button"
@@ -120,7 +155,13 @@ function PageRail({
               disabled={interactionLocked}
               onClick={() => onFilter(value)}
             >
-              {value === "pending" ? "待处理" : value === "all" ? "全部" : "渲染警告"}
+              {value === "pending"
+                ? "待处理"
+                : value === "inherited"
+                  ? "已继承"
+                  : value === "all"
+                    ? "全部"
+                    : "渲染警告"}
             </button>
           ))}
         </div>
@@ -133,6 +174,51 @@ function PageRail({
           </div>
         ) : null}
       </div>
+      {selectedCount > 0 ? (
+        <section className="batch-exclusion-bar" role="region" aria-label="批量排除">
+          <header>
+            <strong>已选 {selectedCount} 页</strong>
+            <button type="button" disabled={batchSubmitting} onClick={() => {
+              selectedForBatch.forEach((key) => onToggleBatch(key, false));
+            }}>取消选择</button>
+          </header>
+          <label>
+            <span>统一排除原因</span>
+            <select
+              aria-label="统一排除原因"
+              value={batchReason}
+              disabled={batchSubmitting}
+              onChange={(event) => onBatchReason(event.target.value as ExclusionReason | "")}
+            >
+              <option value="">请选择原因</option>
+              {EXCLUSION_REASON_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>补充说明（可选）</span>
+            <textarea
+              aria-label="批量排除补充说明"
+              rows={2}
+              value={batchNote}
+              disabled={batchSubmitting}
+              onChange={(event) => onBatchNote(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="batch-exclusion-submit"
+            disabled={!batchReason || batchSubmitting}
+            onClick={onBatchExclude}
+          >
+            {batchSubmitting ? "正在逐页记录" : `批量排除 ${selectedCount} 页`}
+          </button>
+          {batchAnnouncement ? <p role="status">{batchAnnouncement}</p> : null}
+        </section>
+      ) : batchAnnouncement ? (
+        <div className="batch-exclusion-result" role="status">{batchAnnouncement}</div>
+      ) : null}
       <div className="page-list">
         {pages.length === 0 ? (
           <div className="page-list-empty">
@@ -145,11 +231,17 @@ function PageRail({
             </strong>
             <span>
               {filter === "pending"
-                ? "切换到“全部”可查看已处理页与隐藏页登记。"
+                ? "当前筛选保持不变。可检查继承结论或全部已启用页。"
                 : filter === "rendering-warnings"
                   ? "字体与动画风险会在标准页渲染完成后出现在这里。"
                   : "上传并处理版本后，源页会按原始顺序出现。"}
             </span>
+            {filter === "pending" ? (
+              <div className="page-list-empty-actions">
+                <button type="button" onClick={() => onFilter("inherited")}>查看已继承</button>
+                <button type="button" onClick={() => onFilter("all")}>查看全部</button>
+              </div>
+            ) : null}
           </div>
         ) : null}
         {pages.map((page) => {
@@ -161,15 +253,27 @@ function PageRail({
             ? `，渲染警告 ${page.rendering_warnings?.unconfirmed ?? 0}/${page.rendering_warnings?.total ?? 0} 未确认`
             : "";
           return (
-            <button
-              type="button"
-              className={`page-row ${hiddenUnprocessed ? "page-row--hidden" : ""} ${selectedKey === key ? "is-selected" : ""}`}
-              key={key}
-              aria-label={`第 ${page.page_number} 页，${title}，${status}${warningLabel}`}
-              aria-current={selectedKey === key ? "true" : undefined}
-              disabled={interactionLocked}
-              onClick={() => onSelect(key)}
-            >
+            <div className={`page-row-shell ${selectedForBatch.has(key) ? "is-batch-selected" : ""}`} key={key}>
+              {page.review_status === "pending" && page.page_id ? (
+                <label className="page-batch-check">
+                  <input
+                    type="checkbox"
+                    aria-label={`选择第 ${page.page_number} 页，${title}`}
+                    checked={selectedForBatch.has(key)}
+                    disabled={interactionLocked || batchSubmitting}
+                    onChange={(event) => onToggleBatch(key, event.target.checked)}
+                  />
+                  <span aria-hidden="true" />
+                </label>
+              ) : <span className="page-batch-check-placeholder" aria-hidden="true" />}
+              <button
+                type="button"
+                className={`page-row ${hiddenUnprocessed ? "page-row--hidden" : ""} ${selectedKey === key ? "is-selected" : ""}`}
+                aria-label={`第 ${page.page_number} 页，${title}，${status}${warningLabel}`}
+                aria-current={selectedKey === key ? "true" : undefined}
+                disabled={interactionLocked || batchSubmitting}
+                onClick={() => onSelect(key)}
+              >
               <span className="page-number">{String(page.page_number).padStart(2, "0")}</span>
               <span className={`page-state-mark ${hiddenUnprocessed ? "is-hollow" : ""}`} aria-hidden="true" />
               <span className="page-row-copy">
@@ -186,7 +290,8 @@ function PageRail({
                   !
                 </span>
               ) : null}
-            </button>
+              </button>
+            </div>
           );
         })}
       </div>
@@ -1302,6 +1407,8 @@ function InspectorPanel({
   onMarkSourceComplete,
   onSourceDirtyChange,
   onApproved,
+  onExcluded,
+  onReopened,
 }: {
   page: CurationPage | null;
   submitting: boolean;
@@ -1335,6 +1442,8 @@ function InspectorPanel({
   onMarkSourceComplete: (trigger: HTMLElement) => void;
   onSourceDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
+  onExcluded: () => Promise<void>;
+  onReopened: () => Promise<void>;
 }) {
   return (
     <aside
@@ -1368,6 +1477,8 @@ function InspectorPanel({
           statusRef={statusRef}
           onDirtyChange={onSourceDirtyChange}
           onApproved={onApproved}
+          onExcluded={onExcluded}
+          onReopened={onReopened}
           externalCuration={externalCuration}
           captureVisuals={captureVisuals}
           focusApprovalNonce={focusApprovalNonce}
@@ -1394,7 +1505,9 @@ export function CurationWorkbench() {
   const requestedPageParam = requestedParams.get("page");
   const requestedPageNumber = requestedPageParam === null ? null : Number(requestedPageParam);
   const [filter, setFilter] = useState<Filter>(
-    requestedFilter === "rendering-warnings" ? "rendering-warnings" : "pending",
+    requestedFilter === "rendering-warnings" || requestedFilter === "inherited" || requestedFilter === "all"
+      ? requestedFilter
+      : "pending",
   );
   const targetWarningId = requestedParams.get("warning");
   const [pages, setPages] = useState<CurationPage[]>([]);
@@ -1417,6 +1530,11 @@ export function CurationWorkbench() {
   const [focusApprovalNonce, setFocusApprovalNonce] = useState(0);
   const [focusCapturePathNonce, setFocusCapturePathNonce] = useState(0);
   const [approvalPathReady, setApprovalPathReady] = useState(false);
+  const [selectedForBatch, setSelectedForBatch] = useState<Set<string>>(new Set());
+  const [batchReason, setBatchReason] = useState<ExclusionReason | "">("");
+  const [batchNote, setBatchNote] = useState("");
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [batchAnnouncement, setBatchAnnouncement] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const poll = useRef<AbortController | null>(null);
   const timer = useRef<number | null>(null);
@@ -1474,6 +1592,18 @@ export function CurationWorkbench() {
   const selectedOperation = selectedKey ? operations[selectedKey] : undefined;
 
   useEffect(() => {
+    const eligible = new Set(
+      pages
+        .filter((page) => page.review_status === "pending" && page.page_id)
+        .map(pageKey),
+    );
+    setSelectedForBatch((current) => {
+      const next = new Set([...current].filter((key) => eligible.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [pages]);
+
+  useEffect(() => {
     setSelectedCuration(null);
     setCaptureVisuals([]);
     setCaptureEditing(false);
@@ -1518,8 +1648,48 @@ export function CurationWorkbench() {
     if (!confirmDiscard()) return;
     setSourceDirty(false);
     setCurationAnnouncement(null);
+    setSelectedForBatch(new Set());
+    setBatchReason("");
+    setBatchNote("");
+    setBatchAnnouncement(null);
     setFilter(nextFilter);
   }, [captureEditing, confirmDiscard]);
+
+  const handleToggleBatch = useCallback((key: string, checked: boolean) => {
+    setSelectedForBatch((current) => {
+      const next = new Set(current);
+      if (checked) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    setBatchAnnouncement(null);
+  }, []);
+
+  useEffect(() => {
+    const handleQueueKeyboard = (event: KeyboardEvent) => {
+      if (captureEditing || batchSubmitting || isTextEntryTarget(event.target)) return;
+      if (event.key === "Escape" && selectedForBatch.size > 0) {
+        event.preventDefault();
+        setSelectedForBatch(new Set());
+        setBatchReason("");
+        setBatchNote("");
+        setBatchAnnouncement("已退出批量选择。");
+        return;
+      }
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (!pages.length) return;
+      event.preventDefault();
+      const currentIndex = pages.findIndex((page) => pageKey(page) === selectedKeyRef.current);
+      const delta = event.key === "ArrowLeft" ? -1 : 1;
+      const nextIndex = currentIndex < 0
+        ? 0
+        : Math.min(pages.length - 1, Math.max(0, currentIndex + delta));
+      const target = pages[nextIndex];
+      if (target && pageKey(target) !== selectedKeyRef.current) handleSelect(pageKey(target));
+    };
+    document.addEventListener("keydown", handleQueueKeyboard);
+    return () => document.removeEventListener("keydown", handleQueueKeyboard);
+  }, [batchSubmitting, captureEditing, handleSelect, pages, selectedForBatch.size]);
 
   const updateOperation = useCallback(
     (targetKey: string, update: Partial<PageOperation>) => {
@@ -1684,25 +1854,116 @@ export function CurationWorkbench() {
     }
   };
 
-  const handleApproved = useCallback(async () => {
+  const nextPendingKeyAfter = useCallback((
+    currentKey: string | null,
+    removedPageIds: ReadonlySet<string> = new Set(),
+  ) => {
+    const currentIndex = pages.findIndex((page) => pageKey(page) === currentKey);
+    const orderedPages = currentIndex < 0
+      ? pages
+      : [...pages.slice(currentIndex + 1), ...pages.slice(0, currentIndex)];
+    const nextPending = orderedPages.find((page) => (
+      page.review_status === "pending" &&
+      pageKey(page) !== currentKey &&
+      (!page.page_id || !removedPageIds.has(page.page_id))
+    ));
+    return nextPending ? pageKey(nextPending) : null;
+  }, [pages]);
+
+  const advanceAfterConclusion = useCallback(async (conclusion: "批准" | "排除") => {
     setSourceDirty(false);
-    const approvedKey = selectedKeyRef.current;
-    const nextPages = await loadPages(filter, approvedKey);
-    const approvedIndex = nextPages.findIndex((page) => pageKey(page) === approvedKey);
-    const orderedPages = approvedIndex < 0
-      ? nextPages
-      : [
-          ...nextPages.slice(approvedIndex + 1),
-          ...nextPages.slice(0, approvedIndex),
-        ];
-    const nextPending = orderedPages.find((page) => page.review_status === "pending");
+    const concludedKey = selectedKeyRef.current;
+    const preferredNextKey = nextPendingKeyAfter(concludedKey);
+    if (concludedKey) {
+      setSelectedForBatch((current) => {
+        if (!current.has(concludedKey)) return current;
+        const next = new Set(current);
+        next.delete(concludedKey);
+        return next;
+      });
+    }
+    const nextPages = await loadPages(filter, preferredNextKey);
+    const nextPending = nextPages.find((page) => (
+      page.review_status === "pending" &&
+      (preferredNextKey === null || pageKey(page) === preferredNextKey)
+    )) ?? nextPages.find((page) => page.review_status === "pending");
     if (nextPending) setSelectedKey(pageKey(nextPending));
     setCurationAnnouncement(
       nextPending
-        ? "上一页已批准。已转到下一待处理页。"
+        ? `上一页已${conclusion}。已转到下一待处理页。`
         : "待处理队列已清空",
     );
+  }, [filter, loadPages, nextPendingKeyAfter]);
+
+  const handleApproved = useCallback(async () => {
+    await advanceAfterConclusion("批准");
+  }, [advanceAfterConclusion]);
+
+  const handleExcluded = useCallback(async () => {
+    await advanceAfterConclusion("排除");
+  }, [advanceAfterConclusion]);
+
+  const handleReopened = useCallback(async () => {
+    setSourceDirty(false);
+    const reopenedKey = selectedKeyRef.current;
+    await loadPages(filter, reopenedKey);
+    setCurationAnnouncement("页面已重新打开，恢复为待处理并解锁编辑。");
   }, [filter, loadPages]);
+
+  const handleBatchExclude = useCallback(async () => {
+    if (!batchReason || batchSubmitting || selectedForBatch.size === 0) return;
+    const selectedPages = pages.filter((page) => (
+      selectedForBatch.has(pageKey(page)) && page.review_status === "pending" && page.page_id
+    ));
+    const pageIds = selectedPages.map((page) => page.page_id as string);
+    if (!pageIds.length) return;
+    setBatchSubmitting(true);
+    setBatchAnnouncement(`正在逐页记录 ${pageIds.length} 页的排除结论…`);
+    try {
+      const result = await batchExcludeCurationPages(
+        pageIds,
+        batchReason,
+        batchNote.trim() || null,
+      );
+      const failedIds = new Set(result.failed.map((failure) => failure.page_id));
+      setSelectedForBatch(new Set(
+        selectedPages
+          .filter((page) => page.page_id && failedIds.has(page.page_id))
+          .map(pageKey),
+      ));
+      const failureCopy = result.failed.length
+        ? ` ${result.failed.length} 页未处理：${result.failed.map((failure) => `第 ${selectedPages.find((page) => page.page_id === failure.page_id)?.page_number ?? "?"} 页（${failure.message}）`).join("；")} 请刷新或重试。`
+        : "";
+      setBatchAnnouncement(
+        result.excluded.length
+          ? `已批量排除 ${result.excluded.length} 页。每页均已分别记录审核事件。${failureCopy}`
+          : `没有页面完成排除。${failureCopy.trim()}`,
+      );
+      if (!result.failed.length) {
+        setBatchReason("");
+        setBatchNote("");
+      }
+      const currentKey = selectedKeyRef.current;
+      const currentPageId = pages.find((page) => pageKey(page) === currentKey)?.page_id;
+      const preferredNextKey = nextPendingKeyAfter(currentKey, new Set(result.excluded));
+      const nextPages = await loadPages(filter, preferredNextKey);
+      if (currentPageId && result.excluded.includes(currentPageId)) {
+        const nextPending = nextPages.find((page) => (
+          page.review_status === "pending" &&
+          (preferredNextKey === null || pageKey(page) === preferredNextKey)
+        )) ?? nextPages.find((page) => page.review_status === "pending");
+        if (nextPending) setSelectedKey(pageKey(nextPending));
+      }
+    } catch (cause) {
+      setBatchAnnouncement(
+        cause instanceof OperatorError
+          ? `${cause.message} 已选页面和原因仍保留，可重试。`
+          : "批量排除未完成；已选页面和原因仍保留，可重试。",
+      );
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }, [batchNote, batchReason, batchSubmitting, filter, loadPages, nextPendingKeyAfter, pages, selectedForBatch]);
 
   const applyVisualMutation = useCallback((result: {
     curation: CurationState;
@@ -1882,8 +2143,17 @@ export function CurationWorkbench() {
         selectedKey={selectedKey}
         versionWarningSummary={selected?.version_rendering_warnings}
         interactionLocked={captureEditing}
+        selectedForBatch={selectedForBatch}
+        batchReason={batchReason}
+        batchNote={batchNote}
+        batchSubmitting={batchSubmitting}
+        batchAnnouncement={batchAnnouncement}
         onFilter={handleFilter}
         onSelect={handleSelect}
+        onToggleBatch={handleToggleBatch}
+        onBatchReason={setBatchReason}
+        onBatchNote={setBatchNote}
+        onBatchExclude={() => void handleBatchExclude()}
       />
       <EvidencePanel
         page={selected}
@@ -1927,6 +2197,8 @@ export function CurationWorkbench() {
         onMarkSourceComplete={(trigger) => void handleMarkSourceComplete(trigger)}
         onSourceDirtyChange={setSourceDirty}
         onApproved={handleApproved}
+        onExcluded={handleExcluded}
+        onReopened={handleReopened}
       />
     </main>
     {deleteCandidate ? (

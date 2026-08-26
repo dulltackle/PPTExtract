@@ -36,6 +36,13 @@ VISUAL_TYPES = {
     "illustration",
     "other",
 }
+EXCLUSION_REASONS = {
+    "no_meaningful_content",
+    "duplicate",
+    "irrelevant",
+    "unreadable",
+    "other",
+}
 CAPTURE_PADDING_PX = 8
 
 
@@ -47,7 +54,8 @@ def _read_current_page(
         SELECT pv.page_version_id, pv.page_id, pv.document_id, pv.version_id,
                pv.page_number, pv.review_status, pv.source_content_json,
                pv.current_snapshot_id, pv.render_sha256, pv.render_media_type,
-               pv.render_width_px, pv.render_height_px
+               pv.render_width_px, pv.render_height_px,
+               pv.inherited_from_page_version_id
         FROM page_versions AS pv
         JOIN documents AS d
           ON d.document_id = pv.document_id
@@ -1649,3 +1657,174 @@ def approve_page(
             },
             "chunk_body": chunk_body,
         }
+
+
+def _validate_exclusion(reason: str, note: str | None) -> tuple[str, str | None]:
+    normalized_reason = reason.strip()
+    if normalized_reason not in EXCLUSION_REASONS:
+        raise CurationRequestError(422, "invalid_exclusion_reason", "请选择规定的整页排除原因。")
+    normalized_note = None if note is None or not note.strip() else note.strip()
+    return normalized_reason, normalized_note
+
+
+def exclude_page(
+    settings: Settings,
+    *,
+    page_id: str,
+    actor_id: str,
+    reason: str,
+    note: str | None,
+) -> dict[str, Any]:
+    normalized_reason, normalized_note = _validate_exclusion(reason, note)
+    with transaction(settings) as connection:
+        page = _read_current_page(connection, page_id)
+        if page["review_status"] != "pending":
+            raise CurationRequestError(409, "page_not_pending", "此页已不再是待处理状态。")
+        now = timestamp()
+        updated = connection.execute(
+            """
+            UPDATE page_versions
+            SET review_status = 'excluded', reviewed_by = ?, reviewed_at = ?,
+                review_source_version_id = ?, exclusion_reason = ?,
+                exclusion_note = ?
+            WHERE page_version_id = ? AND review_status = 'pending'
+            """,
+            (
+                actor_id,
+                now,
+                page["version_id"],
+                normalized_reason,
+                normalized_note,
+                page["page_version_id"],
+            ),
+        )
+        if updated.rowcount != 1:
+            raise CurationRequestError(
+                409,
+                "curation_state_changed",
+                "页面状态已被其他会话改变，请重新加载。",
+            )
+        connection.execute(
+            """
+            INSERT INTO page_review_events (
+                event_id, page_version_id, event_type, actor_id, occurred_at,
+                source_version_id, source_page_version_id, snapshot_id,
+                reason, note
+            ) VALUES (?, ?, 'excluded', ?, ?, ?, NULL, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                page["page_version_id"],
+                actor_id,
+                now,
+                page["version_id"],
+                page["current_snapshot_id"],
+                normalized_reason,
+                normalized_note,
+            ),
+        )
+        return {
+            "review": {
+                "status": "excluded",
+                "reviewed_by": actor_id,
+                "reviewed_at": now,
+                "source_version_id": page["version_id"],
+                "inherited_from_page_version_id": page[
+                    "inherited_from_page_version_id"
+                ],
+                "snapshot_id": page["current_snapshot_id"],
+                "exclusion_reason": normalized_reason,
+                "exclusion_note": normalized_note,
+            }
+        }
+
+
+def reopen_page(
+    settings: Settings, *, page_id: str, actor_id: str
+) -> dict[str, Any]:
+    with transaction(settings) as connection:
+        page = _read_current_page(connection, page_id)
+        if page["review_status"] == "pending":
+            raise CurationRequestError(409, "page_already_pending", "此页已经是待处理状态。")
+        now = timestamp()
+        updated = connection.execute(
+            """
+            UPDATE page_versions
+            SET review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL,
+                review_source_version_id = NULL, exclusion_reason = NULL,
+                exclusion_note = NULL
+            WHERE page_version_id = ? AND review_status IN ('approved', 'excluded')
+            """,
+            (page["page_version_id"],),
+        )
+        if updated.rowcount != 1:
+            raise CurationRequestError(
+                409,
+                "curation_state_changed",
+                "页面状态已被其他会话改变，请重新加载。",
+            )
+        connection.execute(
+            """
+            INSERT INTO page_review_events (
+                event_id, page_version_id, event_type, actor_id, occurred_at,
+                source_version_id, source_page_version_id, snapshot_id,
+                reason, note
+            ) VALUES (?, ?, 'reopened', ?, ?, ?, NULL, ?, NULL, NULL)
+            """,
+            (
+                uuid.uuid4().hex,
+                page["page_version_id"],
+                actor_id,
+                now,
+                page["version_id"],
+                page["current_snapshot_id"],
+            ),
+        )
+        return {
+            "review": {
+                "status": "pending",
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "source_version_id": None,
+                "inherited_from_page_version_id": page[
+                    "inherited_from_page_version_id"
+                ],
+                "snapshot_id": page["current_snapshot_id"],
+                "exclusion_reason": None,
+                "exclusion_note": None,
+            }
+        }
+
+
+def batch_exclude_pages(
+    settings: Settings,
+    *,
+    page_ids: list[str],
+    actor_id: str,
+    reason: str,
+    note: str | None,
+) -> dict[str, Any]:
+    normalized_reason, normalized_note = _validate_exclusion(reason, note)
+    excluded: list[str] = []
+    failed: list[dict[str, str]] = []
+    for page_id in page_ids:
+        try:
+            exclude_page(
+                settings,
+                page_id=page_id,
+                actor_id=actor_id,
+                reason=normalized_reason,
+                note=normalized_note,
+            )
+        except CurationRequestError as error:
+            failed.append(
+                {"page_id": page_id, "code": error.code, "message": error.message}
+            )
+        else:
+            excluded.append(page_id)
+    return {
+        "requested": len(page_ids),
+        "excluded": excluded,
+        "failed": failed,
+        "complete": not failed,
+    }

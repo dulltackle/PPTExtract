@@ -16,13 +16,16 @@ from pptextract.config import Settings
 from pptextract.curation import (
     CurationRequestError,
     approve_page,
+    batch_exclude_pages,
     complete_source_review,
     confirm_source_snapshot,
     delete_capture_visual,
+    exclude_page,
     mark_capture_source_complete,
     move_capture_visual,
     read_page_curation,
     read_source_image,
+    reopen_page,
     save_capture_visual,
     save_image_source_disposition,
     save_source_snapshot,
@@ -91,6 +94,15 @@ class SaveSourceSnapshot(BaseModel):
 
 class SnapshotCommand(BaseModel):
     snapshot_id: str = Field(min_length=1, max_length=128)
+
+
+class ExcludePageCommand(BaseModel):
+    reason: str = Field(min_length=1, max_length=128)
+    note: str | None = Field(default=None, max_length=100_000)
+
+
+class BatchExcludePagesCommand(ExcludePageCommand):
+    page_ids: list[str] = Field(min_length=1, max_length=10_000)
 
 
 class SaveImageSourceDisposition(BaseModel):
@@ -956,7 +968,7 @@ def create_app(
 
     @app.get("/api/v1/curation/pages")
     async def list_curation_pages(review_status: str = "pending") -> JSONResponse:
-        if review_status not in {"pending", "approved", "excluded", "all"}:
+        if review_status not in {"pending", "approved", "excluded", "inherited", "all"}:
             return error_response(422, "invalid_request", "审核状态无效。")
         with connect(resolved) as connection:
             rows = connection.execute(
@@ -966,7 +978,10 @@ def create_app(
                        pv.source_content_json, results.source_slide_id,
                        results.relationship_id, results.source_part,
                        results.hidden, results.enabled, jobs.job_id AS enable_job_id,
-                       jobs.status AS enable_status, jobs.error_json AS enable_error
+                       jobs.status AS enable_status, jobs.error_json AS enable_error,
+                       pv.inherited_from_page_version_id, pv.reviewed_by,
+                       pv.reviewed_at, pv.review_source_version_id,
+                       pv.exclusion_reason, pv.exclusion_note
                 FROM ingestion_page_results AS results
                 JOIN document_versions AS versions
                   ON versions.version_id = results.version_id
@@ -979,10 +994,14 @@ def create_app(
                 LEFT JOIN pages AS p ON p.page_id = pv.page_id
                 LEFT JOIN jobs ON jobs.job_id = results.enable_job_id
                 WHERE d.deleted_at IS NULL AND versions.status = 'ready'
-                  AND (? = 'all' OR pv.review_status = ?)
+                  AND (
+                    ? = 'all'
+                    OR (? = 'inherited' AND pv.inherited_from_page_version_id IS NOT NULL)
+                    OR pv.review_status = ?
+                  )
                 ORDER BY versions.document_id, results.page_number, pv.page_id
                 """,
-                (review_status, review_status),
+                (review_status, review_status, review_status),
             ).fetchall()
             warning_rows_by_version = {
                 version_id: read_warning_rows(connection, version_id=version_id)
@@ -1030,6 +1049,18 @@ def create_app(
                 },
                 "enablement": enablement,
             }
+            if row["review_status"] is not None:
+                page_payload["review"] = {
+                    "status": row["review_status"],
+                    "reviewed_by": row["reviewed_by"],
+                    "reviewed_at": row["reviewed_at"],
+                    "source_version_id": row["review_source_version_id"],
+                    "inherited_from_page_version_id": row[
+                        "inherited_from_page_version_id"
+                    ],
+                    "exclusion_reason": row["exclusion_reason"],
+                    "exclusion_note": row["exclusion_note"],
+                }
             if version_warning_rows:
                 page_payload["rendering_warnings"] = summarize_rows(page_warning_rows)
                 page_payload["version_rendering_warnings"] = summarize_rows(
@@ -1372,6 +1403,51 @@ def create_app(
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(content=result)
+
+    @app.post("/api/v1/pages/{page_id}/exclude")
+    async def exclude_curation_page(
+        page_id: str, command: ExcludePageCommand, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = exclude_page(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                reason=command.reason,
+                note=command.note,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=result)
+
+    @app.post("/api/v1/pages/{page_id}/reopen")
+    async def reopen_curation_page(page_id: str, request: Request) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = reopen_page(resolved, page_id=page_id, actor_id=actor.actor_id)
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content=result)
+
+    @app.post("/api/v1/pages/batch-exclude")
+    async def batch_exclude_curation_pages(
+        command: BatchExcludePagesCommand, request: Request
+    ) -> JSONResponse:
+        if len(set(command.page_ids)) != len(command.page_ids):
+            return error_response(422, "invalid_request", "批量排除不能包含重复页面。")
+        actor = actors.resolve(request)
+        try:
+            result = batch_exclude_pages(
+                resolved,
+                page_ids=command.page_ids,
+                actor_id=actor.actor_id,
+                reason=command.reason,
+                note=command.note,
+            )
+        except CurationRequestError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=200 if result["complete"] else 207, content=result)
 
     @app.get("/api/v1/pages/{page_id}/render", response_model=None)
     async def get_page_render(page_id: str) -> FileResponse | JSONResponse:

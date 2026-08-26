@@ -10,6 +10,45 @@ from pptextract.config import Settings
 from pptextract.db import SCHEMA_VERSION, connect, initialize_database
 
 
+def test_v16_review_event_rebuild_rolls_back_as_one_unit_on_copy_failure(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.for_test(tmp_path)
+    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.executescript(
+            """
+            PRAGMA user_version = 16;
+            CREATE TABLE page_review_events (
+                event_id TEXT PRIMARY KEY,
+                page_version_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor_id TEXT,
+                occurred_at TEXT NOT NULL,
+                source_version_id TEXT,
+                source_page_version_id TEXT,
+                snapshot_id TEXT,
+                reason TEXT,
+                note TEXT
+            );
+            INSERT INTO page_review_events (
+                event_id, page_version_id, event_type, occurred_at
+            ) VALUES ('event-invalid', 'page-version', 'invalid', 'now');
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        initialize_database(settings)
+
+    with sqlite3.connect(settings.database_path) as connection:
+        assert connection.execute(
+            "SELECT event_type FROM page_review_events WHERE event_id = 'event-invalid'"
+        ).fetchone()[0] == "invalid"
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_review_events_v17'"
+        ).fetchone() is None
+
+
 def test_v2_database_migrates_version_states_and_active_job_targets(tmp_path: Path) -> None:
     settings = Settings.for_test(tmp_path)
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)

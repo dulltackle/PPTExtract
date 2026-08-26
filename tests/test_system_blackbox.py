@@ -303,7 +303,7 @@ def test_synthetic_hidden_page_can_be_enabled_in_a_real_browser(
     }
 
 
-def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_browser(
+def test_review_queue_supports_single_and_batch_conclusions_in_browser(
     running_system: tuple[str, Path],
 ) -> None:
     base_url, _data_root = running_system
@@ -327,13 +327,34 @@ def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_b
             },
         )
         assert accepted.status_code == 202
-        identity = accepted.json()
-        deadline = time.monotonic() + 45
-        task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
-        while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
-            time.sleep(0.1)
-            task = client.get(f"{base_url}/api/v1/jobs/{identity['job_id']}").json()
-        assert task["status"] == "succeeded"
+        identities = [accepted.json()]
+        for index, title in enumerate(
+            ("公开批量策展页二", "公开批量策展页三"), start=2
+        ):
+            extra = client.post(
+                f"{base_url}/api/v1/documents",
+                headers={
+                    "X-Actor-ID": "blackbox-operator",
+                    "Idempotency-Key": f"browser-review-queue-{index}",
+                },
+                files={
+                    "file": (
+                        f"public-review-queue-{index}.pptx",
+                        build_plain_text_presentation(title=title),
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    )
+                },
+            )
+            assert extra.status_code == 202
+            identities.append(extra.json())
+        for current in identities:
+            deadline = time.monotonic() + 45
+            task = client.get(f"{base_url}/api/v1/jobs/{current['job_id']}").json()
+            while task["status"] not in {"succeeded", "failed"} and time.monotonic() < deadline:
+                time.sleep(0.1)
+                task = client.get(f"{base_url}/api/v1/jobs/{current['job_id']}").json()
+            assert task["status"] == "succeeded"
+        identity = identities[0]
 
     route = (
         "/curation?document="
@@ -353,6 +374,9 @@ def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_b
             "viewport-1280-three-columns",
             "plain-text-zero-capture-approved",
             "keyboard-a-approved",
+            "keyboard-r-reopen-and-x-exclude",
+            "pending-only-batch-exclusion",
+            "forbidden-batch-actions-absent",
         ],
     }
 
@@ -360,16 +384,17 @@ def test_plain_text_page_can_be_approved_without_overview_or_visual_objects_in_b
         pages = client.get(
             f"{base_url}/api/v1/curation/pages", params={"review_status": "all"}
         ).json()["pages"]
-        approved = next(
-            page
-            for page in pages
-            if page["document_id"] == identity["document_id"]
-            and page["version_id"] == identity["version_id"]
-        )
-        assert approved["review_status"] == "approved"
-        detail = client.get(f"{base_url}/api/v1/pages/{approved['page_id']}").json()
+        reviewed = [
+            page for page in pages
+            if page["document_id"] in {item["document_id"] for item in identities}
+        ]
+        assert len(reviewed) == 3
+        assert {page["review_status"] for page in reviewed} == {"excluded"}
+        primary = next(page for page in reviewed if page["document_id"] == identity["document_id"])
+        detail = client.get(f"{base_url}/api/v1/pages/{primary['page_id']}").json()
         assert detail["review"]["reviewed_by"] == "blackbox-operator"
         assert detail["review"]["source_version_id"] == identity["version_id"]
+        assert detail["review"]["exclusion_reason"] == "irrelevant"
         assert detail["annotation"]["overview"] is None
         assert detail["annotation"]["visuals"] == []
 

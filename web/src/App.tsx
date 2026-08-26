@@ -232,14 +232,14 @@ export function App() {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
       if (document.querySelector("[aria-modal='true']")) return;
-      if (!isMapping && event.key.toLowerCase() === "r") {
+      if (!isMapping && !isCuration && event.key.toLowerCase() === "r") {
         event.preventDefault();
         refresh();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isMapping, refresh]);
+  }, [isCuration, isMapping, refresh]);
 
   const actor = state.kind === "ready" ? state.data.actor : null;
 
@@ -309,25 +309,26 @@ export function App() {
 
       <footer className="command-strip" aria-label="键盘操作">
         <span className="command-strip-label">键盘操作</span>
-        <span>
-          <kbd>Tab</kbd>
-          <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
-        </span>
-        <span>
-          <kbd>R</kbd>{" "}
-          {isMapping
-            ? "刷新证据"
-            : isCuration
-              ? "刷新工作位"
-              : isPublication
-                ? "刷新校验"
-                : "刷新入口"}
-        </span>
         {isCuration ? (
-          <span>
-            <kbd>A</kbd> 审核闸门开放时批准
-          </span>
-        ) : null}
+          <>
+            <span><kbd>←</kbd><kbd>→</kbd> 上一页 / 下一页</span>
+            <span><kbd>A</kbd> 批准</span>
+            <span><kbd>X</kbd> 排除原因</span>
+            <span><kbd>R</kbd> 重新打开</span>
+            <span><kbd>Esc</kbd> 取消</span>
+          </>
+        ) : (
+          <>
+            <span>
+              <kbd>Tab</kbd>
+              <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
+            </span>
+            <span>
+              <kbd>R</kbd>{" "}
+              {isMapping ? "刷新证据" : isPublication ? "刷新校验" : "刷新入口"}
+            </span>
+          </>
+        )}
         <span className="command-status">
           {state.kind === "ready"
             ? isMapping
