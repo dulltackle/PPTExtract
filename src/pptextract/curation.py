@@ -16,6 +16,7 @@ from pptextract.config import Settings
 from pptextract.db import transaction
 from pptextract.jobs import timestamp
 from pptextract.object_store import LocalObjectStore
+from pptextract.repeated_footer_noise import read_page_noise_state
 
 
 class CurationRequestError(Exception):
@@ -162,10 +163,19 @@ def _read_snapshot(
     }
 
 
-def _text_fragments(content: dict[str, Any]) -> list[str]:
+def _text_fragments(
+    content: dict[str, Any], *, excluded_body_indexes: set[int] | None = None
+) -> list[str]:
     fragments: list[str] = []
-    for key in ("titles", "body"):
-        fragments.extend(str(value).strip() for value in content.get(key, []) if str(value).strip())
+    fragments.extend(
+        str(value).strip() for value in content.get("titles", []) if str(value).strip()
+    )
+    excluded = excluded_body_indexes or set()
+    fragments.extend(
+        str(value).strip()
+        for index, value in enumerate(content.get("body", []))
+        if index not in excluded and str(value).strip()
+    )
     for table in content.get("tables", []):
         for row in table.get("grid", []):
             cells = []
@@ -186,8 +196,12 @@ def _text_fragments(content: dict[str, Any]) -> list[str]:
     return fragments
 
 
-def build_chunk_body(content: dict[str, Any]) -> str:
-    return "\n\n".join(_text_fragments(content))
+def build_chunk_body(
+    content: dict[str, Any], *, excluded_body_indexes: set[int] | None = None
+) -> str:
+    return "\n\n".join(
+        _text_fragments(content, excluded_body_indexes=excluded_body_indexes)
+    )
 
 
 def _source_image_count(content: dict[str, Any]) -> int:
@@ -430,7 +444,16 @@ def read_curation_state(
     )
     confirmation = None if snapshot is None else snapshot["source_confirmation"]
     review = None if snapshot is None else snapshot["source_review"]
-    chunk_nonempty = bool(build_chunk_body(effective).strip())
+    repeated_footer_noise = read_page_noise_state(connection, page)
+    excluded_body_indexes = {
+        int(item["source_index"])
+        for item in repeated_footer_noise["exclusions"]
+        if item["source_kind"] == "body"
+    }
+    chunk_preview = build_chunk_body(
+        effective, excluded_body_indexes=excluded_body_indexes
+    )
+    chunk_nonempty = bool(chunk_preview.strip())
     blockers: list[dict[str, str]] = []
     if snapshot is None:
         blockers.append({"code": "source_unsaved", "message": "文字修改尚未保存。"})
@@ -464,7 +487,28 @@ def read_curation_state(
             "unresolved": len(image_blockers),
             "items": image_sources,
         },
-        "chunk_body": {"nonempty": chunk_nonempty},
+        "repeated_footer_noise": {
+            "sources": repeated_footer_noise["sources"],
+            "active_count": len(repeated_footer_noise["exclusions"]),
+            "history": repeated_footer_noise["history"],
+        },
+        "chunk_body": {"nonempty": chunk_nonempty, "preview": chunk_preview},
+        "chunk_metadata": {
+            "excluded_repeated_footer_noise": [
+                {
+                    key: item[key]
+                    for key in (
+                        "confirmation_id",
+                        "source_ref",
+                        "source_text",
+                        "rule_version",
+                        "confirmed_by",
+                        "confirmed_at",
+                    )
+                }
+                for item in repeated_footer_noise["exclusions"]
+            ]
+        },
         "blockers": blockers,
         "can_confirm_source": pending and snapshot is not None,
         "can_complete_source_review": (
@@ -1605,7 +1649,7 @@ def approve_page(
             )
         snapshot = state["current_snapshot"]
         assert snapshot is not None
-        chunk_body = build_chunk_body(snapshot["source_content"])
+        chunk_body = str(state["chunk_body"]["preview"])
         now = timestamp()
         updated = connection.execute(
             """
@@ -1656,6 +1700,7 @@ def approve_page(
                 "snapshot_id": snapshot_id,
             },
             "chunk_body": chunk_body,
+            "chunk_metadata": state["chunk_metadata"],
         }
 
 

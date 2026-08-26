@@ -479,7 +479,10 @@ def test_unchanged_page_inherits_frozen_source_content_and_review_facts(
     assert snapshot["created_by"] == "curator-source"
     assert snapshot["source_confirmation"]["actor_id"] == "curator-confirm"
     assert snapshot["source_review"]["actor_id"] == "curator-review"
-    assert detail["curation"]["chunk_body"] == {"nonempty": True}
+    assert detail["curation"]["chunk_body"] == {
+        "nonempty": True,
+        "preview": "人工修订的继承标题",
+    }
     assert detail["curation"]["blockers"] == []
 
 

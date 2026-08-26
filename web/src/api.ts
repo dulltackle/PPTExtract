@@ -238,6 +238,58 @@ export interface CurationBlocker {
   source_ref?: string;
 }
 
+export interface RepeatedFooterNoiseSource {
+  source_ref: string;
+  source_kind: "body";
+  source_index: number;
+  text: string;
+  active_confirmation_id: string | null;
+}
+
+export interface RepeatedFooterNoiseMetadata {
+  confirmation_id: string;
+  source_ref: string;
+  source_text: string;
+  rule_version: string;
+  confirmed_by: string;
+  confirmed_at: string;
+}
+
+export interface RepeatedFooterNoiseHistory {
+  confirmation_id: string;
+  source_ref: string;
+  source_text: string;
+  rule_version: string;
+  confirmation_note: string | null;
+  confirmed_by: string;
+  confirmed_at: string;
+  status: "active" | "revoked";
+  revoked_by: string | null;
+  revoked_at: string | null;
+  revoke_note: string | null;
+}
+
+export interface RepeatedFooterNoiseAffectedPage {
+  page_id: string;
+  page_version_id: string;
+  page_number: number;
+  source_ref: string;
+  source_kind: "body";
+  source_index: number;
+  source_text: string;
+  standard_render: { url: string };
+}
+
+export interface RepeatedFooterNoiseCandidate {
+  candidate_id: string;
+  document_id: string;
+  version_id: string;
+  source_text: string;
+  normalized_text: string;
+  rule_version: string;
+  affected_pages: RepeatedFooterNoiseAffectedPage[];
+}
+
 export interface CurationState {
   current_snapshot: CurationSnapshot | null;
   image_sources: {
@@ -245,7 +297,15 @@ export interface CurationState {
     unresolved: number;
     items: CurationImageSource[];
   };
-  chunk_body: { nonempty: boolean };
+  repeated_footer_noise?: {
+    sources: RepeatedFooterNoiseSource[];
+    active_count: number;
+    history?: RepeatedFooterNoiseHistory[];
+  };
+  chunk_body: { nonempty: boolean; preview?: string };
+  chunk_metadata?: {
+    excluded_repeated_footer_noise: RepeatedFooterNoiseMetadata[];
+  };
   blockers: CurationBlocker[];
   can_confirm_source: boolean;
   can_complete_source_review: boolean;
@@ -539,6 +599,54 @@ export async function loadPageDetail(pageId: string, signal?: AbortSignal): Prom
     signal,
   });
   return readJson<PageDetail>(response, "AnyDoc 来源暂时不可用，请重试。");
+}
+
+export async function loadRepeatedFooterNoiseCandidate(
+  pageId: string,
+  sourceRef: string,
+): Promise<RepeatedFooterNoiseCandidate> {
+  const response = await fetch(
+    `/api/v1/pages/${pageId}/repeated-footer-noise/candidates/${sourceRef}`,
+    { headers: { Accept: "application/json" } },
+  );
+  return (
+    await readJson<{ candidate: RepeatedFooterNoiseCandidate }>(
+      response,
+      "无法检查此正文来源的跨页重复情况。",
+    )
+  ).candidate;
+}
+
+export async function confirmRepeatedFooterNoise(
+  pageId: string,
+  candidateId: string,
+  sourceRef: string,
+  note: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `/api/v1/pages/${pageId}/repeated-footer-noise/confirmations`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_id: candidateId, source_ref: sourceRef, note }),
+    },
+  );
+  await readJson(response, "重复页脚噪声确认未能保存；正文保持不变。");
+}
+
+export async function revokeRepeatedFooterNoise(
+  confirmationId: string,
+  note: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `/api/v1/repeated-footer-noise/confirmations/${confirmationId}/revoke`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  );
+  await readJson(response, "重复页脚噪声排除未能撤销；正文状态未改变。");
 }
 
 export async function saveCurationSnapshot(

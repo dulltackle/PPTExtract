@@ -289,7 +289,22 @@ def test_plain_text_source_can_be_saved_confirmed_reviewed_and_approved_without_
     assert initial.json()["curation"] == {
         "current_snapshot": None,
         "image_sources": {"total": 0, "unresolved": 0, "items": []},
-        "chunk_body": {"nonempty": True},
+        "repeated_footer_noise": {
+            "sources": [
+                {
+                    "source_ref": initial.json()["curation"]["repeated_footer_noise"]
+                    ["sources"][0]["source_ref"],
+                    "source_kind": "body",
+                    "source_index": 0,
+                    "text": "公开来源正文。",
+                    "active_confirmation_id": None,
+                }
+            ],
+            "active_count": 0,
+            "history": [],
+        },
+        "chunk_body": {"nonempty": True, "preview": "公开来源标题\n\n公开来源正文。"},
+        "chunk_metadata": {"excluded_repeated_footer_noise": []},
         "blockers": [
             {"code": "source_unsaved", "message": "文字修改尚未保存。"},
             {"code": "source_unconfirmed", "message": "文字来源尚未确认。"},
@@ -904,7 +919,7 @@ def test_confirmed_empty_source_cannot_be_approved(
         json={"base_snapshot_id": None, "titles": [], "body": []},
     ).json()["curation"]
     snapshot_id = saved["current_snapshot"]["snapshot_id"]
-    assert saved["chunk_body"] == {"nonempty": False}
+    assert saved["chunk_body"] == {"nonempty": False, "preview": ""}
     assert saved["blockers"][-1] == {
         "code": "chunk_body_empty",
         "message": "已确认来源无法生成非空 Chunk 正文。",

@@ -60,6 +60,12 @@ from pptextract.rendering_warnings import (
     serialize_warning,
     summarize_rows,
 )
+from pptextract.repeated_footer_noise import (
+    RepeatedFooterNoiseError,
+    confirm_candidate,
+    preview_candidate,
+    revoke_confirmation,
+)
 from pptextract.worker import worker_is_fresh
 
 
@@ -134,6 +140,16 @@ class DeleteCaptureVisual(BaseModel):
 class MoveCaptureVisual(BaseModel):
     base_snapshot_id: str = Field(min_length=1, max_length=128)
     direction: str
+
+
+class ConfirmRepeatedFooterNoise(BaseModel):
+    candidate_id: str = Field(min_length=64, max_length=64)
+    source_ref: str = Field(min_length=1, max_length=128)
+    note: str | None = Field(default=None, max_length=100_000)
+
+
+class RevokeRepeatedFooterNoise(BaseModel):
+    note: str | None = Field(default=None, max_length=100_000)
 
 
 def _read_curation_snapshot(
@@ -1210,6 +1226,60 @@ def create_app(
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(status_code=201, content={"curation": curation})
+
+    @app.get(
+        "/api/v1/pages/{page_id}/repeated-footer-noise/candidates/{source_ref}"
+    )
+    async def get_repeated_footer_noise_candidate(
+        page_id: str, source_ref: str
+    ) -> JSONResponse:
+        try:
+            with connect(resolved) as connection:
+                candidate = preview_candidate(
+                    connection, page_id=page_id, source_ref=source_ref
+                )
+        except RepeatedFooterNoiseError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content={"candidate": candidate})
+
+    @app.post(
+        "/api/v1/pages/{page_id}/repeated-footer-noise/confirmations",
+        status_code=201,
+    )
+    async def create_repeated_footer_noise_confirmation(
+        page_id: str, command: ConfirmRepeatedFooterNoise, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            confirmation = confirm_candidate(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                candidate_id=command.candidate_id,
+                source_ref=command.source_ref,
+                note=command.note,
+            )
+        except RepeatedFooterNoiseError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(status_code=201, content={"confirmation": confirmation})
+
+    @app.post(
+        "/api/v1/repeated-footer-noise/confirmations/{confirmation_id}/revoke"
+    )
+    async def revoke_repeated_footer_noise_confirmation(
+        confirmation_id: str, command: RevokeRepeatedFooterNoise, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            confirmation = revoke_confirmation(
+                resolved,
+                confirmation_id=confirmation_id,
+                actor_id=actor.actor_id,
+                note=command.note,
+            )
+        except RepeatedFooterNoiseError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(content={"confirmation": confirmation})
 
     @app.post("/api/v1/pages/{page_id}/curation/source-confirmation")
     async def confirm_page_source(

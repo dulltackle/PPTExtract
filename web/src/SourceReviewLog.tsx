@@ -2,6 +2,7 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import {
   approveCurationPage,
+  confirmRepeatedFooterNoise,
   type CurationBlocker,
   type CurationImageSource,
   type CurationState,
@@ -14,9 +15,12 @@ import {
   type ImageDisposition,
   type ImageIgnoreReason,
   loadPageDetail,
+  loadRepeatedFooterNoiseCandidate,
   OperatorError,
   type PageDetail,
   reopenCurationPage,
+  type RepeatedFooterNoiseCandidate,
+  revokeRepeatedFooterNoise,
   saveCurationSnapshot,
   saveCurationImageSource,
   type SourceContent,
@@ -289,12 +293,18 @@ export function SourceReviewLog({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryRevision, setRetryRevision] = useState(0);
-  const [operation, setOperation] = useState<"save" | "image" | "confirm" | "review" | "approve" | "exclude" | "reopen" | null>(null);
+  const [operation, setOperation] = useState<
+    "save" | "image" | "confirm" | "review" | "approve" | "exclude" | "reopen" |
+    "noise-preview" | "noise-confirm" | "noise-revoke" | null
+  >(null);
   const [focusTarget, setFocusTarget] = useState<"confirm" | "review" | "approve" | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(arrivalAnnouncement);
   const [exclusionReason, setExclusionReason] = useState<ExclusionReason | "">("");
   const [exclusionNote, setExclusionNote] = useState("");
   const [showReopen, setShowReopen] = useState(false);
+  const [noiseCandidate, setNoiseCandidate] = useState<RepeatedFooterNoiseCandidate | null>(null);
+  const [noiseAcknowledged, setNoiseAcknowledged] = useState(false);
+  const [noiseNote, setNoiseNote] = useState("");
   const firstFieldRef = useRef<HTMLTextAreaElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
@@ -303,6 +313,10 @@ export function SourceReviewLog({
   const reopenTriggerRef = useRef<HTMLButtonElement>(null);
   const reopenDialogRef = useRef<HTMLElement>(null);
   const reopenSubmitRef = useRef<HTMLButtonElement>(null);
+  const noiseDialogRef = useRef<HTMLElement>(null);
+  const noiseSubmitRef = useRef<HTMLButtonElement>(null);
+  const noiseAcknowledgeRef = useRef<HTMLInputElement>(null);
+  const noiseTriggerRef = useRef<HTMLElement | null>(null);
   const imageChoiceRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const imageFieldRefs = useRef<Record<string, HTMLElement | null>>({});
 
@@ -456,6 +470,116 @@ export function SourceReviewLog({
     if (!preserveImageDrafts) setDrafts(imageDrafts(next.image_sources.items));
     onCurationChange(next);
   }, [onCurationChange]);
+
+  const refreshDetail = useCallback(async () => {
+    if (!page.page_id) return;
+    const payload = await loadPageDetail(page.page_id);
+    const refreshedOriginal = normalizedSource(payload.source_content);
+    const refreshedCuration = payload.curation ?? fallbackCuration(refreshedOriginal);
+    const effective = normalizedSource(
+      refreshedCuration.current_snapshot?.source_content ?? refreshedOriginal,
+    );
+    const normalizedDetail = {
+      ...payload,
+      source_content: refreshedOriginal,
+      curation: refreshedCuration,
+    };
+    setDetail(normalizedDetail);
+    setTitles(effective.titles);
+    setBody(effective.body);
+    setDrafts(imageDrafts(refreshedCuration.image_sources.items));
+    onDetailLoaded(normalizedDetail);
+    onCurationChange(refreshedCuration);
+  }, [onCurationChange, onDetailLoaded, page.page_id]);
+
+  const closeNoiseDialog = useCallback(() => {
+    setNoiseCandidate(null);
+    setNoiseAcknowledged(false);
+    setNoiseNote("");
+    window.requestAnimationFrame(() => noiseTriggerRef.current?.focus());
+  }, []);
+
+  const handleNoisePreview = async (sourceRef: string, trigger: HTMLElement) => {
+    if (!page.page_id || busy || dirty) return;
+    noiseTriggerRef.current = trigger;
+    setOperation("noise-preview");
+    setAnnouncement("正在核对跨页重复来源…");
+    try {
+      const candidate = await loadRepeatedFooterNoiseCandidate(page.page_id, sourceRef);
+      setNoiseCandidate(candidate);
+      setNoiseAcknowledged(false);
+      setNoiseNote("");
+      setAnnouncement(
+        `已找到 ${candidate.affected_pages.length} 页相同来源；确认前请逐页查看标准页渲染。`,
+      );
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? cause.message
+          : "跨页重复检查失败；来源内容和正文均未改变。",
+      );
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  const handleNoiseConfirm = async () => {
+    if (!page.page_id || !noiseCandidate || !noiseAcknowledged || busy || dirty) return;
+    setOperation("noise-confirm");
+    try {
+      await confirmRepeatedFooterNoise(
+        page.page_id,
+        noiseCandidate.candidate_id,
+        noiseCandidate.affected_pages.find((item) => item.page_id === page.page_id)
+          ?.source_ref ?? noiseCandidate.affected_pages[0].source_ref,
+        noiseNote.trim() || null,
+      );
+      setNoiseCandidate(null);
+      setNoiseAcknowledged(false);
+      setNoiseNote("");
+      try {
+        await refreshDetail();
+      } catch {
+        setAnnouncement("重复页脚噪声确认已保存；详情暂未刷新，请重新加载当前页。");
+        return;
+      }
+      setAnnouncement(
+        `已确认 ${noiseCandidate.affected_pages.length} 页重复页脚噪声；仅后续 Chunk 正文发生变化。`,
+      );
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? cause.message
+          : "重复页脚噪声确认未能保存；正文保持不变。",
+      );
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  const handleNoiseRevoke = async (confirmationId: string, sourceNumber: number) => {
+    if (busy || dirty) return;
+    setOperation("noise-revoke");
+    setAnnouncement(`正在撤销正文来源 ${sourceNumber} 的重复页脚排除…`);
+    try {
+      await revokeRepeatedFooterNoise(confirmationId, "从策展工作台撤销并恢复正文。");
+      try {
+        await refreshDetail();
+      } catch {
+        setAnnouncement("重复页脚排除撤销已保存；详情暂未刷新，请重新加载当前页。");
+        return;
+      }
+      setAnnouncement("重复页脚排除已撤销；后续 Chunk 正文已恢复，撤销审计已追加。 ");
+    } catch (cause) {
+      setAnnouncement(
+        cause instanceof OperatorError
+          ? cause.message
+          : "重复页脚排除未能撤销；正文状态未改变。",
+      );
+    } finally {
+      setOperation(null);
+    }
+  };
 
   useEffect(() => {
     if (!externalCuration) return;
@@ -768,6 +892,39 @@ export function SourceReviewLog({
   }, [busy, closeReopenDialog, showReopen]);
 
   useEffect(() => {
+    if (!noiseCandidate) return;
+    const frame = window.requestAnimationFrame(() => noiseAcknowledgeRef.current?.focus());
+    const handleDialogKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        closeNoiseDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(
+        noiseDialogRef.current?.querySelectorAll<HTMLElement>(
+          "a[href], input:not([disabled]), textarea:not([disabled]), button:not([disabled])",
+        ) ?? [],
+      );
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleDialogKey);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleDialogKey);
+    };
+  }, [busy, closeNoiseDialog, noiseCandidate]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
@@ -816,6 +973,9 @@ export function SourceReviewLog({
     imageDraftComplete(draftFromImage(item))
   )).length;
   const displayedImageBlockers = localImageBlockers(curation.image_sources.items, drafts);
+  const noiseSources = curation.repeated_footer_noise?.sources ?? [];
+  const noiseHistory = curation.repeated_footer_noise?.history ?? [];
+  const noiseMetadata = curation.chunk_metadata?.excluded_repeated_footer_noise ?? [];
   const review = detail.review ?? page.review ?? null;
   const frozenStatus = review?.status ?? detail.review_status;
   const frozenLabel = frozenStatus === "excluded" ? "已排除" : "已批准";
@@ -823,7 +983,11 @@ export function SourceReviewLog({
 
   return (
     <>
-    <div className="source-review-log" aria-busy={busy} inert={showReopen ? true : undefined}>
+    <div
+      className="source-review-log"
+      aria-busy={busy}
+      inert={showReopen || noiseCandidate ? true : undefined}
+    >
       <header className="source-review-header">
         <div>
           <h2>来源日志</h2>
@@ -885,8 +1049,19 @@ export function SourceReviewLog({
 
           <div className="source-field-group">
             <span className="source-field-label">正文</span>
-            {original.body.length ? original.body.map((value, index) => (
-              <label className="source-edit-block" key={`body-${index}`}>
+            {original.body.length ? original.body.map((value, index) => {
+              const noiseSource = noiseSources.find((item) => item.source_index === index);
+              const activeNoise = noiseMetadata.find(
+                (item) => item.source_ref === noiseSource?.source_ref,
+              );
+              const latestNoiseHistory = noiseHistory.find(
+                (item) => item.source_ref === noiseSource?.source_ref,
+              );
+              return (
+              <article
+                className={`source-edit-block ${activeNoise ? "has-noise-exclusion" : ""}`}
+                key={`body-${index}`}
+              >
                 <span>正文来源 {index + 1}</span>
                 <small>原始提取</small>
                 <p>{value || "空正文"}</p>
@@ -901,8 +1076,64 @@ export function SourceReviewLog({
                     (item, candidate) => candidate === index ? event.target.value : item,
                   ))}
                 />
-              </label>
-            )) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
+                {activeNoise ? (
+                  <div className="footer-noise-source-state">
+                    <div>
+                      <strong>已从 Chunk 正文排除</strong>
+                      <span>
+                        {activeNoise.confirmed_by} · {formatTime(activeNoise.confirmed_at)}
+                      </span>
+                      <span>规则 {activeNoise.rule_version}</span>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`撤销正文来源 ${index + 1} 的重复页脚排除`}
+                      disabled={busy || dirty}
+                      title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
+                      onClick={() => void handleNoiseRevoke(
+                        activeNoise.confirmation_id,
+                        index + 1,
+                      )}
+                    >
+                      {operation === "noise-revoke" ? "正在撤销" : "撤销并恢复正文"}
+                    </button>
+                  </div>
+                ) : noiseSource ? (
+                  <>
+                    {latestNoiseHistory?.status === "revoked" ? (
+                      <div className="footer-noise-revoked-audit">
+                        <strong>最近一次排除已撤销</strong>
+                        <span>
+                          {latestNoiseHistory.revoked_by ?? "未知操作者"} · {
+                            latestNoiseHistory.revoked_at
+                              ? formatTime(latestNoiseHistory.revoked_at)
+                              : "时间未知"
+                          }
+                        </span>
+                        <span>规则 {latestNoiseHistory.rule_version}</span>
+                        {latestNoiseHistory.revoke_note ? (
+                          <p>{latestNoiseHistory.revoke_note}</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="footer-noise-check"
+                      aria-label={`检查正文来源 ${index + 1} 的跨页重复`}
+                      disabled={busy || dirty}
+                      title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
+                      onClick={(event) => void handleNoisePreview(
+                        noiseSource.source_ref,
+                        event.currentTarget,
+                      )}
+                    >
+                      {operation === "noise-preview" ? "正在检查跨页重复" : "检查跨页重复"}
+                    </button>
+                  </>
+                ) : null}
+              </article>
+            );
+            }) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
           </div>
 
           {original.speaker_notes.length ? (
@@ -1501,6 +1732,81 @@ export function SourceReviewLog({
               disabled={busy}
               onClick={() => void handleReopen()}
             >{operation === "reopen" ? "正在重新打开" : "确认重新打开"}</button>
+          </div>
+        </section>
+      </div>
+    ) : null}
+    {noiseCandidate ? (
+      <div
+        className="dialog-backdrop footer-noise-backdrop"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !busy) closeNoiseDialog();
+        }}
+      >
+        <section
+          ref={noiseDialogRef}
+          className="footer-noise-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="footer-noise-heading"
+        >
+          <header>
+            <div>
+              <h2 id="footer-noise-heading">确认排除重复页脚噪声</h2>
+              <p>共影响 {noiseCandidate.affected_pages.length} 页</p>
+            </div>
+            <span>人工确认</span>
+          </header>
+          <blockquote>{noiseCandidate.source_text}</blockquote>
+          <p className="footer-noise-dialog-copy">
+            系统只按规范化后的精确文本生成候选，不会自动改变正文、审核状态或页指纹。
+            请在提交前逐页核对位置与语义。
+          </p>
+          <ol className="footer-noise-pages">
+            {noiseCandidate.affected_pages.map((affected) => (
+              <li key={affected.source_ref}>
+                <span>第 {affected.page_number} 页</span>
+                <a
+                  href={affected.standard_render.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label={`查看第 ${affected.page_number} 页标准页渲染`}
+                >查看标准页渲染</a>
+              </li>
+            ))}
+          </ol>
+          <label className="footer-noise-acknowledgement">
+            <input
+              ref={noiseAcknowledgeRef}
+              type="checkbox"
+              checked={noiseAcknowledged}
+              onChange={(event) => setNoiseAcknowledged(event.target.checked)}
+            />
+            <span>我已核对全部受影响页</span>
+          </label>
+          <label className="footer-noise-note">
+            <span>确认说明（可选）</span>
+            <textarea
+              aria-label="确认说明（可选）"
+              rows={3}
+              value={noiseNote}
+              onChange={(event) => setNoiseNote(event.target.value)}
+            />
+          </label>
+          <div className="footer-noise-dialog-actions">
+            <button type="button" disabled={busy} onClick={closeNoiseDialog}>
+              取消，保留为内容
+            </button>
+            <button
+              ref={noiseSubmitRef}
+              type="button"
+              disabled={busy || dirty || !noiseAcknowledged}
+              onClick={() => void handleNoiseConfirm()}
+            >
+              {operation === "noise-confirm"
+                ? "正在记录确认"
+                : `确认排除 ${noiseCandidate.affected_pages.length} 页中的此来源`}
+            </button>
           </div>
         </section>
       </div>

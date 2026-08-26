@@ -49,6 +49,24 @@ def build_plain_text_presentation(
     return stream.getvalue()
 
 
+def build_repeated_footer_presentation() -> bytes:
+    """构造三页公开合成内容，用于人工确认重复页脚噪声。"""
+    presentation = Presentation()
+    presentation.slide_width = Inches(13.333333)
+    presentation.slide_height = Inches(7.5)
+    for page_number in range(1, 4):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+        slide.shapes.title.text = f"公开页 {page_number}"
+        body = slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(8), Inches(1))
+        body.text = f"第 {page_number} 页独有正文"
+        footer = slide.shapes.add_textbox(Inches(0.8), Inches(7), Inches(8), Inches(0.3))
+        footer.text = "公开合成重复页脚"
+
+    stream = BytesIO()
+    presentation.save(stream)
+    return stream.getvalue()
+
+
 def build_rendering_warning_presentation() -> bytes:
     """构造同时含缺失字体与动画时间线的公开渲染警告夹具。"""
     from xml.etree import ElementTree

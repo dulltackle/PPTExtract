@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -380,6 +380,45 @@ def initialize_database(settings: Settings) -> None:
                 confirmed_at TEXT NOT NULL,
                 warning_details_json TEXT NOT NULL,
                 render_config_version TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS repeated_footer_noise_confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(document_id),
+                version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                source_text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                rule_version TEXT NOT NULL,
+                note TEXT,
+                actor_id TEXT NOT NULL,
+                confirmed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS repeated_footer_noise_sources (
+                confirmation_id TEXT NOT NULL
+                    REFERENCES repeated_footer_noise_confirmations(confirmation_id),
+                page_id TEXT NOT NULL REFERENCES pages(page_id),
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                page_number INTEGER NOT NULL CHECK (page_number > 0),
+                source_ref TEXT NOT NULL,
+                source_kind TEXT NOT NULL CHECK (source_kind = 'body'),
+                source_index INTEGER NOT NULL CHECK (source_index >= 0),
+                source_text TEXT NOT NULL,
+                PRIMARY KEY (confirmation_id, source_ref)
+            );
+
+            CREATE INDEX IF NOT EXISTS repeated_footer_noise_sources_page
+                ON repeated_footer_noise_sources(page_version_id, source_index);
+
+            CREATE TABLE IF NOT EXISTS repeated_footer_noise_events (
+                event_id TEXT PRIMARY KEY,
+                confirmation_id TEXT NOT NULL
+                    REFERENCES repeated_footer_noise_confirmations(confirmation_id),
+                event_type TEXT NOT NULL CHECK (event_type IN ('confirmed', 'revoked')),
+                actor_id TEXT NOT NULL,
+                note TEXT,
+                occurred_at TEXT NOT NULL,
+                UNIQUE (confirmation_id, event_type)
             );
             """
         )

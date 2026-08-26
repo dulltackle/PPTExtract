@@ -88,6 +88,239 @@ afterEach(() => {
 });
 
 describe("来源文字审核工作台", () => {
+  it("保护未保存草稿，并在详情刷新失败时如实报告重复页脚确认与撤销结果", async () => {
+    const sourceRef = "footer-source-page-1";
+    const savedImageSummary = "公开页脚位置示意图。";
+    let active = false;
+    let revoked = false;
+    let failNextDetailRefresh = false;
+    const confirmedSnapshot = {
+      snapshot_id: "snapshot-footer",
+      source_content: {
+        ...originalSource,
+        body: ["公开来源正文。", "公开合成重复页脚"],
+      },
+      source_confirmation: {
+        actor_id: "operator-zhang",
+        confirmed_at: "2026-08-24T18:00:00+00:00",
+      },
+      source_review: null,
+    };
+    const noiseCuration = () => ({
+      ...curationState(confirmedSnapshot),
+      image_sources: {
+        total: 1,
+        unresolved: 0,
+        items: [{
+          source_ref: "image-source-page-1",
+          position: 0,
+          reference_index: 0,
+          alt_text: "公开页脚位置示意图",
+          media_type: "image/png",
+          origin_part: "ppt/media/footer.png",
+          object_sha256: "a".repeat(64),
+          size_bytes: 2048,
+          integrity: "verified",
+          duplicate_object: false,
+          preview_url: "/api/v1/pages/page-1/source-images/image-source-page-1",
+          disposition: "included",
+          summary: savedImageSummary,
+          ignore_reason: null,
+          ignore_note: null,
+          visual_ref: "visual-image-page-1",
+          decided_by: "operator-zhang",
+          decided_at: "2026-08-24T18:02:00+00:00",
+        }],
+      },
+      repeated_footer_noise: {
+        sources: [
+          {
+            source_ref: "body-source-page-1",
+            source_kind: "body",
+            source_index: 0,
+            text: "公开来源正文。",
+            active_confirmation_id: null,
+          },
+          {
+            source_ref: sourceRef,
+            source_kind: "body",
+            source_index: 1,
+            text: "公开合成重复页脚",
+            active_confirmation_id: active ? "confirmation-footer" : null,
+          },
+        ],
+        active_count: active ? 1 : 0,
+        history: active || revoked
+          ? [{
+              confirmation_id: "confirmation-footer",
+              source_ref: sourceRef,
+              source_text: "公开合成重复页脚",
+              rule_version: "manual-exact-text-v1",
+              confirmation_note: "已核对三页。",
+              confirmed_by: "operator-zhang",
+              confirmed_at: "2026-08-24T18:03:00+00:00",
+              status: active ? "active" : "revoked",
+              revoked_by: revoked ? "operator-zhang" : null,
+              revoked_at: revoked ? "2026-08-24T18:04:00+00:00" : null,
+              revoke_note: revoked ? "从策展工作台撤销并恢复正文。" : null,
+            }]
+          : [],
+      },
+      chunk_body: {
+        nonempty: true,
+        preview: active
+          ? "公开来源标题\n\n公开来源正文。"
+          : "公开来源标题\n\n公开来源正文。\n\n公开合成重复页脚",
+      },
+      chunk_metadata: {
+        excluded_repeated_footer_noise: active
+          ? [{
+              confirmation_id: "confirmation-footer",
+              source_ref: sourceRef,
+              source_text: "公开合成重复页脚",
+              rule_version: "manual-exact-text-v1",
+              confirmed_by: "operator-zhang",
+              confirmed_at: "2026-08-24T18:03:00+00:00",
+            }]
+          : [],
+      },
+    });
+    const detail = () => ({
+      page_id: "page-1",
+      page_number: 1,
+      review_status: "pending",
+      source_content: {
+        ...originalSource,
+        body: ["公开来源正文。", "公开合成重复页脚"],
+        images: [{
+          reference_index: 0,
+          alt_text: "公开页脚位置示意图",
+          media_type: "image/png",
+          origin_part: "ppt/media/footer.png",
+        }],
+      },
+      curation: noiseCuration(),
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("/api/v1/curation/pages?review_status=pending")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }));
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        if (failNextDetailRefresh) {
+          failNextDetailRefresh = false;
+          return Promise.resolve(new Response(JSON.stringify({
+            error: { code: "simulated_refresh_failure", message: "模拟详情刷新失败。" },
+          }), { status: 503 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify(detail()), { status: 200 }));
+      }
+      if (url.endsWith(`/repeated-footer-noise/candidates/${sourceRef}`)) {
+        return Promise.resolve(new Response(JSON.stringify({
+          candidate: {
+            candidate_id: "a".repeat(64),
+            document_id: "document-1",
+            version_id: "version-1",
+            source_text: "公开合成重复页脚",
+            normalized_text: "公开合成重复页脚",
+            rule_version: "manual-exact-text-v1",
+            affected_pages: [1, 2, 3].map((pageNumber) => ({
+              page_id: `page-${pageNumber}`,
+              page_version_id: `page-version-${pageNumber}`,
+              page_number: pageNumber,
+              source_ref: `footer-source-page-${pageNumber}`,
+              source_kind: "body",
+              source_index: 1,
+              source_text: "公开合成重复页脚",
+              standard_render: { url: `/api/v1/pages/page-${pageNumber}/render` },
+            })),
+          },
+        }), { status: 200 }));
+      }
+      if (url.endsWith("/repeated-footer-noise/confirmations") && init?.method === "POST") {
+        active = true;
+        revoked = false;
+        failNextDetailRefresh = true;
+        return Promise.resolve(new Response(JSON.stringify({
+          confirmation: {
+            confirmation_id: "confirmation-footer",
+            status: "active",
+          },
+        }), { status: 201 }));
+      }
+      if (url.endsWith("/repeated-footer-noise/confirmations/confirmation-footer/revoke")) {
+        active = false;
+        revoked = true;
+        failNextDetailRefresh = true;
+        return Promise.resolve(new Response(JSON.stringify({
+          confirmation: { confirmation_id: "confirmation-footer", status: "revoked" },
+        }), { status: 200 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+
+    const checkRepeated = await screen.findByRole("button", {
+      name: "检查正文来源 2 的跨页重复",
+    });
+    const imageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
+    await userEvent.type(imageSummary, "（本地修改）");
+    expect(checkRepeated).toBeDisabled();
+    await userEvent.clear(imageSummary);
+    await userEvent.type(imageSummary, savedImageSummary);
+    await waitFor(() => expect(checkRepeated).toBeEnabled());
+    await userEvent.click(checkRepeated);
+    expect(await screen.findByRole("heading", { name: "确认排除重复页脚噪声" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("共影响 3 页")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看第 2 页标准页渲染" }))
+      .toHaveAttribute("href", "/api/v1/pages/page-2/render");
+    const submit = screen.getByRole("button", { name: "确认排除 3 页中的此来源" });
+    expect(submit).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: "我已核对全部受影响页" }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "确认说明（可选）" }),
+      "已核对三页。",
+    );
+    await userEvent.click(submit);
+
+    expect(await screen.findByText("重复页脚噪声确认已保存；详情暂未刷新，请重新加载当前页。"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("重复页脚噪声确认未能保存；正文保持不变。"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "确认排除重复页脚噪声" }))
+      .not.toBeInTheDocument();
+
+    cleanup();
+    render(<App />);
+    expect(await screen.findByText("已从 Chunk 正文排除")).toBeInTheDocument();
+    expect(screen.getAllByText(/operator-zhang ·/).length).toBeGreaterThan(0);
+    expect(screen.getByText("规则 manual-exact-text-v1")).toBeInTheDocument();
+    const revoke = screen.getByRole("button", { name: "撤销正文来源 2 的重复页脚排除" });
+    const activeImageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
+    await userEvent.type(activeImageSummary, "（本地修改）");
+    expect(revoke).toBeDisabled();
+    await userEvent.clear(activeImageSummary);
+    await userEvent.type(activeImageSummary, savedImageSummary);
+    await waitFor(() => expect(revoke).toBeEnabled());
+    await userEvent.click(revoke);
+    expect(await screen.findByText("重复页脚排除撤销已保存；详情暂未刷新，请重新加载当前页。"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("重复页脚排除未能撤销；正文状态未改变。"))
+      .not.toBeInTheDocument();
+
+    cleanup();
+    render(<App />);
+    expect(await screen.findByText("最近一次排除已撤销")).toBeInTheDocument();
+    expect(screen.getByText("从策展工作台撤销并恢复正文。")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "检查正文来源 2 的跨页重复" }))
+      .toBeInTheDocument();
+  });
+
   it("以显式保存、确认和来源审核完成无 overview、零框选批准路径", async () => {
     let queueApproved = false;
     let snapshot: ReturnType<typeof curationState>["current_snapshot"] = null;
