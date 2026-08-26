@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-21T04:10:42Z",
+  "generatedAt": "2026-08-25T10:33:53Z",
   "title": "Design System: PPTExtract",
   "extensions": {
     "colorMeta": {
@@ -108,23 +108,23 @@
       "data": { "displayName": "传输数据", "purpose": "页码、计时、对象编号、快捷键、JSON 与表格数值。" }
     },
     "shadows": [
-      { "name": "floating-tools", "value": "0 10px 28px rgba(0, 0, 0, .32)", "purpose": "来源画面上的悬浮工具条和 toast。" },
-      { "name": "current-queue-item", "value": "0 5px 16px rgba(0, 0, 0, .25)", "purpose": "辅助标明页队列中的当前页。" },
-      { "name": "source-canvas", "value": "0 18px 42px rgba(0, 0, 0, .38)", "purpose": "把标准页渲染从监看器背景抬起。" },
-      { "name": "current-log-entry", "value": "0 6px 16px rgba(36, 50, 58, .12)", "purpose": "辅助标明明亮日志中的当前来源文件或人工截图。" },
-      { "name": "gate-dock", "value": "0 -10px 24px rgba(23, 32, 38, .12)", "purpose": "表达审核闸门固定于日志底部。" },
-      { "name": "right-drawer", "value": "-12px 0 30px rgba(0, 0, 0, .38)", "purpose": "表达从右边缘进入的状态抽屉。" },
-      { "name": "boundary-notice", "value": "0 12px 28px rgba(0, 0, 0, .35)", "purpose": "由控件锚定的能力边界说明。" },
-      { "name": "recovery-error", "value": "0 16px 38px rgba(0, 0, 0, .28)", "purpose": "阻塞当前工作位的连接错误与恢复动作。" }
+      { "name": "floating-tools", "value": "0 12px 28px rgb(0 0 0 / 35%)", "purpose": "来源画面上的悬浮工具与锚定说明。" },
+      { "name": "current-queue-item", "value": "0 5px 13px rgb(0 0 0 / 22%)", "purpose": "辅助标明页队列中的当前页。" },
+      { "name": "source-canvas", "value": "0 16px 34px rgb(0 0 0 / 32%)", "purpose": "把标准页渲染结果从监看器背景抬起。" },
+      { "name": "current-log-entry", "value": "0 7px 16px rgb(35 54 59 / 12%)", "purpose": "辅助标明明亮日志中的当前来源图片引用。" },
+      { "name": "gate-dock", "value": "0 -12px 24px rgb(29 38 43 / 10%)", "purpose": "表达审核闸门固定于日志底部。" },
+      { "name": "dialog", "value": "0 24px 56px rgb(0 0 0 / 44%)", "purpose": "表达确认对话框位于工作台之上。" },
+      { "name": "boundary-notice", "value": "0 12px 28px rgb(0 0 0 / 35%)", "purpose": "由控件锚定的能力边界说明。" },
+      { "name": "recovery-error", "value": "0 16px 38px rgb(0 0 0 / 28%)", "purpose": "阻塞当前工作位的连接错误与恢复动作。" }
     ],
     "motion": [
-      { "name": "toast-reveal", "value": "160ms ease-out", "purpose": "提示的透明度与短距离位移。" },
-      { "name": "drawer-entry", "value": "180ms cubic-bezier(.16, 1, .3, 1)", "purpose": "右侧状态抽屉进入与退出。" },
-      { "name": "control-state", "value": "180ms cubic-bezier(.16, 1, .3, 1)", "purpose": "按钮边框与背景的 hover / expanded 状态切换。" },
-      { "name": "reduced-motion", "value": ".001ms", "purpose": "prefers-reduced-motion 下近乎即时完成全部过渡与动画。" }
+      { "name": "loading-sweep", "value": "1.25s ease-in-out infinite", "purpose": "加载骨架的低速扫光。" },
+      { "name": "control-state", "value": "180ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "按钮边框与背景的 hover / expanded 状态切换。" },
+      { "name": "reduced-motion", "value": "none", "purpose": "prefers-reduced-motion 下停止加载动画与控件过渡。" }
     ],
     "breakpoints": [
-      { "name": "compact-desktop", "value": "1320px" }
+      { "name": "compact-desktop", "value": "1320px" },
+      { "name": "narrow-shell", "value": "900px" }
     ]
   },
   "components": [
@@ -180,25 +180,25 @@
       "name": "Filter Navigation",
       "kind": "nav",
       "refersTo": "button-quiet",
-      "description": "暗面页队列的紧凑筛选导航。",
-      "html": "<nav class=\"ds-filter-nav\" aria-label=\"页队列筛选\"><button class=\"ds-filter-tab ds-filter-tab-active\" type=\"button\">待处理</button><button class=\"ds-filter-tab\" type=\"button\">全部</button><button class=\"ds-filter-tab\" type=\"button\">已继承</button></nav>",
-      "css": ".ds-filter-nav { display:grid; grid-template-columns:repeat(3, 1fr); gap:4px; background:var(--monitor, #171b20); padding:9px; } .ds-filter-tab { min-width:0; border:1px solid #3e4952; border-radius:6px; background:transparent; color:#bfc7cb; padding:6px 4px; font:650 12px/1.45 var(--font-ui, sans-serif); cursor:pointer; } .ds-filter-tab:hover { background:#2a3239; } .ds-filter-tab:active, .ds-filter-tab-active { border-color:var(--teal, #64bbb8); background:#1d3435; color:#dcfffd; } .ds-filter-tab:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+      "description": "暗面页列中的真实紧凑筛选导航，当前筛选使用实底与文字共同标记。",
+      "html": "<nav class=\"ds-filter-nav\" aria-label=\"页清单筛选\"><button class=\"ds-filter-tab ds-filter-tab-active\" type=\"button\" aria-pressed=\"true\">待处理</button><button class=\"ds-filter-tab\" type=\"button\">全部</button><button class=\"ds-filter-tab\" type=\"button\">渲染警告</button></nav>",
+      "css": ".ds-filter-nav { display:grid; grid-template-columns:1fr .8fr 1.4fr; gap:2px; padding:3px; border:1px solid #3a444d; border-radius:6px; background:#12171b; font-family:\"Noto Sans SC\",sans-serif; } .ds-filter-tab { min-height:30px; padding:4px 3px; border:0; border-radius:4px; color:#9eaaaf; background:transparent; font-size:12px; font-weight:650; white-space:nowrap; cursor:pointer; } .ds-filter-tab:hover { color:#f2f5f5; background:#252c32; } .ds-filter-tab:active,.ds-filter-tab-active { color:#f7ffff; background:#276f70; } .ds-filter-tab:focus-visible { outline:2px solid #9ee9e5; outline-offset:2px; }"
     },
     {
       "name": "Current Page Item",
       "kind": "card",
       "refersTo": "button-quiet",
-      "description": "暗面页队列中带缩略证据、页码和文字状态的当前页。",
-      "html": "<button class=\"ds-page-item\" type=\"button\" aria-current=\"page\"><span class=\"ds-page-index\">18</span><span class=\"ds-page-thumb\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i></span><strong class=\"ds-page-title\">第一季度运营概览</strong><span class=\"ds-page-state\"><i></i>待审核 · 已变化</span></button>",
-      "css": ".ds-page-item { display:grid; grid-template-columns:22px 1fr; gap:6px 8px; width:190px; border:1px solid var(--teal, #64bbb8); border-radius:8px; background:#191f24; color:#eef1f2; padding:8px; text-align:left; box-shadow:0 5px 16px rgba(0,0,0,.25); cursor:pointer; } .ds-page-index { grid-row:1 / 4; color:#cdd4d7; font:12px/1.55 var(--font-data, monospace); } .ds-page-thumb { display:flex; align-items:end; gap:4px; height:46px; border:1px solid #747e84; background:#f4f5f3; padding:8px; } .ds-page-thumb i { flex:1; height:45%; background:#438f92; } .ds-page-thumb i:nth-child(2) { height:70%; } .ds-page-thumb i:nth-child(3) { height:55%; } .ds-page-thumb i:nth-child(4) { height:82%; } .ds-page-title { overflow:hidden; color:#eef1f2; font:650 12px/1.45 var(--font-ui, sans-serif); text-overflow:ellipsis; white-space:nowrap; } .ds-page-state { display:flex; align-items:center; gap:5px; color:#aeb7bc; font:11px/1.45 var(--font-ui, sans-serif); } .ds-page-state i { width:8px; height:8px; border:1px solid var(--amber, #f2b84b); border-radius:50%; background:var(--amber, #f2b84b); } .ds-page-item:hover { border-color:#9ee9e5; background:#20262c; } .ds-page-item:active { background:#171b20; } .ds-page-item:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+      "description": "暗面页列中带页码、状态标记、标题和审核状态的当前页。",
+      "html": "<button class=\"ds-page-item\" type=\"button\" aria-current=\"page\"><span class=\"ds-page-index\">18</span><span class=\"ds-page-mark\" aria-hidden=\"true\"></span><span class=\"ds-page-copy\"><strong>第一季度运营概览</strong><small>待处理 · 渲染警告 1/1 未确认</small></span><span class=\"ds-page-warning\" aria-hidden=\"true\">!</span></button>",
+      "css": ".ds-page-item { display:grid; grid-template-columns:29px 9px minmax(0,1fr) auto; align-items:center; gap:9px; width:220px; min-height:60px; padding:8px 9px; border:1px solid #64bbb8; border-radius:6px; color:#e2e6e8; background:#283137; text-align:left; box-shadow:0 5px 13px rgb(0 0 0 / 22%); cursor:pointer; font-family:\"Noto Sans SC\",sans-serif; } .ds-page-index { color:#9aa5ab; font:11px/1 \"JetBrains Mono\",monospace; } .ds-page-mark { width:8px; height:8px; border:1px solid #e4a83d; border-radius:50%; background:#f2b84b; } .ds-page-copy { min-width:0; display:grid; gap:3px; } .ds-page-copy strong,.ds-page-copy small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .ds-page-copy strong { font-size:12px; font-weight:680; } .ds-page-copy small { color:#96a1a7; font-size:11px; } .ds-page-warning { display:grid; place-items:center; width:18px; height:18px; border:1px solid #b98424; border-radius:50%; color:#ffe4a0; background:#3a2d17; font:700 10px/1 \"JetBrains Mono\",monospace; } .ds-page-item:hover { background:#22292f; } .ds-page-item:active { background:#20262c; } .ds-page-item:focus-visible { outline:2px solid #9ee9e5; outline-offset:2px; }"
     },
     {
       "name": "AnyDoc Source Asset",
       "kind": "custom",
       "refersTo": "field-light",
-      "description": "先于截图出现的 AnyDoc 原始图片文件审核条目，持续保留文件身份与人工处置。",
-      "html": "<article class=\"ds-source-asset\"><header class=\"ds-source-head\"><span class=\"ds-source-preview\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span><strong>SRC-01 · image-001.png</strong><small>image/png · 1180 × 620 · 待审核</small></span></header><div class=\"ds-decision-row\"><button class=\"ds-decision ds-decision-active\" type=\"button\">保留源文件</button><button class=\"ds-decision ds-decision-exclude\" type=\"button\">忽略</button></div></article>",
-      "css": ".ds-source-asset { width:340px; overflow:hidden; border:1px solid #c8ced1; border-radius:9px; background:var(--paper-2, #f6f7f7); color:var(--ink, #172026); font-family:var(--font-ui, sans-serif); } .ds-source-head { display:grid; grid-template-columns:78px minmax(0,1fr); align-items:center; gap:10px; padding:10px; } .ds-source-head strong,.ds-source-head small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .ds-source-head strong { font-size:12px; } .ds-source-head small { margin-top:4px; color:#657078; font-size:11px; } .ds-source-preview { display:flex; align-items:end; gap:4px; height:44px; border:1px solid #aeb7bb; background:#eef1ef; padding:7px; } .ds-source-preview i { flex:1; height:38%; background:#438f92; } .ds-source-preview i:nth-child(2) { height:76%; } .ds-source-preview i:nth-child(3) { height:56%; } .ds-decision-row { display:flex; gap:7px; border-top:1px solid #ccd2d5; padding:10px; } .ds-decision { flex:1; min-height:34px; border:1px solid #aeb7bb; border-radius:7px; background:var(--paper-2, #f6f7f7); color:var(--ink, #172026); cursor:pointer; } .ds-decision:hover { background:#e0e5e6; } .ds-decision-active { border-color:var(--teal-deep, #276f70); background:var(--teal-deep, #276f70); color:#fff; } .ds-decision-exclude:hover { border-color:var(--red-deep, #8d3027); color:var(--red-deep, #8d3027); } .ds-decision:active { transform:translateY(1px); } .ds-decision:focus-visible { outline:2px solid var(--focus, #9ee9e5); outline-offset:2px; }"
+      "description": "先于人工截图出现的 AnyDoc 来源图片引用工作位，持续显示编号、来源身份和人工处置。",
+      "html": "<article class=\"ds-source-asset\"><button class=\"ds-source-summary\" type=\"button\" aria-expanded=\"true\"><span class=\"ds-source-number\">01</span><span class=\"ds-source-copy\"><strong>公开示意图</strong><small>ppt/media/image1.png</small></span><span class=\"ds-source-state\">待处置</span></button><fieldset class=\"ds-source-decisions\"><legend>选择此来源的处置</legend><label class=\"ds-source-choice ds-source-choice-active\"><input type=\"radio\" checked><span><strong>保留原始图片</strong><small>进入产物并形成视觉对象引用</small></span></label><label class=\"ds-source-choice\"><input type=\"radio\"><span><strong>忽略此来源</strong><small>保留来源身份与审计</small></span></label></fieldset></article>",
+      "css": ".ds-source-asset { width:340px; overflow:hidden; border:1px solid #4c8f8e; border-radius:8px; background:#f6f7f7; color:#172026; box-shadow:0 7px 16px rgb(35 54 59 / 12%); font-family:\"Noto Sans SC\",sans-serif; } .ds-source-summary { width:100%; display:grid; grid-template-columns:29px minmax(0,1fr) auto; align-items:center; gap:7px; min-height:48px; padding:7px 8px; border:0; color:#172026; background:#f2f4f4; text-align:left; cursor:pointer; } .ds-source-summary:hover { background:#e9eeee; } .ds-source-number { color:#276f70; font:700 11px/1 \"JetBrains Mono\",monospace; } .ds-source-copy { min-width:0; display:grid; gap:2px; } .ds-source-copy strong,.ds-source-copy small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .ds-source-copy strong { font-size:11px; } .ds-source-copy small { color:#68747a; font:9px/1.4 \"JetBrains Mono\",monospace; } .ds-source-state { padding:2px 6px; border:1px solid #a9b2b6; border-radius:999px; color:#525f66; background:#e5e9ea; font-size:9px; font-weight:750; } .ds-source-decisions { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin:0; padding:10px; border:0; border-top:1px solid #c7ced1; background:#fbfcfc; } .ds-source-decisions legend { grid-column:1/-1; color:#344149; font-size:10px; font-weight:750; } .ds-source-choice { display:flex; gap:7px; padding:8px; border:1px solid #b9c1c4; border-radius:6px; color:#344149; background:#f2f4f4; cursor:pointer; } .ds-source-choice-active { border-color:#276f70; color:#173d3d; background:#dff1f0; } .ds-source-choice input { margin:2px 0 0; accent-color:#276f70; } .ds-source-choice span { display:grid; gap:2px; } .ds-source-choice strong { font-size:10px; } .ds-source-choice small { color:#667278; font-size:9px; line-height:1.4; } .ds-source-choice:hover { border-color:#64bbb8; } .ds-source-choice:focus-within { outline:2px solid #9ee9e5; outline-offset:2px; }"
     },
     {
       "name": "Command Key",
@@ -224,8 +224,10 @@
       { "name": "The 状态不独唱 Rule", "body": "teal、amber、red 和 green 从不单独传达结果；至少搭配文字、图标、边框样式或位置关系。", "section": "colors" },
       { "name": "The 稀释红色 Rule", "body": "red 只用于排除、错误与硬阻塞，普通强调和当前选择不得借用它。", "section": "colors" },
       { "name": "The 数据有轨 Rule", "body": "会变化的数字和机器状态使用等宽数据字体；解释与判断仍使用 UI 字体。", "section": "typography" },
+      { "name": "The 证据可核验 Rule", "body": "来源部件、媒体类型、字节数、哈希完整性与像素尺寸等关键元数据可以紧凑，但必须保持长时间阅读与逐字核验所需的字号、对比和换行，不得为压缩栏宽降格为装饰性微字。", "section": "typography" },
       { "name": "The 证据不退场 Rule", "body": "编辑与结论界面必须让来源证据保持可见或可立即对照，不能把关键判断拆进失去上下文的通用卡片流程。", "section": "layout" },
       { "name": "The 构图非模板 Rule", "body": "复用证据与决策并置、桌面高密度及 1280px 级可用性，不复制某张已批准页面的固定栏宽。", "section": "layout" },
+      { "name": "The 结论不漂移 Rule", "body": "长日志中的页面结论与结构性阻塞必须持续可见；它们应位于独立布局轨道，内容在自己的区域内滚动，不能依靠遮住表单或队列尾部的浮层来实现固定。", "section": "layout" },
       { "name": "The 平面优先 Rule", "body": "容器默认依靠表面色与发丝线分组；只有真实叠层、固定层或当前焦点才获得阴影。", "section": "elevation" },
       { "name": "The 紧角 Rule", "body": "高频控件保持紧凑小圆角；大胶囊只留给短状态，不将面板和卡片做成松软的 SaaS 气泡。", "section": "shapes" }
     ],
