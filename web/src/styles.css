@@ -76,7 +76,7 @@ textarea:focus-visible {
   height: 100vh;
   min-height: 0;
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr) 48px;
+  grid-template-rows: 58px minmax(0, 1fr) minmax(48px, auto);
   overflow: hidden;
   color: var(--slate-paper);
   background: #101519;
@@ -422,7 +422,8 @@ textarea:focus-visible {
   color: #a7b0b5;
   background: #181e23;
   font-size: 11px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .command-strip > span {
@@ -455,6 +456,11 @@ kbd {
   margin-left: auto;
   color: #8fbf9f;
   font: 10px/1 var(--data-font);
+}
+
+.workspace-support-note {
+  color: #aab3b8;
+  font: 10px/1.4 var(--data-font);
 }
 
 .workspace--loading {
@@ -587,7 +593,8 @@ kbd {
   min-height: 0;
   display: grid;
   grid-template-columns: 246px minmax(500px, 1fr) 384px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--monitor-black);
 }
 
@@ -884,7 +891,7 @@ kbd {
 .source-phase header p,
 .review-gate header p {
   margin: 3px 0 0;
-  color: #657078;
+  color: #526068;
   font-size: 11px;
   line-height: 1.45;
 }
@@ -1169,7 +1176,7 @@ kbd {
 }
 
 .readonly-source-entry span {
-  color: #657078;
+  color: #526068;
   font-size: 9px;
   font-weight: 700;
 }
@@ -1638,6 +1645,9 @@ kbd {
 }
 
 .review-gate li > button {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
   padding: 0;
   border: 0;
   color: #702820;
@@ -2132,12 +2142,18 @@ kbd {
   position: fixed;
   z-index: 100;
   width: min(360px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   padding: 14px;
   border: 1px solid #839096;
   border-radius: 10px;
   color: #172026;
   background: #f6f7f7;
   box-shadow: 0 24px 56px rgb(0 0 0 / 44%);
+}
+
+.capture-editor[data-positioned="false"] {
+  visibility: hidden;
 }
 
 .capture-editor > header {
@@ -4342,6 +4358,26 @@ kbd {
 
   .evidence-stage {
     padding: 18px;
+  }
+}
+
+@media (max-width: 1279px) {
+  .curation-workspace {
+    grid-template-columns: 220px 470px 348px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-color: #53606a #171b20;
+    scrollbar-width: thin;
+  }
+
+  .command-strip {
+    overflow-x: auto;
+    scrollbar-color: #53606a #171b20;
+    scrollbar-width: thin;
+  }
+
+  .command-status {
+    margin-left: 0;
   }
 }
 

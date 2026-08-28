@@ -363,17 +363,23 @@ def test_review_queue_supports_single_and_batch_conclusions_in_browser(
     browser_result = subprocess.run(
         ["node", "tests/curation-review-blackbox.mjs", base_url, route],
         cwd=project_root / "web",
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=90,
     )
+    assert browser_result.returncode == 0, browser_result.stderr
     assert json.loads(browser_result.stdout) == {
         "ok": True,
         "checks": [
             "viewport-1280-three-columns",
+            "wcag22aa-1280",
+            "zoom-125%-reachable",
+            "zoom-200%-reachable",
+            "text-zoom-200%-reachable",
             "plain-text-zero-capture-approved",
             "keyboard-a-approved",
+            "wcag22aa-1440",
             "keyboard-r-reopen-and-x-exclude",
             "pending-only-batch-exclusion",
             "forbidden-batch-actions-absent",
@@ -442,14 +448,20 @@ def test_first_capture_visual_is_created_and_verified_in_real_browser(
     browser_result = subprocess.run(
         ["node", "tests/capture-visual-blackbox.mjs", base_url, *routes],
         cwd=project_root / "web",
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=120,
     )
+    assert browser_result.returncode == 0, browser_result.stderr
     report = json.loads(browser_result.stdout)
     assert report["ok"] is True
-    assert report["checks"] == ["capture-viewport-1280", "capture-viewport-1440"]
+    assert report["checks"] == [
+        "capture-viewport-1280",
+        "keyboard-flow-1280",
+        "capture-viewport-1440",
+        "keyboard-flow-1440",
+    ]
     assert len(report["savedBounds"]) == 2
     assert len(report["mutationSnapshots"]) == 10
     assert len(set(report["mutationSnapshots"])) == 10

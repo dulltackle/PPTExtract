@@ -574,13 +574,17 @@ describe("来源文字审核工作台", () => {
       name: "有缺口，在页面上框选",
     });
     expect(screen.queryByText("视觉对象 01")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: /选择第 1 页/ }));
+    expect(screen.getByRole("region", { name: "批量排除" })).toHaveTextContent("已选 1 页");
     await userEvent.click(gapButton);
+    expect(screen.getByRole("button", { name: /第 1 页/ })).toBeDisabled();
 
     await userEvent.keyboard("{Escape}");
     const gapButtonAfterSelectionCancel = screen.getByRole("button", {
       name: "有缺口，在页面上框选",
     });
     await waitFor(() => expect(gapButtonAfterSelectionCancel).toHaveFocus());
+    expect(screen.getByRole("region", { name: "批量排除" })).toHaveTextContent("已选 1 页");
     await userEvent.click(gapButtonAfterSelectionCancel);
 
     const image = screen.getByAltText("第 1 页标准页渲染结果");
@@ -760,7 +764,20 @@ describe("来源文字审核工作台", () => {
     render(<App />);
     const editSecond = await screen.findByRole("button", { name: "编辑视觉对象 02" });
     expect(screen.getByRole("button", { name: /视觉对象 01 框选范围/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /视觉对象 02 框选范围/ })).toBeInTheDocument();
+    const secondRange = screen.getByRole("button", { name: /视觉对象 02 框选范围/ });
+    secondRange.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(await screen.findByRole("dialog", { name: "视觉对象 02" })).toBeInTheDocument();
+    expect(secondRange).toHaveStyle({ left: "50.1%" });
+    await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(secondRange).toHaveFocus());
+
+    secondRange.focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    expect(await screen.findByRole("dialog", { name: "视觉对象 02" })).toBeInTheDocument();
+    expect(secondRange).toHaveStyle({ height: "38.1%" });
+    await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(secondRange).toHaveFocus());
 
     await userEvent.click(editSecond);
     const summary = await screen.findByRole("textbox", { name: "视觉对象 02 summary" });

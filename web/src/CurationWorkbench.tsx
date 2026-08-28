@@ -41,6 +41,15 @@ interface PageOperation {
   announcement: string | null;
 }
 
+export interface CurationCommandState {
+  navigation: boolean;
+  approve: boolean;
+  exclude: boolean;
+  reopen: boolean;
+  cancel: boolean;
+  status: string;
+}
+
 const EXCLUSION_REASON_OPTIONS: Array<{ value: ExclusionReason; label: string }> = [
   { value: "no_meaningful_content", label: "无有意义内容" },
   { value: "duplicate", label: "重复内容" },
@@ -86,6 +95,20 @@ function focusAfterLiveAnnouncement(target: HTMLElement | null) {
   window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => target?.focus());
   });
+}
+
+function adjustNormalizedBounds(
+  bounds: NormalizedBounds,
+  field: "left" | "top" | "width" | "height",
+  delta: number,
+): NormalizedBounds {
+  const minimum = 0.005;
+  const next = { ...bounds };
+  if (field === "left") next.left = Math.min(1 - next.width, Math.max(0, next.left + delta));
+  if (field === "top") next.top = Math.min(1 - next.height, Math.max(0, next.top + delta));
+  if (field === "width") next.width = Math.min(1 - next.left, Math.max(minimum, next.width + delta));
+  if (field === "height") next.height = Math.min(1 - next.top, Math.max(minimum, next.height + delta));
+  return next;
 }
 
 function HiddenRenderPlaceholder() {
@@ -350,7 +373,10 @@ function EvidencePanel({
   const [announcement, setAnnouncement] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editorPosition, setEditorPosition] = useState<CSSProperties>({});
+  const [editorPlacement, setEditorPlacement] = useState<"right" | "left" | "bottom" | "top">("right");
+  const [editorPositioned, setEditorPositioned] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
+  const activeRangeRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLElement>(null);
   const summaryRef = useRef<HTMLTextAreaElement>(null);
   const capturePathButtonRef = useRef<HTMLButtonElement>(null);
@@ -395,6 +421,8 @@ function EvidencePanel({
     setSummaryError(null);
     setAnnouncement(null);
     setSaving(false);
+    setEditorPlacement("right");
+    setEditorPositioned(false);
     onEditingChange(false);
   }, [onEditingChange, page?.page_id]);
 
@@ -412,6 +440,7 @@ function EvidencePanel({
     setSummary(visual.summary ?? "");
     setVisualType((visual.visual_type as VisualType | null) ?? "");
     setSummaryError(null);
+    setEditorPositioned(false);
     setMode("editing");
     setAnnouncement(`正在编辑视觉对象 ${formatNumber(visualNumber(visual.visual_ref))}。`);
     onEditingChange(true);
@@ -426,9 +455,11 @@ function EvidencePanel({
     setSummary("");
     setVisualType("");
     setSummaryError(null);
+    setEditorPositioned(false);
     setMode("selecting");
     setAnnouncement("框选模式已开启。请在标准页渲染结果上拖出缺失范围。");
-  }, [page?.review_status, sourceReviewed]);
+    onEditingChange(true);
+  }, [onEditingChange, page?.review_status, sourceReviewed]);
 
   useEffect(() => {
     if (!editorCommand) return;
@@ -504,38 +535,56 @@ function EvidencePanel({
 
   const positionEditor = useCallback(() => {
     if (!selection || !imageRef.current) return;
+    const activeRangeRect = activeRangeRef.current?.getBoundingClientRect();
     const imageRect = imageRef.current.getBoundingClientRect();
-    const range = {
-      left: imageRect.left + selection.left * imageRect.width,
-      top: imageRect.top + selection.top * imageRect.height,
-      right: imageRect.left + (selection.left + selection.width) * imageRect.width,
-      bottom: imageRect.top + (selection.top + selection.height) * imageRect.height,
-    };
+    const range = activeRangeRect && activeRangeRect.width && activeRangeRect.height
+      ? activeRangeRect
+      : {
+          left: imageRect.left + selection.left * imageRect.width,
+          top: imageRect.top + selection.top * imageRect.height,
+          right: imageRect.left + (selection.left + selection.width) * imageRect.width,
+          bottom: imageRect.top + (selection.top + selection.height) * imageRect.height,
+        };
     const gap = 14;
     const margin = 12;
     const width = editorRef.current?.offsetWidth || 360;
     const height = editorRef.current?.offsetHeight || 430;
     const candidates = [
-      { left: range.right + gap, top: range.top },
-      { left: range.left - gap - width, top: range.top },
-      { left: range.left, top: range.bottom + gap },
-      { left: range.left, top: range.top - gap - height },
+      { placement: "right" as const, left: range.right + gap, top: range.top },
+      { placement: "left" as const, left: range.left - gap - width, top: range.top },
+      { placement: "bottom" as const, left: range.left, top: range.bottom + gap },
+      { placement: "top" as const, left: range.left, top: range.top - gap - height },
     ];
-    const chosen = candidates.find((candidate) => (
-      candidate.left >= margin && candidate.top >= margin &&
-      candidate.left + width <= window.innerWidth - margin &&
-      candidate.top + height <= window.innerHeight - margin
-    )) ?? candidates[0];
-    setEditorPosition({
-      left: Math.min(
-        window.innerWidth - width - margin,
-        Math.max(margin, chosen.left),
-      ),
-      top: Math.min(
-        window.innerHeight - height - margin,
-        Math.max(margin, chosen.top),
-      ),
+    const clamp = (value: number, minimum: number, maximum: number) => (
+      Math.min(Math.max(minimum, value), Math.max(minimum, maximum))
+    );
+    const assessed = candidates.map((candidate, priority) => {
+      const fits = candidate.left >= margin && candidate.top >= margin &&
+        candidate.left + width <= window.innerWidth - margin &&
+        candidate.top + height <= window.innerHeight - margin;
+      const left = clamp(candidate.left, margin, window.innerWidth - width - margin);
+      const top = clamp(candidate.top, margin, window.innerHeight - height - margin);
+      const overlapWidth = Math.max(0, Math.min(left + width, range.right) - Math.max(left, range.left));
+      const overlapHeight = Math.max(0, Math.min(top + height, range.bottom) - Math.max(top, range.top));
+      return {
+        ...candidate,
+        left,
+        top,
+        fits,
+        overlapArea: overlapWidth * overlapHeight,
+        priority,
+      };
     });
+    const chosen = assessed.find((candidate) => candidate.fits)
+      ?? [...assessed].sort((left, right) => (
+        left.overlapArea - right.overlapArea || left.priority - right.priority
+      ))[0];
+    setEditorPlacement(chosen.placement);
+    setEditorPosition({
+      left: chosen.left,
+      top: chosen.top,
+    });
+    setEditorPositioned(true);
   }, [selection]);
 
   useEffect(() => {
@@ -544,18 +593,38 @@ function EvidencePanel({
       if (editorRef.current?.contains(event.target as Node)) return;
       summaryRef.current?.focus();
     };
-    const frame = window.requestAnimationFrame(() => {
-      positionEditor();
-      summaryRef.current?.focus();
-    });
+    let frame = 0;
+    const schedulePosition = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(positionEditor);
+    };
+    const initialFrame = window.requestAnimationFrame(schedulePosition);
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(schedulePosition);
+    if (editorRef.current) resizeObserver?.observe(editorRef.current);
+    if (imageRef.current) resizeObserver?.observe(imageRef.current);
+    if (activeRangeRef.current) resizeObserver?.observe(activeRangeRef.current);
     document.addEventListener("focusin", keepFocusInEditor);
-    window.addEventListener("resize", positionEditor);
+    document.addEventListener("scroll", schedulePosition, true);
+    window.addEventListener("resize", schedulePosition);
+    imageRef.current?.addEventListener("load", schedulePosition);
     return () => {
       window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(initialFrame);
+      resizeObserver?.disconnect();
       document.removeEventListener("focusin", keepFocusInEditor);
-      window.removeEventListener("resize", positionEditor);
+      document.removeEventListener("scroll", schedulePosition, true);
+      window.removeEventListener("resize", schedulePosition);
+      imageRef.current?.removeEventListener("load", schedulePosition);
     };
   }, [mode, positionEditor]);
+
+  useEffect(() => {
+    if (mode !== "editing" || !editorPositioned) return;
+    const frame = window.requestAnimationFrame(() => summaryRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [editorPositioned, mode]);
 
   useEffect(() => {
     if (!focusCapturePathNonce || !canChoosePath || mode !== "decision") return;
@@ -573,6 +642,8 @@ function EvidencePanel({
     if (mode !== "selecting") return;
     const cancelSelection = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
       setSelection(null);
       setMode("decision");
       setAnnouncement(
@@ -580,11 +651,12 @@ function EvidencePanel({
           ? "已取消追加框选；既有视觉对象保持不变。"
           : "已取消框选，返回来源完整性选择。",
       );
+      onEditingChange(false);
       restoreFocus();
     };
     window.addEventListener("keydown", cancelSelection);
     return () => window.removeEventListener("keydown", cancelSelection);
-  }, [mode, orderedVisuals.length, restoreFocus]);
+  }, [mode, onEditingChange, orderedVisuals.length, restoreFocus]);
 
   const cancelEditor = () => {
     const number = formatNumber(visualNumber(editingRef));
@@ -594,6 +666,7 @@ function EvidencePanel({
     setSummary("");
     setVisualType("");
     setSummaryError(null);
+    setEditorPositioned(false);
     setAnnouncement(
       editingRef
         ? `已放弃视觉对象 ${number} 的修改；已保存内容与顺序保持不变。`
@@ -610,13 +683,7 @@ function EvidencePanel({
     delta: number,
   ) => {
     if (!selection) return;
-    const minimum = 0.005;
-    const next = { ...selection };
-    if (field === "left") next.left = Math.min(1 - next.width, Math.max(0, next.left + delta));
-    if (field === "top") next.top = Math.min(1 - next.height, Math.max(0, next.top + delta));
-    if (field === "width") next.width = Math.min(1 - next.left, Math.max(minimum, next.width + delta));
-    if (field === "height") next.height = Math.min(1 - next.top, Math.max(minimum, next.height + delta));
-    setSelection(next);
+    setSelection(adjustNormalizedBounds(selection, field, delta));
   };
 
   const handleSave = async () => {
@@ -727,6 +794,7 @@ function EvidencePanel({
       height: Number(Math.abs(point.y - operation.start.y).toFixed(6)),
     };
     setSelection(nextSelection);
+    setEditorPositioned(false);
     setMode("editing");
     setAnnouncement(
       `已创建临时视觉对象 ${formatNumber(visualNumber(null))}，请填写自足 summary。`,
@@ -773,6 +841,9 @@ function EvidencePanel({
               />
               {orderedVisuals.map((visual, index) => visual.bounds ? (
                 <button
+                  ref={activeRef === visual.visual_ref ? (node) => {
+                    activeRangeRef.current = node;
+                  } : undefined}
                   type="button"
                   key={visual.visual_ref}
                   data-visual-ref={visual.visual_ref}
@@ -786,6 +857,25 @@ function EvidencePanel({
                     height: `${(editingRef === visual.visual_ref && selection ? selection : visual.bounds).height * 100}%`,
                   }}
                   aria-label={`视觉对象 ${formatNumber(index + 1)} 框选范围，${visual.summary ?? "缺少 summary"}`}
+                  aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Shift+ArrowLeft Shift+ArrowRight Shift+ArrowUp Shift+ArrowDown"
+                  onKeyDown={(event) => {
+                    if (mode !== "decision" || !visual.bounds) return;
+                    const direction = event.key;
+                    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(direction)) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const field = event.shiftKey
+                      ? direction === "ArrowLeft" || direction === "ArrowRight" ? "width" : "height"
+                      : direction === "ArrowLeft" || direction === "ArrowRight" ? "left" : "top";
+                    const delta = direction === "ArrowLeft" || direction === "ArrowUp" ? -0.001 : 0.001;
+                    openEditor(visual, event.currentTarget);
+                    setSelection(adjustNormalizedBounds(visual.bounds, field, delta));
+                    setAnnouncement(
+                      event.shiftKey
+                        ? `视觉对象 ${formatNumber(index + 1)} 的尺寸已微调；左上角保持锚定。`
+                        : `视觉对象 ${formatNumber(index + 1)} 的位置已微调。`,
+                    );
+                  }}
                   onClick={(event) => {
                     if (mode !== "editing") openEditor(visual, event.currentTarget);
                   }}
@@ -830,6 +920,9 @@ function EvidencePanel({
               ) : null)}
               {editingRef === null && selection ? (
                 <div
+                  ref={(node) => {
+                    activeRangeRef.current = node;
+                  }}
                   className="capture-range is-temporary is-active"
                   style={{
                     left: `${selection.left * 100}%`,
@@ -907,6 +1000,8 @@ function EvidencePanel({
           ref={editorRef}
           className="capture-editor"
           style={editorPosition}
+          data-placement={editorPlacement}
+          data-positioned={editorPositioned}
           role="dialog"
           aria-modal="true"
           aria-labelledby="capture-editor-heading"
@@ -1405,6 +1500,7 @@ function InspectorPanel({
   onMoveCapture,
   onDeleteCapture,
   onMarkSourceComplete,
+  onModalStateChange,
   onSourceDirtyChange,
   onApproved,
   onExcluded,
@@ -1440,6 +1536,7 @@ function InspectorPanel({
   ) => void;
   onDeleteCapture: (visualRef: string, number: number, trigger: HTMLElement) => void;
   onMarkSourceComplete: (trigger: HTMLElement) => void;
+  onModalStateChange: (open: boolean) => void;
   onSourceDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
   onExcluded: () => Promise<void>;
@@ -1491,13 +1588,18 @@ function InspectorPanel({
           onMoveCapture={onMoveCapture}
           onDeleteCapture={onDeleteCapture}
           onMarkSourceComplete={onMarkSourceComplete}
+          onModalStateChange={onModalStateChange}
         />
       )}
     </aside>
   );
 }
 
-export function CurationWorkbench() {
+export function CurationWorkbench({
+  onCommandStateChange,
+}: {
+  onCommandStateChange?: (state: CurationCommandState) => void;
+} = {}) {
   const requestedParams = new URLSearchParams(window.location.search);
   const requestedFilter = requestedParams.get("filter");
   const requestedDocumentId = requestedParams.get("document");
@@ -1535,6 +1637,7 @@ export function CurationWorkbench() {
   const [batchNote, setBatchNote] = useState("");
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchAnnouncement, setBatchAnnouncement] = useState<string | null>(null);
+  const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const request = useRef<AbortController | null>(null);
   const poll = useRef<AbortController | null>(null);
   const timer = useRef<number | null>(null);
@@ -1592,6 +1695,54 @@ export function CurationWorkbench() {
   const selectedOperation = selectedKey ? operations[selectedKey] : undefined;
 
   useEffect(() => {
+    if (!onCommandStateChange) return;
+    const busy = Boolean(selectedOperation?.submitting || visualOperation || batchSubmitting);
+    const blockerCount = selectedCuration?.blockers.length ?? 0;
+    onCommandStateChange({
+      navigation: pages.length > 1 && !captureEditing && !batchSubmitting && !sourceModalOpen,
+      approve: Boolean(
+        selected?.review_status === "pending" && selectedCuration?.can_approve &&
+        approvalPathReady && !sourceDirty && !busy && !sourceModalOpen,
+      ),
+      exclude: selected?.review_status === "pending" && !busy && !sourceModalOpen,
+      reopen: Boolean(
+        selected?.review_status && selected.review_status !== "pending" && !busy && !sourceModalOpen,
+      ),
+      cancel: sourceModalOpen || captureEditing || selectedForBatch.size > 0,
+      status: loading
+        ? "正在读取策展工作位"
+        : busy
+          ? "正在保存，快捷键已暂停"
+          : sourceModalOpen
+            ? "确认对话框已打开，可按 Esc 返回检查"
+          : captureEditing
+            ? "视觉对象编辑中，可按 Esc 放弃本地修改"
+            : sourceDirty
+              ? "有未保存的来源修改，批准快捷键已暂停"
+              : blockerCount > 0
+                ? `${blockerCount} 项审核阻塞待处理`
+                : selected
+                  ? `${pageStatusLabel(selected)} · 工作位就绪`
+                  : "当前筛选没有可用页面",
+    });
+  }, [
+    approvalPathReady,
+    batchSubmitting,
+    captureEditing,
+    loading,
+    onCommandStateChange,
+    pages.length,
+    selected,
+    selectedCuration?.blockers.length,
+    selectedCuration?.can_approve,
+    selectedForBatch.size,
+    selectedOperation?.submitting,
+    sourceDirty,
+    sourceModalOpen,
+    visualOperation,
+  ]);
+
+  useEffect(() => {
     const eligible = new Set(
       pages
         .filter((page) => page.review_status === "pending" && page.page_id)
@@ -1605,6 +1756,7 @@ export function CurationWorkbench() {
 
   useEffect(() => {
     setSelectedCuration(null);
+    setSourceModalOpen(false);
     setCaptureVisuals([]);
     setCaptureEditing(false);
     setEditorCommand(null);
@@ -1667,7 +1819,7 @@ export function CurationWorkbench() {
 
   useEffect(() => {
     const handleQueueKeyboard = (event: KeyboardEvent) => {
-      if (captureEditing || batchSubmitting || isTextEntryTarget(event.target)) return;
+      if (captureEditing || batchSubmitting || sourceModalOpen || isTextEntryTarget(event.target)) return;
       if (event.key === "Escape" && selectedForBatch.size > 0) {
         event.preventDefault();
         setSelectedForBatch(new Set());
@@ -1689,7 +1841,7 @@ export function CurationWorkbench() {
     };
     document.addEventListener("keydown", handleQueueKeyboard);
     return () => document.removeEventListener("keydown", handleQueueKeyboard);
-  }, [batchSubmitting, captureEditing, handleSelect, pages, selectedForBatch.size]);
+  }, [batchSubmitting, captureEditing, handleSelect, pages, selectedForBatch.size, sourceModalOpen]);
 
   const updateOperation = useCallback(
     (targetKey: string, update: Partial<PageOperation>) => {
@@ -2195,6 +2347,7 @@ export function CurationWorkbench() {
         }}
         onDeleteCapture={requestDeleteCapture}
         onMarkSourceComplete={(trigger) => void handleMarkSourceComplete(trigger)}
+        onModalStateChange={setSourceModalOpen}
         onSourceDirtyChange={setSourceDirty}
         onApproved={handleApproved}
         onExcluded={handleExcluded}

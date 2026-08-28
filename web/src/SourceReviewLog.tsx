@@ -255,6 +255,7 @@ export function SourceReviewLog({
   onMoveCapture,
   onDeleteCapture,
   onMarkSourceComplete,
+  onModalStateChange,
 }: {
   page: CurationPage;
   arrivalAnnouncement: string | null;
@@ -280,6 +281,7 @@ export function SourceReviewLog({
   ) => void;
   onDeleteCapture: (visualRef: string, number: number, trigger: HTMLElement) => void;
   onMarkSourceComplete: (trigger: HTMLElement) => void;
+  onModalStateChange: (open: boolean) => void;
 }) {
   const [detail, setDetail] = useState<PageDetail | null>(null);
   const [titles, setTitles] = useState<string[]>([]);
@@ -319,6 +321,11 @@ export function SourceReviewLog({
   const noiseTriggerRef = useRef<HTMLElement | null>(null);
   const imageChoiceRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const imageFieldRefs = useRef<Record<string, HTMLElement | null>>({});
+
+  useEffect(() => {
+    onModalStateChange(showReopen || noiseCandidate !== null);
+    return () => onModalStateChange(false);
+  }, [noiseCandidate, onModalStateChange, showReopen]);
 
   const load = useCallback(() => {
     if (!page.page_id) return () => undefined;

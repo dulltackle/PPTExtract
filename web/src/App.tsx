@@ -9,7 +9,7 @@ import {
 } from "react";
 
 import { type BootstrapData, loadBootstrap, OperatorError, type Runway } from "./api";
-import { CurationWorkbench } from "./CurationWorkbench";
+import { CurationWorkbench, type CurationCommandState } from "./CurationWorkbench";
 import { PageMappingWorkbench } from "./PageMappingWorkbench";
 import { PublicationPreflight } from "./PublicationPreflight";
 import "./styles.css";
@@ -183,6 +183,7 @@ export function App() {
   const isPublication = window.location.pathname.startsWith("/publication");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [showUploadBoundary, setShowUploadBoundary] = useState(false);
+  const [curationCommands, setCurationCommands] = useState<CurationCommandState | null>(null);
   const activeRequest = useRef<{ controller: AbortController; requestId: number } | null>(null);
   const nextRequestId = useRef(0);
 
@@ -292,7 +293,9 @@ export function App() {
 
       {state.kind === "loading" ? <LoadingRunways /> : null}
       {state.kind === "error" ? <ErrorWorkspace message={state.message} retry={refresh} /> : null}
-      {state.kind === "ready" && isCuration ? <CurationWorkbench /> : null}
+      {state.kind === "ready" && isCuration ? (
+        <CurationWorkbench onCommandStateChange={setCurationCommands} />
+      ) : null}
       {state.kind === "ready" && isPublication ? <PublicationPreflight /> : null}
       {state.kind === "ready" && isMapping && mappingMatch ? (
         <PageMappingWorkbench documentId={mappingMatch[1]} versionId={mappingMatch[2]} />
@@ -311,11 +314,14 @@ export function App() {
         <span className="command-strip-label">键盘操作</span>
         {isCuration ? (
           <>
-            <span><kbd>←</kbd><kbd>→</kbd> 上一页 / 下一页</span>
-            <span><kbd>A</kbd> 批准</span>
-            <span><kbd>X</kbd> 排除原因</span>
-            <span><kbd>R</kbd> 重新打开</span>
-            <span><kbd>Esc</kbd> 取消</span>
+            {curationCommands?.navigation ? (
+              <span><kbd>←</kbd><kbd>→</kbd> 上一页 / 下一页</span>
+            ) : null}
+            {curationCommands?.approve ? <span><kbd>A</kbd> 批准</span> : null}
+            {curationCommands?.exclude ? <span><kbd>X</kbd> 排除原因</span> : null}
+            {curationCommands?.reopen ? <span><kbd>R</kbd> 重新打开</span> : null}
+            {curationCommands?.cancel ? <span><kbd>Esc</kbd> 取消</span> : null}
+            <span className="workspace-support-note">完整三栏适配 1280px 及以上</span>
           </>
         ) : (
           <>
@@ -334,7 +340,7 @@ export function App() {
             ? isMapping
               ? "页对应工作位就绪"
               : isCuration
-              ? "策展工作位就绪"
+              ? curationCommands?.status ?? "正在读取策展工作位"
               : isPublication
                 ? "发布校验工作位就绪"
               : "入口就绪"

@@ -63,6 +63,9 @@ async function exercise(route, viewport) {
 
   const editor = page.getByRole("dialog", { name: "视觉对象 01" });
   await editor.waitFor();
+  await page.waitForFunction(() => (
+    document.querySelector(".capture-editor")?.getAttribute("data-positioned") === "true"
+  ));
   const summary = page.getByRole("textbox", { name: "视觉对象 01 summary" });
   await page.waitForFunction(() => (
     document.activeElement?.getAttribute("aria-label") === "视觉对象 01 summary"
@@ -76,13 +79,42 @@ async function exercise(route, viewport) {
     editorBox.y + editorBox.height <= rangeBox.y ||
     rangeBox.y + rangeBox.height <= editorBox.y
   );
-  if (overlaps) throw new Error(`${viewport.width}px 浮窗遮挡当前框选范围`);
+  if (overlaps) {
+    throw new Error(`${viewport.width}px 浮窗遮挡当前框选范围：editor=${JSON.stringify(editorBox)} range=${JSON.stringify(rangeBox)}`);
+  }
   if (
     editorBox.x < 0 || editorBox.y < 0 ||
     editorBox.x + editorBox.width > viewport.width ||
     editorBox.y + editorBox.height > viewport.height
   ) {
     throw new Error(`${viewport.width}px 浮窗超出可视区域`);
+  }
+  const placement = await editor.getAttribute("data-placement");
+  if (placement !== "right") {
+    throw new Error(`${viewport.width}px 中央范围应优先把浮窗放在右侧，实际为 ${placement ?? "未标记"}`);
+  }
+  const evidenceStage = page.locator(".evidence-stage");
+  await evidenceStage.evaluate((element) => {
+    element.style.alignItems = "start";
+    element.style.paddingBlock = "180px";
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(60);
+  const rangeBeforeScroll = await page.locator(".capture-range").boundingBox();
+  const editorBeforeScroll = await editor.boundingBox();
+  await evidenceStage.evaluate((element) => {
+    element.scrollTop = 80;
+  });
+  await page.waitForTimeout(60);
+  const rangeAfterScroll = await page.locator(".capture-range").boundingBox();
+  const editorAfterScroll = await editor.boundingBox();
+  if (!rangeBeforeScroll || !editorBeforeScroll || !rangeAfterScroll || !editorAfterScroll) {
+    throw new Error(`${viewport.width}px 内部滚动后缺少浮窗或范围尺寸`);
+  }
+  const rangeDelta = rangeAfterScroll.y - rangeBeforeScroll.y;
+  const editorDelta = editorAfterScroll.y - editorBeforeScroll.y;
+  if (Math.abs(rangeDelta - editorDelta) > 2) {
+    throw new Error(`${viewport.width}px 内部滚动后浮窗未保持范围关联：range=${rangeDelta} editor=${editorDelta}`);
   }
   if ((await page.locator(".inspector-panel").getAttribute("inert")) === null) {
     throw new Error(`${viewport.width}px 浮窗打开时右栏未暂停全局动作`);
@@ -99,6 +131,56 @@ async function exercise(route, viewport) {
   if (!(await summary.evaluate((element) => element === document.activeElement))) {
     throw new Error(`${viewport.width}px 空 summary 后焦点未返回字段`);
   }
+  const errorEditorBox = await editor.boundingBox();
+  const errorRangeBox = await page.locator(".capture-range").boundingBox();
+  if (!errorEditorBox || !errorRangeBox) {
+    throw new Error(`${viewport.width}px 校验错误展开后缺少浮窗或范围尺寸`);
+  }
+  const errorOverlaps = !(
+    errorEditorBox.x + errorEditorBox.width <= errorRangeBox.x ||
+    errorRangeBox.x + errorRangeBox.width <= errorEditorBox.x ||
+    errorEditorBox.y + errorEditorBox.height <= errorRangeBox.y ||
+    errorRangeBox.y + errorRangeBox.height <= errorEditorBox.y
+  );
+  if (errorOverlaps) {
+    throw new Error(`${viewport.width}px 校验错误展开后浮窗遮挡当前框选范围`);
+  }
+
+  await evidenceStage.evaluate((element) => {
+    element.style.alignItems = "";
+    element.style.paddingBlock = "";
+    element.scrollTop = 0;
+  });
+  await editor.evaluate((element) => {
+    element.style.width = "900px";
+    element.style.maxHeight = "240px";
+  });
+  await page.waitForFunction(() => (
+    document.querySelector(".capture-editor")?.getAttribute("data-placement") === "bottom"
+  ));
+  const bottomRangeBox = await page.locator(".capture-range").boundingBox();
+  if (!bottomRangeBox) throw new Error(`${viewport.width}px 下方定位探测缺少范围尺寸`);
+  const desiredRangeTop = viewport.height - bottomRangeBox.height - 48;
+  await page.locator(".capture-range").evaluate((element, top) => {
+    const range = element.getBoundingClientRect();
+    element.style.transform = `translateY(${top - range.top}px)`;
+    window.dispatchEvent(new Event("resize"));
+  }, desiredRangeTop);
+  await page.waitForFunction(() => (
+    document.querySelector(".capture-editor")?.getAttribute("data-placement") === "top"
+  ));
+  await editor.evaluate((element) => {
+    element.style.width = "";
+    element.style.maxHeight = "";
+  });
+  await page.locator(".capture-range").evaluate((element) => {
+    element.style.transform = "";
+    window.dispatchEvent(new Event("resize"));
+  });
+  await evidenceStage.evaluate((element) => {
+    element.style.alignItems = "";
+    element.scrollTop = 0;
+  });
   await summary.fill(`公开折线展示 ${viewport.width}px 验收视口中的稳定增长趋势。`);
   await page.getByRole("combobox", { name: "视觉对象 01 类型" }).selectOption("chart");
 
@@ -152,6 +234,23 @@ async function exercise(route, viewport) {
   await page.mouse.up();
   const secondEditor = page.getByRole("dialog", { name: "视觉对象 02" });
   await secondEditor.waitFor();
+  const secondRangeBox = await page.locator(".capture-range.is-active").boundingBox();
+  if (!secondRangeBox) throw new Error(`${viewport.width}px 左侧定位探测缺少活动范围尺寸`);
+  const leftSpace = secondRangeBox.x - 26;
+  const rightSpace = viewport.width - secondRangeBox.x - secondRangeBox.width - 26;
+  if (leftSpace <= rightSpace) {
+    throw new Error(`${viewport.width}px 左侧定位探测的范围没有位于视口右半部`);
+  }
+  const leftProbeWidth = Math.floor((leftSpace + rightSpace) / 2);
+  await secondEditor.evaluate((element, width) => {
+    element.style.width = `${width}px`;
+  }, leftProbeWidth);
+  await page.waitForFunction(() => (
+    document.querySelector(".capture-editor")?.getAttribute("data-placement") === "left"
+  ));
+  await secondEditor.evaluate((element) => {
+    element.style.width = "";
+  });
   await page.getByRole("textbox", { name: "视觉对象 02 summary" })
     .fill(`公开分布图展示 ${viewport.width}px 视口中的地区差异。`);
   await page.getByRole("combobox", { name: "视觉对象 02 类型" }).selectOption("map");
@@ -342,7 +441,66 @@ async function exercise(route, viewport) {
   if (!["auto", "scroll"].includes(rightScroll)) {
     throw new Error(`${viewport.width}px 右栏不是独立滚动区域`);
   }
+  stage = "验证完整键盘审核流";
+  await approve.focus();
+  await page.keyboard.press("a");
+  await page.getByText(/上一页已批准|待处理队列已清空/).waitFor();
+
+  const targetTitle = viewport.width === 1280 ? "公开框选验收页 1" : "公开框选验收页 2";
+  await page.getByRole("button", { name: "全部", exact: true }).click();
+  const approvedRow = page.getByRole("button", {
+    name: new RegExp(`${targetTitle}，已批准`),
+  });
+  await approvedRow.waitFor();
+  await approvedRow.click();
+  await page.getByText("批准结论已冻结").waitFor();
+  const reopen = page.getByRole("button", { name: "重新打开此页" });
+  await reopen.focus();
+  await page.keyboard.press("r");
+  const reopenDialog = page.getByRole("dialog", { name: "重新打开第 1 页？" });
+  await reopenDialog.waitFor();
+  await page.keyboard.press("Escape");
+  await reopenDialog.waitFor({ state: "hidden" });
+  await page.keyboard.press("r");
+  await page.getByRole("button", { name: "确认重新打开" }).click();
+  await page.getByText("页面已重新打开，恢复为待处理并解锁编辑。").waitFor();
+
+  const rows = page.locator(".page-row");
+  const currentText = await page.locator('.page-row[aria-current="true"]').textContent();
+  const currentIndex = await rows.evaluateAll((elements) => (
+    elements.findIndex((element) => element.getAttribute("aria-current") === "true")
+  ));
+  const rowCount = await rows.count();
+  const navigationKey = currentIndex < rowCount - 1 ? "ArrowRight" : "ArrowLeft";
+  await page.keyboard.press(navigationKey);
+  if (await page.locator('.page-row[aria-current="true"]').textContent() === currentText) {
+    throw new Error(`${viewport.width}px ${navigationKey} 未移动页面选择`);
+  }
+  const reopenedRow = page.getByRole("button", {
+    name: new RegExp(`${targetTitle}，待处理`),
+  });
+  await reopenedRow.click();
+  await page.locator(".review-gate").click({ position: { x: 8, y: 8 } });
+  await page.keyboard.press("x");
+  const exclusionReason = page.getByRole("combobox", { name: "整页排除原因" });
+  if (!(await exclusionReason.evaluate((element) => element === document.activeElement))) {
+    throw new Error(`${viewport.width}px X 未把焦点送到整页排除原因`);
+  }
+  const selectedBeforeInputKeys = await page.locator('.page-row[aria-current="true"]').textContent();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("a");
+  await page.keyboard.press("r");
+  if (await page.locator('.page-row[aria-current="true"]').textContent() !== selectedBeforeInputKeys) {
+    throw new Error(`${viewport.width}px 输入控件未抑制全局页面快捷键`);
+  }
+  if (await reopenDialog.isVisible()) {
+    throw new Error(`${viewport.width}px 输入控件中的 R 意外打开了重开确认框`);
+  }
+  await exclusionReason.selectOption("irrelevant");
+  await page.getByRole("button", { name: "排除并转到下一待处理页" }).click();
+  await page.getByText(/上一页已排除|待处理队列已清空/).waitFor();
   checks.push(`capture-viewport-${viewport.width}`);
+  checks.push(`keyboard-flow-${viewport.width}`);
   await page.close();
   } catch (error) {
     process.stderr.write(`BLACKBOX_STAGE=${viewport.width}:${stage}\n`);

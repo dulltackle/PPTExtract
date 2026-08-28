@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { assertWcag22AA } from "./accessibility.mjs";
 
 const baseUrl = process.argv[2];
 const route = process.argv[3];
@@ -40,8 +41,91 @@ try {
   if (captureRoot) {
     await compact.screenshot({ path: resolve(captureRoot, "curation-1280.png") });
   }
+  await compact.screenshot();
+  await assertWcag22AA(compact, "1280×900 策展工作台");
   checks.push("viewport-1280-three-columns");
+  checks.push("wcag22aa-1280");
   await compact.close();
+
+  for (const viewport of [
+    { width: 1024, height: 720, label: "125%" },
+    { width: 640, height: 450, label: "200%" },
+  ]) {
+    const zoomed = await browser.newPage({ viewport });
+    zoomed.setDefaultTimeout(30_000);
+    await zoomed.goto(`${baseUrl}${route}`, { waitUntil: "domcontentloaded", timeout: 10_000 });
+    await zoomed.getByRole("heading", { name: "来源日志" }).waitFor();
+    const workspace = zoomed.locator(".curation-workspace");
+    const overflow = await workspace.evaluate((element) => ({
+      overflowX: getComputedStyle(element).overflowX,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    if (overflow.overflowX !== "auto" || overflow.scrollWidth <= overflow.clientWidth) {
+      throw new Error(`${viewport.label} 缩放下三栏没有提供明确的横向滚动路径`);
+    }
+    await workspace.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth - element.clientWidth;
+    });
+    const inspectorBox = await zoomed.locator(".inspector-panel").boundingBox();
+    if (!inspectorBox || inspectorBox.x >= viewport.width || inspectorBox.x + inspectorBox.width <= 0) {
+      throw new Error(`${viewport.label} 缩放下无法滚动到来源与审核动作`);
+    }
+    await zoomed.getByText("完整三栏适配 1280px 及以上").waitFor();
+    checks.push(`zoom-${viewport.label}-reachable`);
+    await zoomed.close();
+  }
+
+  const textZoomed = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  textZoomed.setDefaultTimeout(30_000);
+  await textZoomed.goto(`${baseUrl}${route}`, { waitUntil: "domcontentloaded", timeout: 10_000 });
+  await textZoomed.getByRole("heading", { name: "来源日志" }).waitFor();
+  await textZoomed.evaluate(() => {
+    for (const element of document.querySelectorAll("body *")) {
+      if (element instanceof SVGElement) continue;
+      const style = getComputedStyle(element);
+      const fontSize = Number.parseFloat(style.fontSize);
+      const lineHeight = Number.parseFloat(style.lineHeight);
+      if (Number.isFinite(fontSize) && fontSize > 0) {
+        element.style.fontSize = `${fontSize * 2}px`;
+      }
+      if (Number.isFinite(lineHeight) && lineHeight > 0) {
+        element.style.lineHeight = `${lineHeight * 2}px`;
+      }
+    }
+  });
+  const textZoomWorkspace = textZoomed.locator(".curation-workspace");
+  const textZoomOverflow = await textZoomWorkspace.evaluate((element) => ({
+    overflowX: getComputedStyle(element).overflowX,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  if (textZoomOverflow.overflowX !== "auto") {
+    throw new Error("200% 文字缩放下工作台没有显式横向滚动路径");
+  }
+  if (await textZoomed.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
+    throw new Error("200% 文字缩放造成页面级横向溢出");
+  }
+  await textZoomWorkspace.evaluate((element) => {
+    element.scrollLeft = element.scrollWidth - element.clientWidth;
+  });
+  await textZoomed.locator(".source-review-scroll").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const exclusionAction = textZoomed.getByRole("button", { name: "排除并转到下一待处理页" });
+  await exclusionAction.scrollIntoViewIfNeeded();
+  const exclusionBox = await exclusionAction.boundingBox();
+  if (!exclusionBox || exclusionBox.x >= 1280 || exclusionBox.x + exclusionBox.width <= 0) {
+    throw new Error("200% 文字缩放下无法到达整页审核动作");
+  }
+  const textCommandStrip = textZoomed.getByRole("contentinfo", { name: "键盘操作" });
+  const textZoomStatus = textCommandStrip.locator(".command-status");
+  await textZoomStatus.waitFor();
+  if (!(await textZoomStatus.textContent())?.trim()) {
+    throw new Error("200% 文字缩放下当前页状态上下文为空");
+  }
+  checks.push("text-zoom-200%-reachable");
+  await textZoomed.close();
 
   const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
   page.setDefaultTimeout(30_000);
@@ -87,6 +171,8 @@ try {
   if (captureRoot) {
     await page.screenshot({ path: resolve(captureRoot, "curation-1440-ready.png") });
   }
+  await page.screenshot();
+  await assertWcag22AA(page, "1440×1024 策展工作台");
   const approve = page.getByRole("button", { name: "批准并转到下一待处理页" });
   await page.waitForFunction(
     () => document.activeElement?.textContent?.trim() === "批准并转到下一待处理页",
@@ -95,6 +181,7 @@ try {
   await page.getByText(/上一页已批准|待处理队列已清空/).waitFor();
   checks.push("plain-text-zero-capture-approved");
   checks.push("keyboard-a-approved");
+  checks.push("wcag22aa-1440");
 
   await page.getByRole("button", { name: "全部" }).click();
   const approvedRow = page.getByRole("button", {
@@ -107,6 +194,11 @@ try {
   await page.keyboard.press("r");
   const reopenDialog = page.getByRole("dialog", { name: "重新打开第 1 页？" });
   await reopenDialog.waitFor();
+  const commandStrip = page.getByRole("contentinfo", { name: "键盘操作" });
+  await commandStrip.getByText(/取消/).waitFor();
+  if (await commandStrip.getByText(/重新打开/).count()) {
+    throw new Error("重开确认弹窗打开时命令条仍显示 R 重新打开");
+  }
   await page.keyboard.press("Escape");
   await reopenDialog.waitFor({ state: "hidden" });
   await page.keyboard.press("r");
