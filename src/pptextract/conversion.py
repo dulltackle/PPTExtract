@@ -42,6 +42,12 @@ class NormalizedTable:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizedSourcePart:
+    kind: Literal["body", "table", "image_alt"]
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedPageContent:
     """AnyDoc 对象之外的项目内部页内容模型。"""
 
@@ -50,6 +56,7 @@ class NormalizedPageContent:
     tables: tuple[NormalizedTable, ...]
     images: tuple[NormalizedImage, ...]
     speaker_notes: tuple[str, ...] = ()
+    source_order: tuple[NormalizedSourcePart, ...] = ()
 
 
 def convert_page(pptx_bytes: bytes, page: SourcePage) -> NormalizedPageContent:
@@ -60,18 +67,30 @@ def convert_page(pptx_bytes: bytes, page: SourcePage) -> NormalizedPageContent:
     tables: list[NormalizedTable] = []
     images: list[NormalizedImage] = []
     speaker_notes: list[str] = []
+    source_order: list[NormalizedSourcePart] = []
 
     for block in document.blocks:
         if block.kind in {"heading", "paragraph"}:
             text = _inline_text(block.content or ())
             if text:
-                (titles if block.kind == "heading" else body).append(text)
+                if block.kind == "heading":
+                    titles.append(text)
+                else:
+                    source_order.append(NormalizedSourcePart("body", len(body)))
+                    body.append(text)
+            first_image = len(images)
             _collect_images(block.content or (), document.assets, images)
+            source_order.extend(
+                NormalizedSourcePart("image_alt", index)
+                for index in range(first_image, len(images))
+            )
         elif block.kind == "table" and block.table:
+            source_order.append(NormalizedSourcePart("table", len(tables)))
             tables.append(_normalize_table(block.table))
         elif block.kind == "list" and block.list:
             list_text = _list_text(block.list)
             if list_text:
+                source_order.append(NormalizedSourcePart("body", len(body)))
                 body.append(list_text)
         elif block.kind == "block_quote" and block.blocks:
             note = _blocks_text(block.blocks)
@@ -84,6 +103,7 @@ def convert_page(pptx_bytes: bytes, page: SourcePage) -> NormalizedPageContent:
         tables=tuple(tables),
         images=tuple(images),
         speaker_notes=tuple(speaker_notes),
+        source_order=tuple(source_order),
     )
 
 

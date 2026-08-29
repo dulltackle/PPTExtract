@@ -299,9 +299,12 @@ def test_confirmed_candidate_builds_verified_immutable_zip_and_switches_current_
         assert manifest["chunk_count"] == 1
         assert manifest["asset_count"] == 1
         assert chunk["chunk_id"] == "chunk-approved"
-        assert chunk["text"].startswith("公开知识源.pptx\n\n公开页标题")
-        assert chunk["annotation"]["visuals"][0]["visual_ref"] == "visual-approved"
-        assert chunk["annotation"]["visuals"][0]["asset"]["byte_contract"] == (
+        assert chunk["text"].startswith("公开知识源\n\n公开页标题")
+        annotation = next(
+            part["data"] for part in chunk["parts"] if part["kind"] == "annotation"
+        )
+        assert annotation["visuals"][0]["visual_ref"] == "visual-approved"
+        assert annotation["visuals"][0]["asset"]["byte_contract"] == (
             "standard_render_crop"
         )
         assert bundle.read(f"assets/{seeded['asset_sha256']}.png").hex() == seeded["asset_bytes"]
@@ -309,13 +312,15 @@ def test_confirmed_candidate_builds_verified_immutable_zip_and_switches_current_
         files = {name: bundle.read(name) for name in bundle.namelist()}
 
     tampered_chunk = json.loads(files["chunks.jsonl"])
-    tampered_chunk["annotation"]["visuals"][0]["asset"]["sha256"] = "0" * 64
+    tampered_annotation = next(
+        part["data"] for part in tampered_chunk["parts"] if part["kind"] == "annotation"
+    )
+    tampered_annotation["visuals"][0]["asset"]["sha256"] = "0" * 64
     tampered_chunk["content_hash"] = _sha(
         json.dumps(
             {
                 "text": tampered_chunk["text"],
                 "parts": tampered_chunk["parts"],
-                "annotation": tampered_chunk["annotation"],
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -397,7 +402,10 @@ def test_failed_build_keeps_current_and_retry_reuses_original_frozen_input(
     with connect(settings) as connection:
         connection.execute(
             "UPDATE page_versions SET review_status = 'approved', "
-            "current_snapshot_id = 'snapshot-approved' "
+            "current_snapshot_id = 'snapshot-approved', "
+            "reviewed_by = 'curator-1', "
+            "reviewed_at = '2026-08-29T00:00:00+00:00', "
+            "review_source_version_id = 'version-approved' "
             "WHERE page_version_id = 'page-version-pending'"
         )
         connection.commit()

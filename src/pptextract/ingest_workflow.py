@@ -14,6 +14,7 @@ from pptextract.config import Settings
 from pptextract.conversion import (
     NormalizedImage,
     NormalizedPageContent,
+    NormalizedSourcePart,
     NormalizedTable,
     NormalizedTableCell,
     NormalizedTableSlot,
@@ -39,7 +40,7 @@ from pptextract.rendering import (
 from pptextract.rendering_warnings import replace_active_warnings
 
 PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-CONVERSION_TOOL_VERSION = "firecrawl-anydoc:0.1.9|pptextract-adapter:1"
+CONVERSION_TOOL_VERSION = "firecrawl-anydoc:0.1.9|pptextract-adapter:2"
 MANIFEST_TOOL_VERSION = "pptextract-source-manifest:1"
 
 
@@ -3425,6 +3426,10 @@ def _content_from_json(serialized: str) -> NormalizedPageContent:
             for image in payload["images"]
         ),
         speaker_notes=tuple(str(value) for value in payload["speaker_notes"]),
+        source_order=tuple(
+            NormalizedSourcePart(kind=part["kind"], index=int(part["index"]))
+            for part in payload.get("source_order", [])
+        ),
     )
 
 

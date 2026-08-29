@@ -1,4 +1,5 @@
 from pptextract.conversion import convert_page
+from pptextract.ingest_workflow import CONVERSION_TOOL_VERSION
 from pptextract.pptx_projection import list_source_pages
 from tests.support.synthetic_pptx import build_conversion_presentation
 
@@ -18,6 +19,13 @@ def test_conversion_normalizes_text_and_repeated_image_references() -> None:
         (0, "第一处图片引用", "image/png", image_bytes),
         (1, "第二处图片引用", "image/png", image_bytes),
     ]
+    assert [(part.kind, part.index) for part in content.source_order] == [
+        ("body", 0),
+        ("image_alt", 0),
+        ("image_alt", 1),
+        ("table", 0),
+    ]
+    assert CONVERSION_TOOL_VERSION.endswith("pptextract-adapter:2")
 
 
 def test_conversion_normalizes_merged_table_grid_and_speaker_notes() -> None:

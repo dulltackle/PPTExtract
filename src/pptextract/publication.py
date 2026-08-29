@@ -18,6 +18,16 @@ from pptextract.object_store import LocalObjectStore
 from pptextract.rendering import render_configuration_version
 
 ARCHIVE_MEDIA_TYPE = "application/zip"
+PART_KINDS = {
+    "document_title",
+    "page_title",
+    "body",
+    "table",
+    "image_alt",
+    "annotation",
+    "speaker_notes",
+}
+CONTENT_ASSET_FIELDS = ("path", "sha256", "size_bytes", "media_type", "byte_contract")
 
 
 class PublicationRequestError(Exception):
@@ -54,6 +64,58 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _rfc8785_bytes(value: Any) -> bytes:
+    """序列化 Chunk 哈希输入；契约不含 RFC 8785 中需 ECMAScript 转换的浮点数。"""
+
+    def serialize(item: Any) -> str:
+        if item is None:
+            return "null"
+        if item is True:
+            return "true"
+        if item is False:
+            return "false"
+        if isinstance(item, str):
+            item.encode("utf-8")
+            return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(item, int):
+            if abs(item) > 2**53 - 1:
+                raise ValueError("Chunk 哈希输入包含超出 I-JSON 安全范围的整数")
+            return str(item)
+        if isinstance(item, (list, tuple)):
+            return "[" + ",".join(serialize(child) for child in item) + "]"
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise ValueError("Chunk 哈希输入的对象键必须是字符串")
+            for key in item:
+                key.encode("utf-8")
+            keys = sorted(item, key=lambda key: key.encode("utf-16-be"))
+            return "{" + ",".join(
+                f"{serialize(key)}:{serialize(item[key])}" for key in keys
+            ) + "}"
+        raise ValueError("Chunk 哈希输入包含 RFC 8785 契约不支持的值")
+
+    return serialize(value).encode("utf-8")
+
+
+def _content_digest(text: str, parts: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(_rfc8785_bytes({"text": text, "parts": parts})).hexdigest()
+
+
+def _content_set_digest(
+    chunks: list[dict[str, Any]], assets: list[dict[str, Any]]
+) -> str:
+    normalized_assets = [
+        {field: asset[field] for field in CONTENT_ASSET_FIELDS}
+        for asset in assets
+    ]
+    return _digest(
+        {
+            "chunks": sorted(chunks, key=lambda chunk: str(chunk["chunk_id"])),
+            "assets": sorted(normalized_assets, key=lambda asset: str(asset["path"])),
+        }
+    )
+
+
 def _asset_extension(media_type: str) -> str:
     return {
         "image/png": "png",
@@ -61,6 +123,18 @@ def _asset_extension(media_type: str) -> str:
         "image/webp": "webp",
         "image/gif": "gif",
     }.get(media_type, "bin")
+
+
+def _asset_bytes_match_media_type(payload: bytes, media_type: str) -> bool:
+    if media_type == "image/png":
+        return payload.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return payload.startswith(b"\xff\xd8\xff")
+    if media_type == "image/gif":
+        return payload.startswith((b"GIF87a", b"GIF89a"))
+    if media_type == "image/webp":
+        return len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"
+    return False
 
 
 def publication_preflight(connection: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
@@ -128,39 +202,133 @@ def publication_preflight(connection: sqlite3.Connection, settings: Settings) ->
     }
 
 
+def _table_gfm(grid: dict[str, Any], header_rows: int) -> str:
+    rows = int(grid["rows"])
+    columns = int(grid["columns"])
+    display = [[""] * columns for _ in range(rows)]
+    for cell in grid["cells"]:
+        text = str(cell["text"]).strip().replace("|", "\\|").replace("\n", "<br>")
+        display[int(cell["row"])][int(cell["column"])] = text
+    if header_rows == 0:
+        display.insert(0, [""] * columns)
+    lines = ["| " + " | ".join(row) + " |" for row in display]
+    lines.insert(1, "| " + " | ".join(["---"] * columns) + " |")
+    return "\n".join(lines)
+
+
 def _table_part(table: dict[str, Any]) -> dict[str, Any]:
-    grid: list[list[dict[str, Any]]] = []
-    gfm_rows: list[list[str]] = []
-    for row in table.get("grid", []):
-        normalized: list[dict[str, Any]] = []
-        display: list[str] = []
-        for slot in row:
+    cells: list[dict[str, Any]] = []
+    rows = table.get("grid", [])
+    width = max((len(row) for row in rows), default=0)
+    for row_index, row in enumerate(rows):
+        for column_index, slot in enumerate(row):
             if slot.get("kind") != "origin":
                 continue
             cell = slot.get("cell") or {}
             text = str(cell.get("text", "")).strip()
-            normalized.append(
+            cells.append(
                 {
+                    "row": row_index,
+                    "column": column_index,
                     "text": text,
                     "row_span": int(cell.get("row_span", 1)),
                     "col_span": int(cell.get("col_span", 1)),
                 }
             )
-            display.append(text.replace("|", "\\|"))
-        grid.append(normalized)
-        gfm_rows.append(display)
-    width = max((len(row) for row in gfm_rows), default=0)
     if not width:
         gfm = ""
+        header_rows = 0
     else:
-        padded = [row + [""] * (width - len(row)) for row in gfm_rows]
         header_rows = max(0, int(table.get("header_rows", 0)))
-        if header_rows == 0:
-            padded.insert(0, [""] * width)
-        lines = ["| " + " | ".join(row) + " |" for row in padded]
-        lines.insert(1, "| " + " | ".join(["---"] * width) + " |")
-        gfm = "\n".join(lines)
-    return {"kind": "table", "text": gfm, "data": {"grid": grid}}
+        grid = {"rows": len(rows), "columns": width, "cells": cells}
+        gfm = _table_gfm(grid, header_rows)
+    return {
+        "kind": "table",
+        "text": gfm,
+        "data": {
+            "header_rows": header_rows,
+            "grid": {"rows": len(rows), "columns": width, "cells": cells},
+        },
+    }
+
+
+def _document_title(source_filename: str) -> str:
+    suffix = ".pptx"
+    if source_filename.lower().endswith(suffix):
+        return source_filename[: -len(suffix)]
+    return source_filename
+
+
+def _ordered_source_parts(
+    content: dict[str, Any], excluded_body_indexes: set[int]
+) -> list[dict[str, Any]]:
+    body = content.get("body", [])
+    tables = content.get("tables", [])
+    images = content.get("images", [])
+    if not all(isinstance(items, list) for items in (body, tables, images)):
+        raise PublicationRequestError(
+            409, "publication_input_invalid", "批准页的来源内容不是有效列表。"
+        )
+    valid_keys = {
+        *(("body", index) for index in range(len(body))),
+        *(("table", index) for index in range(len(tables))),
+        *(("image_alt", index) for index in range(len(images))),
+    }
+    available: dict[tuple[str, int], dict[str, Any]] = {}
+    for index, value in enumerate(body):
+        text = str(value).strip()
+        if text and index not in excluded_body_indexes:
+            available[("body", index)] = {"kind": "body", "text": text}
+    for index, table in enumerate(tables):
+        part = _table_part(table)
+        if part["text"]:
+            available[("table", index)] = part
+    for index, image in enumerate(images):
+        text = str(image.get("alt_text", "")).strip()
+        if text:
+            available[("image_alt", index)] = {"kind": "image_alt", "text": text}
+
+    raw_order = content.get("source_order")
+    if raw_order is None:
+        return list(available.values())
+    if not isinstance(raw_order, list):
+        raise PublicationRequestError(
+            409, "publication_input_invalid", "批准页的来源阅读顺序不是有效列表。"
+        )
+    ordered: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in raw_order:
+        if not isinstance(item, dict):
+            raise PublicationRequestError(
+                409, "publication_input_invalid", "批准页包含无法无损表示的来源块。"
+            )
+        kind = item.get("kind")
+        raw_index = item.get("index")
+        key = (
+            (str(kind), raw_index)
+            if isinstance(raw_index, int) and not isinstance(raw_index, bool)
+            else None
+        )
+        if key is None or kind not in {"body", "table", "image_alt"}:
+            raise PublicationRequestError(
+                409, "publication_input_invalid", "批准页包含未知或无效的来源块顺序。"
+            )
+        if key not in valid_keys:
+            raise PublicationRequestError(
+                409, "publication_input_invalid", "批准页的来源块顺序引用了不存在的内容。"
+            )
+        if key in seen:
+            raise PublicationRequestError(
+                409, "publication_input_invalid", "批准页的来源块顺序包含重复项。"
+            )
+        seen.add(key)
+        if key in available:
+            ordered.append(available[key])
+    if not set(available).issubset(seen):
+        raise PublicationRequestError(
+            409, "publication_input_invalid", "批准页的来源块顺序无法无损表示全部来源内容。"
+        )
+    return ordered
 
 
 def _repeated_footer_indexes(
@@ -223,6 +391,12 @@ def _visuals(
                 "publication_input_invalid",
                 "批准页包含不完整的视觉资产或标注，无法创建发布候选。",
             )
+        if _asset_extension(media_type) == "bin":
+            raise PublicationRequestError(
+                409,
+                "publication_input_invalid",
+                "批准页包含不受产物契约支持的视觉资产媒体类型。",
+            )
         byte_contract = (
             "anydoc_original" if row["source_kind"] == "source_image" else "standard_render_crop"
         )
@@ -263,25 +437,16 @@ def _chunk_from_row(
     annotation_text = "\n\n".join(
         fragment for fragment in [overview, *(item["summary"] for item in visuals)] if fragment
     )
-    parts: list[dict[str, Any]] = [{"kind": "document_title", "text": str(row["source_filename"])}]
+    source_filename = str(row["source_filename"])
+    document_title = _document_title(source_filename)
+    parts: list[dict[str, Any]] = [{"kind": "document_title", "text": document_title}]
     titles = [str(value).strip() for value in content.get("titles", []) if str(value).strip()]
     page_title = titles[0] if titles else f"第 {row['page_number']} 页"
     if titles:
         parts.append({"kind": "page_title", "text": "\n".join(titles)})
     if annotation_text:
         parts.append({"kind": "annotation", "text": annotation_text, "data": annotation})
-    for index, value in enumerate(content.get("body", [])):
-        text = str(value).strip()
-        if text and index not in excluded_indexes:
-            parts.append({"kind": "body", "text": text})
-    for table in content.get("tables", []):
-        part = _table_part(table)
-        if part["text"]:
-            parts.append(part)
-    for image in content.get("images", []):
-        text = str(image.get("alt_text", "")).strip()
-        if text:
-            parts.append({"kind": "image_alt", "text": text})
+    parts.extend(_ordered_source_parts(content, excluded_indexes))
     for value in content.get("speaker_notes", []):
         text = str(value).strip()
         if text:
@@ -291,30 +456,43 @@ def _chunk_from_row(
         raise PublicationRequestError(
             409, "publication_input_invalid", "批准页无法生成非空 Chunk 正文。"
         )
-    content_hash = _digest({"text": text, "parts": parts, "annotation": annotation})
+    content_hash = _content_digest(text, parts)
+    review_values = {
+        "approved_by": row["reviewed_by"],
+        "approved_at": row["reviewed_at"],
+        "approval_source_version_id": row["review_source_version_id"],
+    }
+    if any(
+        not isinstance(value, str) or not value.strip() for value in review_values.values()
+    ):
+        raise PublicationRequestError(
+            409, "publication_input_invalid", "批准页缺少实际审核来源，无法创建发布候选。"
+        )
+    metadata: dict[str, Any] = {
+        "document_id": str(row["document_id"]),
+        "document_version_id": str(row["version_id"]),
+        "page_id": str(row["page_id"]),
+        "page_version_id": str(row["page_version_id"]),
+        "page_number": int(row["page_number"]),
+        "page_fingerprint": str(row["fingerprint_sha256"]),
+        "fingerprint_version": int(row["fingerprint_version"]),
+        "document_title": document_title,
+        "source_filename": source_filename,
+        **review_values,
+        "snapshot_id": str(row["snapshot_id"]),
+        "text_characters": len(text),
+    }
+    if titles:
+        metadata["page_title"] = page_title
+    if noise:
+        metadata["excluded_repeated_footer_noise"] = noise
     chunk = {
         "schema_version": 1,
         "chunk_id": str(row["chunk_id"]),
         "content_hash": content_hash,
         "text": text,
         "parts": parts,
-        "annotation": annotation,
-        "metadata": {
-            "document_id": str(row["document_id"]),
-            "document_version_id": str(row["version_id"]),
-            "page_id": str(row["page_id"]),
-            "page_version_id": str(row["page_version_id"]),
-            "page_number": int(row["page_number"]),
-            "page_fingerprint": str(row["fingerprint_sha256"]),
-            "document_title": str(row["source_filename"]),
-            "page_title": page_title,
-            "approved_by": str(row["reviewed_by"]),
-            "approved_at": str(row["reviewed_at"]),
-            "approval_source_version_id": str(row["review_source_version_id"]),
-            "snapshot_id": str(row["snapshot_id"]),
-            "text_characters": len(text),
-            "excluded_repeated_footer_noise": noise,
-        },
+        "metadata": metadata,
     }
     return chunk, assets
 
@@ -400,7 +578,8 @@ def _collect_scope(connection: sqlite3.Connection, settings: Settings) -> dict[s
         """
         SELECT d.document_id, v.version_id, v.source_filename,
                p.page_id, p.chunk_id, pv.page_version_id, pv.page_number,
-               pv.fingerprint_sha256, pv.current_snapshot_id AS snapshot_id,
+               pv.fingerprint_version, pv.fingerprint_sha256,
+               pv.current_snapshot_id AS snapshot_id,
                pv.reviewed_by, pv.reviewed_at, pv.review_source_version_id,
                s.overview, s.source_content_json
         FROM documents AS d
@@ -464,12 +643,12 @@ def _collect_scope(connection: sqlite3.Connection, settings: Settings) -> dict[s
         document["pages"].append(
             {
                 "page_number": int(row["page_number"]),
-                "title": chunk["metadata"]["page_title"],
+                "title": chunk["metadata"].get("page_title"),
                 "page_id": str(row["page_id"]),
                 "chunk_id": str(row["chunk_id"]),
                 "snapshot_id": str(row["snapshot_id"]),
-                "reviewed_by": str(row["reviewed_by"]),
-                "reviewed_at": str(row["reviewed_at"]),
+                "reviewed_by": chunk["metadata"]["approved_by"],
+                "reviewed_at": chunk["metadata"]["approved_at"],
                 "change": change,
             }
         )
@@ -519,11 +698,8 @@ def _collect_scope(connection: sqlite3.Connection, settings: Settings) -> dict[s
         "disabled_hidden_pages": hidden,
         "soft_deleted_documents": deleted,
     }
-    content_set_hash = _digest(
-        {
-            "chunks": sorted(new_hashes.items()),
-            "assets": sorted(assets_by_sha),
-        }
+    content_set_hash = _content_set_digest(
+        [item["chunk"] for item in chunks], list(assets_by_sha.values())
     )
     return {
         "business_state_token": _business_state_token(connection),
@@ -814,6 +990,207 @@ def _archive_bytes(
     return output.getvalue()
 
 
+def _annotation_data(chunk: dict[str, Any]) -> dict[str, Any]:
+    annotation_parts = [
+        part
+        for part in chunk.get("parts", [])
+        if isinstance(part, dict) and part.get("kind") == "annotation"
+    ]
+    if not annotation_parts:
+        return {"visuals": []}
+    data = annotation_parts[0].get("data")
+    if len(annotation_parts) != 1 or not isinstance(data, dict):
+        raise ValueError("Chunk annotation part 不完整或重复")
+    return data
+
+
+def _contains_null(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_null(key) or _contains_null(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_contains_null(item) for item in value)
+    return False
+
+
+def _validate_annotation_part(part: dict[str, Any]) -> None:
+    data = part.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Chunk annotation data 不完整")
+    overview = data.get("overview", "")
+    if not isinstance(overview, str):
+        raise ValueError("Chunk annotation overview 无效")
+    visuals = data.get("visuals")
+    if not isinstance(visuals, list):
+        raise ValueError("Chunk annotation visuals 不完整")
+    summaries: list[str] = []
+    for visual in visuals:
+        if not isinstance(visual, dict):
+            raise ValueError("Chunk annotation visual 无效")
+        for key in ("visual_ref", "summary"):
+            if not isinstance(visual.get(key), str) or not visual[key].strip():
+                raise ValueError("Chunk annotation visual 身份或 summary 不完整")
+        if "visual_type" in visual and (
+            not isinstance(visual["visual_type"], str) or not visual["visual_type"].strip()
+        ):
+            raise ValueError("Chunk annotation visual_type 无效")
+        if not isinstance(visual.get("asset"), dict):
+            raise ValueError("Chunk annotation visual 资产描述不完整")
+        summaries.append(str(visual["summary"]).strip())
+    expected_text = "\n\n".join(
+        fragment for fragment in [overview.strip(), *summaries] if fragment
+    )
+    if not expected_text or part["text"] != expected_text:
+        raise ValueError("Chunk annotation 文本与结构化数据不一致")
+
+
+def _validate_table_part(part: dict[str, Any]) -> None:
+    data = part.get("data")
+    grid = data.get("grid") if isinstance(data, dict) else None
+    if not isinstance(grid, dict):
+        raise ValueError("Chunk table 规范网格不完整")
+    rows = grid.get("rows")
+    columns = grid.get("columns")
+    cells = grid.get("cells")
+    header_rows = data.get("header_rows") if isinstance(data, dict) else None
+    if (
+        not isinstance(rows, int)
+        or isinstance(rows, bool)
+        or rows <= 0
+        or not isinstance(columns, int)
+        or isinstance(columns, bool)
+        or columns <= 0
+        or not isinstance(cells, list)
+        or not isinstance(header_rows, int)
+        or isinstance(header_rows, bool)
+        or not 0 <= header_rows <= rows
+    ):
+        raise ValueError("Chunk table 规范网格尺寸无效")
+    origins: set[tuple[int, int]] = set()
+    covered: set[tuple[int, int]] = set()
+    for cell in cells:
+        if not isinstance(cell, dict):
+            raise ValueError("Chunk table 原点单元格无效")
+        row = cell.get("row")
+        column = cell.get("column")
+        row_span = cell.get("row_span")
+        col_span = cell.get("col_span")
+        if (
+            not isinstance(row, int)
+            or isinstance(row, bool)
+            or not 0 <= row < rows
+            or not isinstance(column, int)
+            or isinstance(column, bool)
+            or not 0 <= column < columns
+            or not isinstance(row_span, int)
+            or isinstance(row_span, bool)
+            or row_span <= 0
+            or row + row_span > rows
+            or not isinstance(col_span, int)
+            or isinstance(col_span, bool)
+            or col_span <= 0
+            or column + col_span > columns
+            or not isinstance(cell.get("text"), str)
+        ):
+            raise ValueError("Chunk table 单元格坐标或 span 无效")
+        origin = (row, column)
+        if origin in origins:
+            raise ValueError("Chunk table 原点单元格重复")
+        origins.add(origin)
+        cell_coverage = {
+            (covered_row, covered_column)
+            for covered_row in range(row, row + row_span)
+            for covered_column in range(column, column + col_span)
+        }
+        if covered & cell_coverage:
+            raise ValueError("Chunk table 合并单元格 span 重叠")
+        covered.update(cell_coverage)
+    if part["text"] != _table_gfm(grid, header_rows):
+        raise ValueError("Chunk table GFM 与规范网格不一致")
+
+
+def _validate_part_order(parts: list[dict[str, Any]]) -> None:
+    kinds = [str(part["kind"]) for part in parts]
+    if not kinds or kinds[0] != "document_title" or kinds.count("document_title") != 1:
+        raise ValueError("Chunk parts 阅读顺序必须从唯一文档标题开始")
+    index = 1
+    if index < len(kinds) and kinds[index] == "page_title":
+        index += 1
+    if kinds.count("page_title") > 1:
+        raise ValueError("Chunk parts 阅读顺序包含重复页标题")
+    if index < len(kinds) and kinds[index] == "annotation":
+        _validate_annotation_part(parts[index])
+        index += 1
+    if kinds.count("annotation") > 1:
+        raise ValueError("Chunk parts 阅读顺序包含重复 annotation")
+    speaker_notes_started = False
+    for part in parts[index:]:
+        kind = str(part["kind"])
+        if kind == "speaker_notes":
+            speaker_notes_started = True
+        elif kind in {"body", "table", "image_alt"} and not speaker_notes_started:
+            if kind == "table":
+                _validate_table_part(part)
+        else:
+            raise ValueError("Chunk parts 阅读顺序不符合契约")
+
+
+def _validate_chunk(chunk: Any) -> dict[str, Any]:
+    if not isinstance(chunk, dict) or chunk.get("schema_version") != 1:
+        raise ValueError("Chunk Schema 版本不受支持")
+    if _contains_null(chunk):
+        raise ValueError("Chunk 可选字段必须省略，不能使用 null")
+    if not isinstance(chunk.get("chunk_id"), str) or not chunk["chunk_id"]:
+        raise ValueError("Chunk ID 不完整")
+    text = chunk.get("text")
+    parts = chunk.get("parts")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Chunk 正文为空")
+    if not isinstance(parts, list) or not parts:
+        raise ValueError("Chunk parts 不完整")
+    for part in parts:
+        if not isinstance(part, dict) or part.get("kind") not in PART_KINDS:
+            raise ValueError("Chunk parts 包含未知 kind")
+        if not isinstance(part.get("text"), str) or not part["text"].strip():
+            raise ValueError("Chunk part 正文为空")
+    _validate_part_order(parts)
+    if text != "\n\n".join(str(part["text"]) for part in parts):
+        raise ValueError("Chunk 正文与有序 parts 不一致")
+    metadata = chunk.get("metadata")
+    string_fields = (
+        "document_id",
+        "document_version_id",
+        "page_id",
+        "page_version_id",
+        "page_fingerprint",
+        "document_title",
+        "source_filename",
+        "approved_by",
+        "approved_at",
+        "approval_source_version_id",
+        "snapshot_id",
+    )
+    if not isinstance(metadata, dict) or any(
+        not isinstance(metadata.get(key), str) or not metadata[key] for key in string_fields
+    ):
+        raise ValueError("Chunk metadata 身份或审核字段不完整")
+    for key in ("page_number", "fingerprint_version"):
+        if (
+            not isinstance(metadata.get(key), int)
+            or isinstance(metadata[key], bool)
+            or metadata[key] <= 0
+        ):
+            raise ValueError("Chunk metadata 页字段不完整")
+    if metadata.get("text_characters") != len(text):
+        raise ValueError("Chunk metadata 正文字符数不一致")
+    expected_content_hash = _content_digest(text, parts)
+    if chunk.get("content_hash") != expected_content_hash:
+        raise ValueError("Chunk 内容哈希不一致")
+    _annotation_data(chunk)
+    return chunk
+
+
 def validate_publication_archive(payload: bytes) -> None:
     with zipfile.ZipFile(BytesIO(payload)) as archive:
         infos = archive.infolist()
@@ -845,54 +1222,92 @@ def validate_publication_archive(payload: bytes) -> None:
             raise ValueError("Chunk JSONL 哈希不一致")
         if len(chunks_bytes) != int(manifest["chunks"]["size_bytes"]):
             raise ValueError("Chunk JSONL 字节数不一致")
-        chunks = [json.loads(line) for line in chunks_bytes.splitlines() if line]
-        for chunk in chunks:
-            if chunk.get("schema_version") != 1:
-                raise ValueError("Chunk Schema 版本不受支持")
-            expected_content_hash = _digest(
-                {
-                    "text": chunk.get("text"),
-                    "parts": chunk.get("parts"),
-                    "annotation": chunk.get("annotation"),
-                }
+        if (
+            chunks_bytes.startswith(b"\xef\xbb\xbf")
+            or b"\r" in chunks_bytes
+            or (chunks_bytes and not chunks_bytes.endswith(b"\n"))
+        ):
+            raise ValueError("Chunk JSONL 编码必须为无 BOM 的 UTF-8、LF 且以 LF 结尾")
+        raw_lines = chunks_bytes[:-1].split(b"\n") if chunks_bytes else []
+        if any(not line for line in raw_lines):
+            raise ValueError("Chunk JSONL 编码不能包含空行")
+        chunks: list[dict[str, Any]] = []
+        for line in raw_lines:
+            try:
+                chunk = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("Chunk JSONL 编码或 JSON 无效") from error
+            if not isinstance(chunk, dict) or line != _canonical(chunk).encode("utf-8"):
+                raise ValueError("Chunk JSONL 编码必须使用确定性紧凑 JSON")
+            chunks.append(_validate_chunk(chunk))
+        sort_keys = [
+            (
+                str(chunk["metadata"]["document_id"]),
+                int(chunk["metadata"]["page_number"]),
+                str(chunk["metadata"]["page_id"]),
             )
-            if chunk.get("content_hash") != expected_content_hash:
-                raise ValueError("Chunk 内容哈希不一致")
-            metadata = chunk.get("metadata")
-            if not isinstance(metadata, dict) or any(
-                not str(metadata.get(key, ""))
-                for key in (
-                    "document_id",
-                    "document_version_id",
-                    "page_id",
-                    "page_version_id",
-                    "snapshot_id",
-                )
-            ):
-                raise ValueError("Chunk 身份字段不完整")
+            for chunk in chunks
+        ]
+        if sort_keys != sorted(sort_keys):
+            raise ValueError("Chunk JSONL 行顺序不符合确定性排序")
         chunk_ids = [str(chunk["chunk_id"]) for chunk in chunks]
         if len(chunk_ids) != len(set(chunk_ids)) or len(chunks) != int(manifest["chunk_count"]):
             raise ValueError("Chunk ID 重复或计数不一致")
         references = [
             visual["asset"]
             for chunk in chunks
-            for visual in chunk.get("annotation", {}).get("visuals", [])
+            for visual in _annotation_data(chunk).get("visuals", [])
         ]
         referenced = {str(asset["path"]) for asset in references}
-        declared = {str(asset["path"]): asset for asset in manifest["assets"]}
-        if referenced != set(declared) or int(manifest["asset_count"]) != len(declared):
-            raise ValueError("视觉资产引用不完整")
+        raw_assets = manifest.get("assets")
+        if not isinstance(raw_assets, list) or any(
+            not isinstance(asset, dict) for asset in raw_assets
+        ):
+            raise ValueError("manifest 视觉资产描述不完整")
+        declared_paths = [str(asset.get("path", "")) for asset in raw_assets]
+        if len(declared_paths) != len(set(declared_paths)):
+            raise ValueError("manifest 视觉资产含重复路径")
+        declared = {str(asset["path"]): asset for asset in raw_assets}
+        if int(manifest["asset_count"]) != len(declared):
+            raise ValueError("manifest 视觉资产计数不一致")
+        missing_declarations = referenced - set(declared)
+        if missing_declarations:
+            raise ValueError("Chunk 引用的视觉资产缺失 manifest 声明")
+        unreferenced = set(declared) - referenced
+        if unreferenced:
+            raise ValueError("manifest 包含未引用视觉资产")
         asset_fields = ("path", "sha256", "size_bytes", "media_type", "byte_contract")
         for reference in references:
             declaration = declared[str(reference["path"])]
             if any(reference.get(field) != declaration.get(field) for field in asset_fields):
                 raise ValueError("视觉资产引用描述与 manifest 不一致")
         for path, asset in declared.items():
-            data = archive.read(path)
-            if hashlib.sha256(data).hexdigest() != asset["sha256"] or len(data) != int(
-                asset["size_bytes"]
+            sha256 = asset.get("sha256")
+            if (
+                not isinstance(sha256, str)
+                or len(sha256) != 64
+                or any(character not in "0123456789abcdef" for character in sha256)
             ):
-                raise ValueError("视觉资产哈希或字节数不一致")
+                raise ValueError("视觉资产 SHA-256 不完整")
+            media_type = asset.get("media_type")
+            if not isinstance(media_type, str) or _asset_extension(media_type) == "bin":
+                raise ValueError("视觉资产媒体类型不受支持")
+            if path != f"assets/{sha256}.{_asset_extension(media_type)}":
+                raise ValueError("视觉资产路径与内容哈希或媒体类型不一致")
+            if asset.get("byte_contract") not in {"standard_render_crop", "anydoc_original"}:
+                raise ValueError("视觉资产字节契约不受支持")
+            if path not in names:
+                raise ValueError("ZIP 缺失 manifest 声明的视觉资产")
+            data = archive.read(path)
+            if hashlib.sha256(data).hexdigest() != sha256:
+                raise ValueError("视觉资产哈希不一致")
+            if len(data) != int(asset["size_bytes"]):
+                raise ValueError("视觉资产字节数不一致")
+            if not _asset_bytes_match_media_type(data, media_type):
+                raise ValueError("视觉资产媒体类型与实际字节不一致")
+        expected_content_set_hash = _content_set_digest(chunks, raw_assets)
+        if manifest["content_set_hash"] != expected_content_set_hash:
+            raise ValueError("manifest 内容集合哈希不一致")
         if set(names) != {"manifest.json", "chunks.jsonl", *declared}:
             raise ValueError("ZIP 含未声明文件")
 

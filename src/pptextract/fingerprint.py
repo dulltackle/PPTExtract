@@ -7,7 +7,7 @@ from typing import Any
 
 from pptextract.conversion import NormalizedPageContent, NormalizedTable
 
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,9 @@ def canonical_fingerprint_input(content: NormalizedPageContent) -> bytes:
             for image in content.images
         ],
         "speaker_notes": content.speaker_notes,
+        "source_order": [
+            {"kind": part.kind, "index": part.index} for part in content.source_order
+        ],
     }
     return json.dumps(
         payload,
