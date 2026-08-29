@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
@@ -53,6 +53,20 @@ from pptextract.lifecycle import (
     void_version,
 )
 from pptextract.object_store import LocalObjectStore
+from pptextract.publication import (
+    PublicationRequestError,
+    artifact_content,
+    create_candidate,
+    iter_file,
+    read_artifact,
+    read_candidate,
+    read_current_artifact,
+    read_publication_workspace,
+    retry_publication_job,
+)
+from pptextract.publication import (
+    confirm_candidate as confirm_publication_candidate_command,
+)
 from pptextract.rendering import render_configuration_version
 from pptextract.rendering_warnings import (
     confirm_warning,
@@ -205,9 +219,7 @@ def _read_curation_snapshot(
                 "summary": visual["summary"],
                 "visual_type": visual["visual_type"],
                 "bounds": (
-                    None
-                    if visual["bounds_json"] is None
-                    else json.loads(visual["bounds_json"])
+                    None if visual["bounds_json"] is None else json.loads(visual["bounds_json"])
                 ),
                 "source_visual_ref": visual["source_visual_ref"],
                 "confirmed": bool(visual["confirmed"]),
@@ -235,10 +247,7 @@ def _read_curation_snapshot(
                             "byte_contract": "standard_render_crop",
                         }
                     }
-                    if (
-                        visual["source_kind"] == "capture"
-                        and visual["asset_sha256"] is not None
-                    )
+                    if (visual["source_kind"] == "capture" and visual["asset_sha256"] is not None)
                     else {}
                 ),
             }
@@ -247,9 +256,7 @@ def _read_curation_snapshot(
     }
 
 
-def _visual_mutation_content(
-    settings: Settings, curation: dict[str, Any]
-) -> dict[str, Any]:
+def _visual_mutation_content(settings: Settings, curation: dict[str, Any]) -> dict[str, Any]:
     snapshot = curation.get("current_snapshot")
     snapshot_id = None if snapshot is None else snapshot.get("snapshot_id")
     with connect(settings) as connection:
@@ -319,9 +326,7 @@ def create_app(
             ).fetchall()
             active_warning_summaries = {
                 str(version["version_id"]): summarize_rows(
-                    read_warning_rows(
-                        connection, version_id=str(version["version_id"])
-                    )
+                    read_warning_rows(connection, version_id=str(version["version_id"]))
                 )
                 for version in active_versions
             }
@@ -469,22 +474,15 @@ def create_app(
             return error_response(404, "not_found", "未找到请求的资源。")
         return JSONResponse(content=job)
 
-    @app.get(
-        "/api/v1/documents/{document_id}/versions/{version_id}/page-mapping"
-    )
+    @app.get("/api/v1/documents/{document_id}/versions/{version_id}/page-mapping")
     async def get_page_mapping(document_id: str, version_id: str) -> JSONResponse:
-        result = read_page_mapping(
-            resolved, document_id=document_id, version_id=version_id
-        )
+        result = read_page_mapping(resolved, document_id=document_id, version_id=version_id)
         if result is None:
             return error_response(404, "not_found", "未找到请求的资源。")
         payload, etag = result
         return JSONResponse(content=payload, headers={"ETag": etag})
 
-    @app.put(
-        "/api/v1/documents/{document_id}/versions/{version_id}"
-        "/page-mapping/cases/{case_id}"
-    )
+    @app.put("/api/v1/documents/{document_id}/versions/{version_id}/page-mapping/cases/{case_id}")
     async def put_page_mapping_decision(
         document_id: str,
         version_id: str,
@@ -512,9 +510,7 @@ def create_app(
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(content=payload, headers={"ETag": etag})
 
-    @app.post(
-        "/api/v1/documents/{document_id}/versions/{version_id}/page-mapping/confirm"
-    )
+    @app.post("/api/v1/documents/{document_id}/versions/{version_id}/page-mapping/confirm")
     async def post_page_mapping_confirmation(
         document_id: str, version_id: str, request: Request
     ) -> JSONResponse:
@@ -536,8 +532,7 @@ def create_app(
         return JSONResponse(content=payload, headers={"ETag": etag})
 
     @app.get(
-        "/api/v1/documents/{document_id}/versions/{version_id}"
-        "/source-pages/{page_number}/render",
+        "/api/v1/documents/{document_id}/versions/{version_id}/source-pages/{page_number}/render",
         response_model=None,
     )
     async def get_version_source_page_render(
@@ -557,12 +552,8 @@ def create_app(
             ).fetchone()
         if row is None:
             return error_response(404, "not_found", "未找到标准页渲染结果。")
-        if row["render_config_version"] != render_configuration_version(
-            resolved.render_image
-        ):
-            return error_response(
-                409, "render_configuration_stale", "标准页正在按新渲染配置重建。"
-            )
+        if row["render_config_version"] != render_configuration_version(resolved.render_image):
+            return error_response(409, "render_configuration_stale", "标准页正在按新渲染配置重建。")
         path = LocalObjectStore(resolved.object_store_path).path_for(row["render_sha256"])
         if not path.is_file():
             return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")
@@ -743,8 +734,7 @@ def create_app(
             return None
         rows = read_warning_rows(connection, version_id=version_id)
         config_version = str(
-            version["render_config_version"]
-            or render_configuration_version(resolved.render_image)
+            version["render_config_version"] or render_configuration_version(resolved.render_image)
         )
         return {
             "document_id": document_id,
@@ -777,9 +767,7 @@ def create_app(
             is not None
         )
 
-    @app.get(
-        "/api/v1/documents/{document_id}/versions/{version_id}/rendering-warnings"
-    )
+    @app.get("/api/v1/documents/{document_id}/versions/{version_id}/rendering-warnings")
     async def get_rendering_warnings(document_id: str, version_id: str) -> JSONResponse:
         with connect(resolved) as connection:
             payload = rendering_warning_payload(
@@ -790,8 +778,7 @@ def create_app(
         return JSONResponse(content=payload)
 
     @app.post(
-        "/api/v1/documents/{document_id}/versions/{version_id}"
-        "/rendering-warnings/confirm-all"
+        "/api/v1/documents/{document_id}/versions/{version_id}/rendering-warnings/confirm-all"
     )
     async def confirm_all_rendering_warnings(
         document_id: str,
@@ -815,9 +802,7 @@ def create_app(
                     "version_not_current",
                     "只能确认当前 ready 版本的渲染警告。",
                 )
-            current_versions = {
-                warning["render_config_version"] for warning in payload["warnings"]
-            }
+            current_versions = {warning["render_config_version"] for warning in payload["warnings"]}
             if current_versions and current_versions != {command.render_config_version}:
                 return error_response(
                     409,
@@ -996,6 +981,122 @@ def create_app(
             },
         )
 
+    def publication_error(error: PublicationRequestError) -> JSONResponse:
+        return error_response(error.status_code, error.code, error.message, error.details)
+
+    @app.get("/api/v1/publications")
+    async def publication_workspace() -> JSONResponse:
+        return JSONResponse(content=read_publication_workspace(resolved))
+
+    @app.post("/api/v1/publications/candidates", status_code=201)
+    async def create_publication_candidate(request: Request) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            content = create_candidate(resolved, actor_id=actor.actor_id)
+        except PublicationRequestError as error:
+            return publication_error(error)
+        return JSONResponse(status_code=201, content=content)
+
+    @app.get("/api/v1/publications/candidates/{candidate_id}")
+    async def get_publication_candidate(candidate_id: str) -> JSONResponse:
+        content = read_candidate(resolved, candidate_id)
+        if content is None:
+            return error_response(404, "candidate_not_found", "未找到发布候选。")
+        return JSONResponse(content=content)
+
+    @app.post("/api/v1/publications/candidates/{candidate_id}/confirm")
+    async def confirm_publication_candidate(request: Request, candidate_id: str) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            status_code, content = confirm_publication_candidate_command(
+                resolved, candidate_id=candidate_id, actor_id=actor.actor_id
+            )
+        except PublicationRequestError as error:
+            return publication_error(error)
+        return JSONResponse(status_code=status_code, content=content)
+
+    @app.post("/api/v1/publications/tasks/{job_id}/retry", status_code=202)
+    async def retry_publication_task(request: Request, job_id: str) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            content = retry_publication_job(resolved, failed_job_id=job_id, actor_id=actor.actor_id)
+        except PublicationRequestError as error:
+            return publication_error(error)
+        return JSONResponse(status_code=202, content=content)
+
+    @app.get("/api/v1/publications/current")
+    async def get_current_publication(request: Request) -> Response:
+        artifact = read_current_artifact(resolved)
+        if artifact is None:
+            return error_response(404, "current_publication_not_found", "尚无当前产物。")
+        etag = f'"{artifact.sha256}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return JSONResponse(content=artifact_content(artifact), headers={"ETag": etag})
+
+    @app.get("/api/v1/publications/{publication_seq}/artifact")
+    async def download_publication_artifact(request: Request, publication_seq: int) -> Response:
+        artifact = read_artifact(resolved, publication_seq)
+        if artifact is None or not artifact.path.is_file():
+            return error_response(404, "publication_artifact_not_found", "未找到发布产物。")
+        etag = f'"{artifact.sha256}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        common_headers = {
+            "Accept-Ranges": "bytes",
+            "ETag": etag,
+            "Content-Disposition": (
+                f'attachment; filename="pptextract-publication-{publication_seq}.zip"'
+            ),
+        }
+        range_header = request.headers.get("range")
+        if range_header:
+            if not range_header.startswith("bytes=") or "," in range_header:
+                return Response(
+                    status_code=416,
+                    headers={
+                        **common_headers,
+                        "Content-Range": f"bytes */{artifact.size_bytes}",
+                    },
+                )
+            start_text, separator, end_text = range_header[6:].partition("-")
+            try:
+                if not separator:
+                    raise ValueError
+                if start_text:
+                    start = int(start_text)
+                    end = int(end_text) if end_text else artifact.size_bytes - 1
+                else:
+                    suffix = int(end_text)
+                    start = max(0, artifact.size_bytes - suffix)
+                    end = artifact.size_bytes - 1
+                if start < 0 or end < start or start >= artifact.size_bytes:
+                    raise ValueError
+                end = min(end, artifact.size_bytes - 1)
+            except ValueError:
+                return Response(
+                    status_code=416,
+                    headers={
+                        **common_headers,
+                        "Content-Range": f"bytes */{artifact.size_bytes}",
+                    },
+                )
+            return StreamingResponse(
+                iter_file(artifact.path, start=start, end=end),
+                status_code=206,
+                media_type=artifact.media_type,
+                headers={
+                    **common_headers,
+                    "Content-Range": f"bytes {start}-{end}/{artifact.size_bytes}",
+                    "Content-Length": str(end - start + 1),
+                },
+            )
+        return StreamingResponse(
+            iter_file(artifact.path),
+            media_type=artifact.media_type,
+            headers={**common_headers, "Content-Length": str(artifact.size_bytes)},
+        )
+
     @app.get("/api/v1/curation/pages")
     async def list_curation_pages(review_status: str = "pending") -> JSONResponse:
         if review_status not in {"pending", "approved", "excluded", "inherited", "all"}:
@@ -1057,9 +1158,7 @@ def create_app(
                     "status": row["enable_status"] or "not_started",
                     "job_id": row["enable_job_id"],
                     "error": (
-                        None
-                        if row["enable_error"] is None
-                        else json.loads(row["enable_error"])
+                        None if row["enable_error"] is None else json.loads(row["enable_error"])
                     ),
                 }
             page_payload = {
@@ -1085,17 +1184,13 @@ def create_app(
                     "reviewed_by": row["reviewed_by"],
                     "reviewed_at": row["reviewed_at"],
                     "source_version_id": row["review_source_version_id"],
-                    "inherited_from_page_version_id": row[
-                        "inherited_from_page_version_id"
-                    ],
+                    "inherited_from_page_version_id": row["inherited_from_page_version_id"],
                     "exclusion_reason": row["exclusion_reason"],
                     "exclusion_note": row["exclusion_note"],
                 }
             if version_warning_rows:
                 page_payload["rendering_warnings"] = summarize_rows(page_warning_rows)
-                page_payload["version_rendering_warnings"] = summarize_rows(
-                    version_warning_rows
-                )
+                page_payload["version_rendering_warnings"] = summarize_rows(version_warning_rows)
             pages.append(page_payload)
         return JSONResponse(content={"pages": pages})
 
@@ -1135,8 +1230,7 @@ def create_app(
         return JSONResponse(content=facts)
 
     @app.post(
-        "/api/v1/documents/{document_id}/versions/{version_id}"
-        "/source-pages/{page_number}/enable"
+        "/api/v1/documents/{document_id}/versions/{version_id}/source-pages/{page_number}/enable"
     )
     async def enable_hidden_page(
         document_id: str, version_id: str, page_number: int, request: Request
@@ -1198,17 +1292,13 @@ def create_app(
                 if row is None
                 else _read_curation_snapshot(connection, row["prefill_snapshot_id"])
             )
-            curation = (
-                None if row is None else read_page_curation(connection, page_id)
-            )
+            curation = None if row is None else read_page_curation(connection, page_id)
             page_warning_rows = (
                 []
                 if row is None
                 else [
                     warning
-                    for warning in read_warning_rows(
-                        connection, version_id=str(row["version_id"])
-                    )
+                    for warning in read_warning_rows(connection, version_id=str(row["version_id"]))
                     if int(warning["page_number"]) == int(row["page_number"])
                 ]
             )
@@ -1227,9 +1317,7 @@ def create_app(
                     "reviewed_by": row["reviewed_by"],
                     "reviewed_at": row["reviewed_at"],
                     "source_version_id": row["review_source_version_id"],
-                    "inherited_from_page_version_id": row[
-                        "inherited_from_page_version_id"
-                    ],
+                    "inherited_from_page_version_id": row["inherited_from_page_version_id"],
                     "exclusion_reason": row["exclusion_reason"],
                     "exclusion_note": row["exclusion_note"],
                 },
@@ -1251,9 +1339,7 @@ def create_app(
                 },
                 "rendering_warnings": {
                     "summary": summarize_rows(page_warning_rows),
-                    "warnings": [
-                        serialize_warning(warning) for warning in page_warning_rows
-                    ],
+                    "warnings": [serialize_warning(warning) for warning in page_warning_rows],
                 },
             }
         )
@@ -1276,17 +1362,11 @@ def create_app(
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(status_code=201, content={"curation": curation})
 
-    @app.get(
-        "/api/v1/pages/{page_id}/repeated-footer-noise/candidates/{source_ref}"
-    )
-    async def get_repeated_footer_noise_candidate(
-        page_id: str, source_ref: str
-    ) -> JSONResponse:
+    @app.get("/api/v1/pages/{page_id}/repeated-footer-noise/candidates/{source_ref}")
+    async def get_repeated_footer_noise_candidate(page_id: str, source_ref: str) -> JSONResponse:
         try:
             with connect(resolved) as connection:
-                candidate = preview_candidate(
-                    connection, page_id=page_id, source_ref=source_ref
-                )
+                candidate = preview_candidate(connection, page_id=page_id, source_ref=source_ref)
         except RepeatedFooterNoiseError as error:
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(content={"candidate": candidate})
@@ -1312,9 +1392,7 @@ def create_app(
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(status_code=201, content={"confirmation": confirmation})
 
-    @app.post(
-        "/api/v1/repeated-footer-noise/confirmations/{confirmation_id}/revoke"
-    )
+    @app.post("/api/v1/repeated-footer-noise/confirmations/{confirmation_id}/revoke")
     async def revoke_repeated_footer_noise_confirmation(
         confirmation_id: str, command: RevokeRepeatedFooterNoise, request: Request
     ) -> JSONResponse:
@@ -1406,13 +1484,9 @@ def create_app(
             )
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
-        return JSONResponse(
-            status_code=201, content=_visual_mutation_content(resolved, curation)
-        )
+        return JSONResponse(status_code=201, content=_visual_mutation_content(resolved, curation))
 
-    @app.patch(
-        "/api/v1/pages/{page_id}/curation/visuals/{visual_ref}", status_code=201
-    )
+    @app.patch("/api/v1/pages/{page_id}/curation/visuals/{visual_ref}", status_code=201)
     async def edit_capture_visual(
         page_id: str,
         visual_ref: str,
@@ -1433,13 +1507,9 @@ def create_app(
             )
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
-        return JSONResponse(
-            status_code=201, content=_visual_mutation_content(resolved, curation)
-        )
+        return JSONResponse(status_code=201, content=_visual_mutation_content(resolved, curation))
 
-    @app.delete(
-        "/api/v1/pages/{page_id}/curation/visuals/{visual_ref}", status_code=201
-    )
+    @app.delete("/api/v1/pages/{page_id}/curation/visuals/{visual_ref}", status_code=201)
     async def remove_capture_visual(
         page_id: str,
         visual_ref: str,
@@ -1457,9 +1527,7 @@ def create_app(
             )
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
-        return JSONResponse(
-            status_code=201, content=_visual_mutation_content(resolved, curation)
-        )
+        return JSONResponse(status_code=201, content=_visual_mutation_content(resolved, curation))
 
     @app.post(
         "/api/v1/pages/{page_id}/curation/visuals/{visual_ref}/move",
@@ -1483,13 +1551,9 @@ def create_app(
             )
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
-        return JSONResponse(
-            status_code=201, content=_visual_mutation_content(resolved, curation)
-        )
+        return JSONResponse(status_code=201, content=_visual_mutation_content(resolved, curation))
 
-    @app.post(
-        "/api/v1/pages/{page_id}/curation/source-completeness", status_code=201
-    )
+    @app.post("/api/v1/pages/{page_id}/curation/source-completeness", status_code=201)
     async def mark_page_source_complete(
         page_id: str, command: SnapshotCommand, request: Request
     ) -> JSONResponse:
@@ -1503,9 +1567,7 @@ def create_app(
             )
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
-        return JSONResponse(
-            status_code=201, content=_visual_mutation_content(resolved, curation)
-        )
+        return JSONResponse(status_code=201, content=_visual_mutation_content(resolved, curation))
 
     @app.post("/api/v1/pages/{page_id}/approve")
     async def approve_curation_page(
@@ -1586,12 +1648,8 @@ def create_app(
             ).fetchone()
         if row is None:
             return error_response(404, "not_found", "未找到请求的资源。")
-        if row["render_config_version"] != render_configuration_version(
-            resolved.render_image
-        ):
-            return error_response(
-                409, "render_configuration_stale", "标准页正在按新渲染配置重建。"
-            )
+        if row["render_config_version"] != render_configuration_version(resolved.render_image):
+            return error_response(409, "render_configuration_stale", "标准页正在按新渲染配置重建。")
         path = LocalObjectStore(resolved.object_store_path).path_for(row["render_sha256"])
         if not path.is_file():
             return error_response(503, "render_unavailable", "标准页渲染结果暂不可用。")
@@ -1604,15 +1662,11 @@ def create_app(
     async def get_source_image(page_id: str, source_ref: str) -> Response | JSONResponse:
         with connect(resolved) as connection:
             try:
-                source_image = read_source_image(
-                    connection, page_id=page_id, source_ref=source_ref
-                )
+                source_image = read_source_image(connection, page_id=page_id, source_ref=source_ref)
             except CurationRequestError as error:
                 return error_response(error.status_code, error.code, error.message)
         if source_image is None:
-            return error_response(
-                404, "source_image_not_found", "未找到图片来源原始字节。"
-            )
+            return error_response(404, "source_image_not_found", "未找到图片来源原始字节。")
         payload, media_type = source_image
         return Response(
             content=payload,
@@ -1620,8 +1674,7 @@ def create_app(
             headers={
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": (
-                    "sandbox; default-src 'none'; img-src data:; "
-                    "style-src 'unsafe-inline'"
+                    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
                 ),
             },
         )

@@ -356,14 +356,19 @@ describe("渲染警告工作流", () => {
       if (url === "/api/v1/app/bootstrap") {
         return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
       }
-      if (url === "/api/v1/publications/preflight") {
+      if (url === "/api/v1/publications") {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              can_publish: false,
-              summary: { total: 5, pages: 3, unconfirmed: 5, unconfirmed_pages: 3 },
-              stale_render_versions: 0,
-              href: "/curation?filter=rendering-warnings&document=doc-1&version=version-1&page=2&warning=warning-1",
+              preflight: {
+                can_publish: false,
+                summary: { total: 5, pages: 3, unconfirmed: 5, unconfirmed_pages: 3 },
+                stale_render_versions: 0,
+                href: "/curation?filter=rendering-warnings&document=doc-1&version=version-1&page=2&warning=warning-1",
+              },
+              current: null,
+              candidate: null,
+              task: null,
             }),
             { status: 200 },
           ),
@@ -377,7 +382,7 @@ describe("渲染警告工作流", () => {
     expect(await screen.findByText("发布被阻止")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "发布前置校验" })).toBeInTheDocument();
     expect(screen.getByText("3 页 / 5 条未确认")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "创建发布候选" })).toBeDisabled();
     expect(screen.getByRole("link", { name: "前往确认渲染警告" })).toHaveAttribute(
       "href",
       "/curation?filter=rendering-warnings&document=doc-1&version=version-1&page=2&warning=warning-1",
@@ -392,7 +397,7 @@ describe("渲染警告工作流", () => {
       if (url === "/api/v1/app/bootstrap") {
         return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
       }
-      if (url === "/api/v1/publications/preflight" && init?.method === "POST") {
+      if (url === "/api/v1/publications/candidates" && init?.method === "POST") {
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -402,18 +407,23 @@ describe("渲染警告工作流", () => {
           ),
         );
       }
-      if (url === "/api/v1/publications/preflight") {
+      if (url === "/api/v1/publications") {
         preflightReads += 1;
         const blocked = preflightReads > 1;
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              can_publish: !blocked,
-              stale_render_versions: 0,
-              href: blocked ? "/curation?filter=rendering-warnings" : null,
-              summary: blocked
-                ? { total: 1, pages: 1, unconfirmed: 1, unconfirmed_pages: 1 }
-                : { total: 0, pages: 0, unconfirmed: 0, unconfirmed_pages: 0 },
+              preflight: {
+                can_publish: !blocked,
+                stale_render_versions: 0,
+                href: blocked ? "/curation?filter=rendering-warnings" : null,
+                summary: blocked
+                  ? { total: 1, pages: 1, unconfirmed: 1, unconfirmed_pages: 1 }
+                  : { total: 0, pages: 0, unconfirmed: 0, unconfirmed_pages: 0 },
+              },
+              current: null,
+              candidate: null,
+              task: null,
             }),
           ),
         );
@@ -422,13 +432,13 @@ describe("渲染警告工作流", () => {
     });
 
     render(<App />);
-    const confirm = await screen.findByRole("button", { name: "确认并继续" });
-    expect(confirm).toBeEnabled();
-    await userEvent.click(confirm);
+    const create = await screen.findByRole("button", { name: "创建发布候选" });
+    expect(create).toBeEnabled();
+    await userEvent.click(create);
 
     expect(await screen.findByText("发布被阻止")).toBeInTheDocument();
     expect(screen.getByText("1 页 / 1 条未确认")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "创建发布候选" })).toBeDisabled();
   });
 
   it("从文档级渲染警告深链进入对应文档，而不是全局第一项", async () => {

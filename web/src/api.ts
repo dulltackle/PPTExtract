@@ -354,6 +354,96 @@ export interface PublicationPreflight {
   href: string | null;
 }
 
+export type PublicationCandidateStatus =
+  | "ready"
+  | "stale"
+  | "confirmed"
+  | "no_change"
+  | "succeeded"
+  | "failed";
+
+export interface PublicationPageScope {
+  page_number: number;
+  title: string;
+  page_id: string;
+  chunk_id: string;
+  snapshot_id: string;
+  reviewed_by: string;
+  reviewed_at: string;
+  change: "added" | "updated" | "unchanged";
+}
+
+export interface PublicationDocumentScope {
+  document_id: string;
+  version_id: string;
+  title: string;
+  pages: PublicationPageScope[];
+}
+
+export interface PublicationCandidate {
+  candidate_id: string;
+  status: PublicationCandidateStatus;
+  business_state_token: string;
+  content_set_hash: string;
+  created_by: string;
+  created_at: string;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  publication_seq: number | null;
+  frozen_input_hash: string | null;
+  diff: { added: number; updated: number; removed: number; unchanged: number };
+  excluded: {
+    pending_pages: number;
+    excluded_pages: number;
+    disabled_hidden_pages: number;
+    soft_deleted_documents: number;
+  };
+  documents: PublicationDocumentScope[];
+  chunk_count: number;
+  asset_count: number;
+}
+
+export interface PublicationArtifact {
+  publication_seq: number;
+  candidate_id: string;
+  snapshot_id: string;
+  published_at: string;
+  chunk_count: number;
+  asset_count: number;
+  size_bytes: number;
+  sha256: string;
+  media_type: "application/zip";
+  download_url: string;
+}
+
+export interface PublicationTask {
+  job_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  progress: {
+    phase: "frozen_input" | "build" | "validate" | "store" | "switch_pointer" | "succeeded";
+    completed_pages: number;
+    total_pages: number;
+  } | null;
+  error: JobError | null;
+  attempts: number;
+  updated_at: string;
+}
+
+export interface PublicationWorkspace {
+  preflight: PublicationPreflight;
+  current: PublicationArtifact | null;
+  candidate: PublicationCandidate | null;
+  task: PublicationTask | null;
+}
+
+export interface PublicationConfirmation {
+  candidate_id: string;
+  status: "queued" | "no_change";
+  publication_seq: number | null;
+  job_id: string | null;
+  frozen_input_hash?: string;
+}
+
 export interface RenderingWarningsPayload {
   document_id: string;
   version_id: string;
@@ -1073,4 +1163,40 @@ export async function validatePublicationPreflight(): Promise<PublicationPreflig
     headers: { Accept: "application/json" },
   });
   return readJson(response, "发布前置校验未通过，请重新检查。");
+}
+
+export async function loadPublicationWorkspace(
+  signal?: AbortSignal,
+): Promise<PublicationWorkspace> {
+  const response = await fetch("/api/v1/publications", {
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  return readJson(response, "发布台账暂时不可用，请重试。");
+}
+
+export async function createPublicationCandidate(): Promise<PublicationCandidate> {
+  const response = await fetch("/api/v1/publications/candidates", {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson(response, "发布候选未创建，请重新检查当前业务状态。");
+}
+
+export async function confirmPublicationCandidate(
+  candidateId: string,
+): Promise<PublicationConfirmation> {
+  const response = await fetch(`/api/v1/publications/candidates/${candidateId}/confirm`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson(response, "发布候选未确认，请重新核验候选范围。");
+}
+
+export async function retryPublicationTask(jobId: string): Promise<PublicationConfirmation> {
+  const response = await fetch(`/api/v1/publications/tasks/${jobId}/retry`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson(response, "发布重试未开始；当前产物保持不变。");
 }

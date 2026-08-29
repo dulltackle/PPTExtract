@@ -17,6 +17,7 @@ from pptextract.ingest_workflow import (
 )
 from pptextract.jobs import claim_next_job, finish_job
 from pptextract.object_store import LocalObjectStore
+from pptextract.publication import fail_publication_job, process_publication_job
 
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_AFTER = timedelta(seconds=10)
@@ -82,6 +83,11 @@ def run_once(settings: Settings) -> bool:
             fail_rerender_job(settings, job, error)
         else:
             finish_job(settings, job, succeeded=True)
+    elif job.kind == "publication.build":
+        try:
+            process_publication_job(settings, job)
+        except Exception as error:
+            fail_publication_job(settings, job, error)
     else:
         finish_job(settings, job, succeeded=False)
     return True

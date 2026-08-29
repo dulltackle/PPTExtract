@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -447,6 +447,72 @@ def initialize_database(settings: Settings) -> None:
 
             CREATE INDEX IF NOT EXISTS curation_action_events_page
                 ON curation_action_events(page_version_id, occurred_at, event_id);
+
+            CREATE TABLE IF NOT EXISTS publication_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                business_state_token TEXT NOT NULL,
+                content_set_hash TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('ready', 'stale', 'confirmed', 'no_change', 'succeeded', 'failed')
+                ),
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                confirmed_by TEXT,
+                confirmed_at TEXT,
+                publication_seq INTEGER UNIQUE,
+                frozen_input_hash TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS publication_frozen_chunks (
+                candidate_id TEXT NOT NULL REFERENCES publication_candidates(candidate_id),
+                position INTEGER NOT NULL CHECK (position >= 0),
+                chunk_id TEXT NOT NULL,
+                page_id TEXT NOT NULL,
+                page_version_id TEXT NOT NULL,
+                snapshot_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                chunk_json TEXT NOT NULL,
+                PRIMARY KEY (candidate_id, position),
+                UNIQUE (candidate_id, chunk_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS publication_frozen_assets (
+                candidate_id TEXT NOT NULL REFERENCES publication_candidates(candidate_id),
+                asset_sha256 TEXT NOT NULL REFERENCES stored_objects(sha256),
+                path TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                byte_contract TEXT NOT NULL CHECK (
+                    byte_contract IN ('anydoc_original', 'standard_render_crop')
+                ),
+                PRIMARY KEY (candidate_id, asset_sha256),
+                UNIQUE (candidate_id, path)
+            );
+
+            CREATE TABLE IF NOT EXISTS publication_sequences (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                next_value INTEGER NOT NULL CHECK (next_value > 0)
+            );
+
+            CREATE TABLE IF NOT EXISTS publication_artifacts (
+                publication_seq INTEGER PRIMARY KEY,
+                candidate_id TEXT NOT NULL UNIQUE
+                    REFERENCES publication_candidates(candidate_id),
+                snapshot_id TEXT NOT NULL UNIQUE,
+                content_set_hash TEXT NOT NULL,
+                artifact_sha256 TEXT NOT NULL REFERENCES stored_objects(sha256),
+                media_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+                asset_count INTEGER NOT NULL CHECK (asset_count >= 0),
+                published_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS current_publication (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                publication_seq INTEGER NOT NULL REFERENCES publication_artifacts(publication_seq)
+            );
             """
         )
         if 0 < existing_version < 3:
@@ -622,6 +688,19 @@ def initialize_database(settings: Settings) -> None:
             ON jobs(document_id)
             WHERE kind = 'document.ingest'
               AND status IN ('queued', 'running', 'requires_action')
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_publication_job
+            ON jobs(kind)
+            WHERE kind = 'publication.build' AND status IN ('queued', 'running')
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO publication_sequences (singleton_id, next_value)
+            VALUES (1, 1)
             """
         )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

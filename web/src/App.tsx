@@ -331,7 +331,7 @@ export function App() {
             </span>
             <span>
               <kbd>R</kbd>{" "}
-              {isMapping ? "刷新证据" : isPublication ? "刷新校验" : "刷新入口"}
+              {isMapping ? "刷新证据" : isPublication ? "刷新发布状态" : "刷新入口"}
             </span>
           </>
         )}
@@ -342,7 +342,7 @@ export function App() {
               : isCuration
               ? curationCommands?.status ?? "正在读取策展工作位"
               : isPublication
-                ? "发布校验工作位就绪"
+                ? "发布工作位就绪"
               : "入口就绪"
             : state.kind === "error"
               ? "需要恢复"
