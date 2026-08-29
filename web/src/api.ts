@@ -312,6 +312,11 @@ export interface CurationState {
   can_approve: boolean;
 }
 
+export type CurationTimingStage =
+  | "source_review"
+  | "capture_annotation"
+  | "page_decision";
+
 export interface PageDetail {
   page_id: string;
   page_number: number;
@@ -568,6 +573,96 @@ export async function loadCurationPages(
   return reviewStatus === "rendering-warnings"
     ? pages.filter((page) => (page.rendering_warnings?.total ?? 0) > 0)
     : pages;
+}
+
+export async function recordCurationTimingSample(
+  sampleId: string,
+  pageId: string,
+  versionId: string,
+  stage: CurationTimingStage,
+  durationMs: number,
+): Promise<void> {
+  enqueueCurationTimingSample({
+    sample_id: sampleId,
+    page_id: pageId,
+    version_id: versionId,
+    stage,
+    duration_ms: Math.max(0, Math.round(durationMs)),
+  });
+  await retryPendingCurationTimingSamples();
+}
+
+interface PendingCurationTimingSample {
+  sample_id: string;
+  page_id: string;
+  version_id: string;
+  stage: CurationTimingStage;
+  duration_ms: number;
+}
+
+const CURATION_TIMING_QUEUE_KEY = "pptextract:curation-timing-samples";
+let volatileTimingQueue: PendingCurationTimingSample[] = [];
+let timingFlush: Promise<void> | null = null;
+
+function readCurationTimingQueue(): PendingCurationTimingSample[] {
+  try {
+    const serialized = globalThis.localStorage.getItem(CURATION_TIMING_QUEUE_KEY);
+    return serialized ? JSON.parse(serialized) as PendingCurationTimingSample[] : [];
+  } catch {
+    return volatileTimingQueue;
+  }
+}
+
+function writeCurationTimingQueue(queue: PendingCurationTimingSample[]): void {
+  volatileTimingQueue = queue;
+  try {
+    if (queue.length === 0) {
+      globalThis.localStorage.removeItem(CURATION_TIMING_QUEUE_KEY);
+    } else {
+      globalThis.localStorage.setItem(CURATION_TIMING_QUEUE_KEY, JSON.stringify(queue));
+    }
+  } catch {
+    // 浏览器禁用持久存储时仍在当前页面内保留恢复队列。
+  }
+}
+
+function enqueueCurationTimingSample(sample: PendingCurationTimingSample): void {
+  const queue = readCurationTimingQueue();
+  if (queue.some((candidate) => candidate.sample_id === sample.sample_id)) return;
+  writeCurationTimingQueue([...queue, sample]);
+}
+
+export function retryPendingCurationTimingSamples(): Promise<void> {
+  if (timingFlush) return timingFlush;
+  timingFlush = (async () => {
+    const attempted = new Set<string>();
+    while (true) {
+      const sample = readCurationTimingQueue().find(
+        (candidate) => !attempted.has(candidate.sample_id),
+      );
+      if (!sample) return;
+      attempted.add(sample.sample_id);
+      try {
+        const response = await fetch("/api/v1/curation/runtime-facts/samples", {
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify(sample),
+          keepalive: true,
+        });
+        if (!response.ok) continue;
+        writeCurationTimingQueue(
+          readCurationTimingQueue().filter(
+            (candidate) => candidate.sample_id !== sample.sample_id,
+          ),
+        );
+      } catch {
+        // 运行事实不得中断策展主流程；下次进入工作台时会重试。
+      }
+    }
+  })().finally(() => {
+    timingFlush = null;
+  });
+  return timingFlush;
 }
 
 export async function enableHiddenPage(page: CurationPage): Promise<PageEnablementAccepted> {

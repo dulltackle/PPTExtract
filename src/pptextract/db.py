@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -420,6 +420,33 @@ def initialize_database(settings: Settings) -> None:
                 occurred_at TEXT NOT NULL,
                 UNIQUE (confirmation_id, event_type)
             );
+
+            CREATE TABLE IF NOT EXISTS curation_timing_samples (
+                sample_id TEXT PRIMARY KEY,
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                actor_id TEXT NOT NULL,
+                stage TEXT NOT NULL CHECK (
+                    stage IN ('source_review', 'capture_annotation', 'page_decision')
+                ),
+                duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                pending_count INTEGER NOT NULL CHECK (pending_count >= 0),
+                longest_wait_ms INTEGER NOT NULL CHECK (longest_wait_ms >= 0),
+                recorded_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS curation_timing_samples_page
+                ON curation_timing_samples(page_version_id, recorded_at, sample_id);
+
+            CREATE TABLE IF NOT EXISTS curation_action_events (
+                event_id TEXT PRIMARY KEY,
+                page_version_id TEXT NOT NULL REFERENCES page_versions(page_version_id),
+                actor_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                occurred_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS curation_action_events_page
+                ON curation_action_events(page_version_id, occurred_at, event_id);
             """
         )
         if 0 < existing_version < 3:

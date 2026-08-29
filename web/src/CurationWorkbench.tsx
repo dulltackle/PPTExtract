@@ -13,6 +13,7 @@ import {
   confirmAllRenderingWarnings,
   confirmRenderingWarning,
   type CurationState,
+  type CurationTimingStage,
   type CurationVisual,
   type CurationPage,
   deleteCaptureVisual,
@@ -29,6 +30,8 @@ import {
   type PageDetail,
   type RenderingWarning,
   saveCaptureVisual,
+  recordCurationTimingSample,
+  retryPendingCurationTimingSamples,
   updateCaptureVisual,
   type VisualType,
 } from "./api";
@@ -89,6 +92,15 @@ function pageStatusLabel(page: CurationPage): string {
     : page.review_status === "approved"
       ? "已批准"
       : "已排除";
+}
+
+function timingStage(curation: CurationState | null): CurationTimingStage | null {
+  if (!curation) return null;
+  if (!curation.current_snapshot?.source_review) return "source_review";
+  if (curation.blockers.some(
+    (blocker) => blocker.code === "capture_required" || blocker.code === "visual_summary_required",
+  )) return "capture_annotation";
+  return "page_decision";
 }
 
 function focusAfterLiveAnnouncement(target: HTMLElement | null) {
@@ -1620,6 +1632,7 @@ export function CurationWorkbench({
   const [sourceDirty, setSourceDirty] = useState(false);
   const [curationAnnouncement, setCurationAnnouncement] = useState<string | null>(null);
   const [selectedCuration, setSelectedCuration] = useState<CurationState | null>(null);
+  const [loadedCurationPageId, setLoadedCurationPageId] = useState<string | null>(null);
   const [captureVisuals, setCaptureVisuals] = useState<CurationVisual[]>([]);
   const [captureEditing, setCaptureEditing] = useState(false);
   const [editorCommand, setEditorCommand] = useState<VisualEditorCommand | null>(null);
@@ -1646,6 +1659,10 @@ export function CurationWorkbench({
   const deleteSubmitRef = useRef<HTMLButtonElement>(null);
   const selectedKeyRef = useRef<string | null>(null);
   selectedKeyRef.current = selectedKey;
+
+  useEffect(() => {
+    void retryPendingCurationTimingSamples();
+  }, []);
 
   const loadPages = useCallback(async (nextFilter: Filter, preserveKey?: string | null) => {
     request.current?.abort();
@@ -1693,6 +1710,48 @@ export function CurationWorkbench({
     [pages, selectedKey],
   );
   const selectedOperation = selectedKey ? operations[selectedKey] : undefined;
+  const selectedTimingStage = timingStage(selectedCuration);
+
+  useEffect(() => {
+    const pageId = selected?.review_status === "pending" ? selected.page_id : null;
+    const versionId = selected?.version_id;
+    if (!pageId || !versionId || loadedCurationPageId !== pageId || !selectedTimingStage) return;
+    let sampleId = globalThis.crypto.randomUUID();
+    let startedAt = performance.now();
+    let submitted = false;
+    const submit = () => {
+      if (submitted) return;
+      const durationMs = Math.max(0, performance.now() - startedAt);
+      if (durationMs <= 0) return;
+      submitted = true;
+      void recordCurationTimingSample(
+        sampleId,
+        pageId,
+        versionId,
+        selectedTimingStage,
+        durationMs,
+      );
+    };
+    const restore = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      sampleId = globalThis.crypto.randomUUID();
+      startedAt = performance.now();
+      submitted = false;
+    };
+    window.addEventListener("pagehide", submit);
+    window.addEventListener("pageshow", restore);
+    return () => {
+      window.removeEventListener("pagehide", submit);
+      window.removeEventListener("pageshow", restore);
+      submit();
+    };
+  }, [
+    loadedCurationPageId,
+    selected?.page_id,
+    selected?.review_status,
+    selected?.version_id,
+    selectedTimingStage,
+  ]);
 
   useEffect(() => {
     if (!onCommandStateChange) return;
@@ -1756,6 +1815,7 @@ export function CurationWorkbench({
 
   useEffect(() => {
     setSelectedCuration(null);
+    setLoadedCurationPageId(null);
     setSourceModalOpen(false);
     setCaptureVisuals([]);
     setCaptureEditing(false);
@@ -1775,6 +1835,7 @@ export function CurationWorkbench({
 
   const handleDetailLoaded = useCallback((detail: PageDetail) => {
     setSelectedCuration(detail.curation ?? null);
+    setLoadedCurationPageId(detail.page_id);
     setCaptureVisuals(
       detail.annotation?.visuals
         .filter((visual) => visual.source_kind === "capture")

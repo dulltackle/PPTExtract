@@ -77,6 +77,69 @@ afterEach(() => {
 });
 
 describe("审核队列、排除与重开", () => {
+  it("切换页面时按当前阶段提交唯一的单调活跃计时片段", async () => {
+    const pages = [page(1, "pending"), page(2, "pending")];
+    const samples: Array<Record<string, unknown>> = [];
+    let monotonicNow = 100;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonicNow);
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("review_status=pending")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages }), { status: 200 }));
+      }
+      const detailMatch = url.match(/^\/api\/v1\/pages\/(page-\d+)$/);
+      if (detailMatch && !init?.method) {
+        const selected = pages.find((item) => item.page_id === detailMatch[1])!;
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: selected.page_id,
+          page_number: selected.page_number,
+          review_status: "pending",
+          review: selected.review,
+          source_content: { ...source, titles: [selected.title] },
+          curation: curation("pending"),
+        }), { status: 200 }));
+      }
+      if (url === "/api/v1/curation/runtime-facts/samples" && init?.method === "POST") {
+        samples.push(JSON.parse(String(init.body)));
+        return Promise.resolve(new Response(JSON.stringify({ status: "recorded" }), { status: 201 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" })).toHaveValue("队列页 1");
+    monotonicNow = 1_350;
+    window.dispatchEvent(new Event("pagehide"));
+    await waitFor(() => expect(samples).toHaveLength(1));
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    monotonicNow = 1_400;
+    window.dispatchEvent(restored);
+    monotonicNow = 1_900;
+    window.dispatchEvent(new Event("pagehide"));
+    await waitFor(() => expect(samples).toHaveLength(2));
+    await userEvent.click(screen.getByRole("button", { name: /第 2 页，队列页 2，待处理/ }));
+
+    await waitFor(() => expect(samples).toHaveLength(2));
+    expect(samples[0]).toMatchObject({
+      page_id: "page-1",
+      version_id: "version-queue",
+      stage: "source_review",
+      duration_ms: 1_250,
+    });
+    expect(samples[0].sample_id).toEqual(expect.any(String));
+    expect(samples[1]).toMatchObject({
+      page_id: "page-1",
+      version_id: "version-queue",
+      stage: "source_review",
+      duration_ms: 500,
+    });
+    expect(samples[1].sample_id).not.toBe(samples[0].sample_id);
+  });
+
   it("默认聚焦待处理页，批量排除后保留筛选并明确提供恢复路径", async () => {
     let pages = [page(1, "pending"), page(2, "pending"), page(3, "approved"), page(4, "excluded")];
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {

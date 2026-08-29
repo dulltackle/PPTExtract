@@ -17,6 +17,7 @@ from pptextract.db import transaction
 from pptextract.jobs import timestamp
 from pptextract.object_store import LocalObjectStore
 from pptextract.repeated_footer_noise import read_page_noise_state
+from pptextract.runtime_facts import record_action
 
 
 class CurationRequestError(Exception):
@@ -635,6 +636,13 @@ def save_source_snapshot(
                 "curation_snapshot_stale",
                 "此页已被其他会话更新，请重新加载后比较修改。",
             )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="source_saved",
+            occurred_at=now,
+        )
         refreshed = _read_current_page(connection, page_id)
         return read_curation_state(connection, refreshed)
 
@@ -647,13 +655,21 @@ def confirm_source_snapshot(
         _assert_current_pending_snapshot(page, snapshot_id)
         existing = _read_confirmation(connection, snapshot_id)
         if existing is None:
+            now = timestamp()
             connection.execute(
                 """
                 INSERT INTO curation_source_confirmations (
                     confirmation_id, snapshot_id, actor_id, confirmed_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                (uuid.uuid4().hex, snapshot_id, actor_id, timestamp()),
+                (uuid.uuid4().hex, snapshot_id, actor_id, now),
+            )
+            record_action(
+                connection,
+                page_version_id=str(page["page_version_id"]),
+                actor_id=actor_id,
+                action_type="source_confirmed",
+                occurred_at=now,
             )
         return read_curation_state(connection, page)
 
@@ -975,6 +991,13 @@ def save_image_source_disposition(
                 "curation_snapshot_stale",
                 "此页已被其他会话更新，请重新加载后比较修改。",
             )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="source_image_disposed",
+            occurred_at=now,
+        )
         return read_curation_state(connection, _read_current_page(connection, page_id))
 
 
@@ -1001,13 +1024,21 @@ def complete_source_review(
                 "图片来源尚待逐项处置，暂时不能完成来源审核。",
             )
         if _read_review(connection, snapshot_id) is None:
+            now = timestamp()
             connection.execute(
                 """
                 INSERT INTO curation_source_reviews (
                     review_id, snapshot_id, actor_id, completed_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                (uuid.uuid4().hex, snapshot_id, actor_id, timestamp()),
+                (uuid.uuid4().hex, snapshot_id, actor_id, now),
+            )
+            record_action(
+                connection,
+                page_version_id=str(page["page_version_id"]),
+                actor_id=actor_id,
+                action_type="source_review_completed",
+                occurred_at=now,
             )
         return read_curation_state(connection, page)
 
@@ -1383,6 +1414,13 @@ def save_capture_visual(
                 "curation_snapshot_stale",
                 "此页已被其他会话更新，请重新加载后继续。",
             )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="capture_created",
+            occurred_at=now,
+        )
         return read_curation_state(connection, _read_current_page(connection, page_id))
 
 
@@ -1452,6 +1490,12 @@ def update_capture_visual(
             base_snapshot_id=base_snapshot_id,
             snapshot_id=snapshot_id,
         )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="capture_updated",
+        )
         return read_curation_state(connection, _read_current_page(connection, page_id))
 
 
@@ -1495,6 +1539,12 @@ def delete_capture_visual(
             page=page,
             base_snapshot_id=base_snapshot_id,
             snapshot_id=snapshot_id,
+        )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="capture_deleted",
         )
         return read_curation_state(connection, _read_current_page(connection, page_id))
 
@@ -1591,6 +1641,12 @@ def move_capture_visual(
             base_snapshot_id=base_snapshot_id,
             snapshot_id=snapshot_id,
         )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="capture_moved",
+        )
         return read_curation_state(connection, _read_current_page(connection, page_id))
 
 
@@ -1619,6 +1675,12 @@ def mark_capture_source_complete(
             page=page,
             base_snapshot_id=snapshot_id,
             snapshot_id=derived_snapshot_id,
+        )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="capture_source_completed",
         )
         return read_curation_state(connection, _read_current_page(connection, page_id))
 
@@ -1690,6 +1752,13 @@ def approve_page(
                 page["version_id"],
                 snapshot_id,
             ),
+        )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="page_approved",
+            occurred_at=now,
         )
         return {
             "review": {
@@ -1768,6 +1837,13 @@ def exclude_page(
                 normalized_note,
             ),
         )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="page_excluded",
+            occurred_at=now,
+        )
         return {
             "review": {
                 "status": "excluded",
@@ -1824,6 +1900,13 @@ def reopen_page(
                 page["version_id"],
                 page["current_snapshot_id"],
             ),
+        )
+        record_action(
+            connection,
+            page_version_id=str(page["page_version_id"]),
+            actor_id=actor_id,
+            action_type="page_reopened",
+            occurred_at=now,
         )
         return {
             "review": {

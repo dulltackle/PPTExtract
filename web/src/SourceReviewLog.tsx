@@ -854,6 +854,11 @@ export function SourceReviewLog({
       setShowReopen(false);
       setAnnouncement("页面已重新打开，恢复为待处理并解锁编辑。");
       await onReopened();
+      try {
+        await refreshDetail();
+      } catch {
+        setAnnouncement("页面已重新打开，但最新详情刷新失败，请刷新恢复。");
+      }
       window.requestAnimationFrame(() => firstFieldRef.current?.focus());
     } catch (cause) {
       setAnnouncement(
@@ -865,7 +870,7 @@ export function SourceReviewLog({
     } finally {
       setOperation(null);
     }
-  }, [busy, onReopened, page.page_id, pending]);
+  }, [busy, onReopened, page.page_id, pending, refreshDetail]);
 
   useEffect(() => {
     if (!showReopen) return;

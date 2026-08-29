@@ -66,6 +66,12 @@ from pptextract.repeated_footer_noise import (
     preview_candidate,
     revoke_confirmation,
 )
+from pptextract.runtime_facts import (
+    RuntimeFactError,
+    read_runtime_facts,
+    record_timing_sample,
+    runtime_facts_csv,
+)
 from pptextract.worker import worker_is_fresh
 
 
@@ -150,6 +156,14 @@ class ConfirmRepeatedFooterNoise(BaseModel):
 
 class RevokeRepeatedFooterNoise(BaseModel):
     note: str | None = Field(default=None, max_length=100_000)
+
+
+class CurationTimingSample(BaseModel):
+    sample_id: str = Field(min_length=1, max_length=128)
+    page_id: str = Field(min_length=1, max_length=128)
+    version_id: str = Field(min_length=1, max_length=128)
+    stage: str = Field(min_length=1, max_length=64)
+    duration_ms: int = Field(ge=0)
 
 
 def _read_curation_snapshot(
@@ -1084,6 +1098,41 @@ def create_app(
                 )
             pages.append(page_payload)
         return JSONResponse(content={"pages": pages})
+
+    @app.post("/api/v1/curation/runtime-facts/samples")
+    async def create_curation_timing_sample(
+        command: CurationTimingSample, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = record_timing_sample(
+                resolved,
+                sample_id=command.sample_id,
+                page_id=command.page_id,
+                version_id=command.version_id,
+                actor_id=actor.actor_id,
+                stage=command.stage,
+                duration_ms=command.duration_ms,
+            )
+        except RuntimeFactError as error:
+            return error_response(error.status_code, error.code, error.message)
+        return JSONResponse(
+            status_code=201 if result["status"] == "recorded" else 200,
+            content=result,
+        )
+
+    @app.get("/api/v1/curation/runtime-facts")
+    async def get_curation_runtime_facts(format: str = "json") -> Response:
+        if format not in {"json", "csv"}:
+            return error_response(422, "invalid_format", "运行事实仅支持 JSON 或 CSV。")
+        facts = read_runtime_facts(resolved)
+        if format == "csv":
+            return Response(
+                content=runtime_facts_csv(facts),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=curation-runtime-facts.csv"},
+            )
+        return JSONResponse(content=facts)
 
     @app.post(
         "/api/v1/documents/{document_id}/versions/{version_id}"
