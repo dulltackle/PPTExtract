@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from importlib import resources
+from pathlib import Path
 
 import pytest
 
@@ -42,3 +45,18 @@ def test_toolchain_upgrade_mismatch_blocks_the_gate() -> None:
 
     with pytest.raises(ToolchainMismatch, match="firecrawl-anydoc"):
         verify_toolchain_contract(report, replace(contract, anydoc_version="9.9.9"))
+
+
+def test_locked_contract_rejects_a_mutable_rendering_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_file = resources.files("pptextract").joinpath("document_toolchain.json")
+    payload = json.loads(contract_file.read_text(encoding="utf-8"))
+    payload["rendering_image"] = "ghcr.io/dulltackle/pptextract-document-toolchain:1"
+    (tmp_path / "document_toolchain.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    monkeypatch.setattr("pptextract.toolchain.resources.files", lambda _package: tmp_path)
+
+    with pytest.raises(ValueError, match="sha256 digest"):
+        load_toolchain_contract()

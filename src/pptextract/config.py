@@ -6,6 +6,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from pptextract.toolchain import load_toolchain_contract
+
+DEFAULT_RENDER_IMAGE = load_toolchain_contract().rendering_image
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -17,7 +21,7 @@ class Settings:
     web_dist_path: Path
     default_actor_id: str
     worker_id: str
-    render_image: str = "pptextract/document-toolchain:1"
+    render_image: str = DEFAULT_RENDER_IMAGE
     render_generation: int = 1
     max_source_upload_bytes: int = 128 * 1024 * 1024
     sqlite_busy_timeout_ms: int = 5_000
@@ -41,7 +45,7 @@ class Settings:
             default_actor_id=os.environ.get("PPTEXTRACT_ACTOR_ID", "local-operator"),
             worker_id=os.environ.get("PPTEXTRACT_WORKER_ID", "worker-1"),
             render_image=os.environ.get(
-                "PPTEXTRACT_RENDER_IMAGE", "pptextract/document-toolchain:1"
+                "PPTEXTRACT_RENDER_IMAGE", DEFAULT_RENDER_IMAGE
             ),
             render_generation=int(os.environ.get("PPTEXTRACT_RENDER_GENERATION", "1")),
             max_source_upload_bytes=int(

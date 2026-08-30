@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "anydoc_distribution": "firecrawl-anydoc",
   "anydoc_version": "0.1.9",
-  "rendering_image_id": "sha256:96333270f446993a9f228606ca83d42dc5f082b402f8e674916f248cbc8f9501",
+  "rendering_image": "ghcr.io/dulltackle/pptextract-document-toolchain@sha256:96333270f446993a9f228606ca83d42dc5f082b402f8e674916f248cbc8f9501",
   "libreoffice_version": "24.2.7.2 420(Build:2)",
   "poppler_version": "24.02.0",
   "fontconfig_version": "2.15.0",

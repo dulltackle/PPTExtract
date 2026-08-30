@@ -20,6 +20,7 @@ from pptextract.rendering import (
     render_configuration_version,
     render_standard_pages,
 )
+from pptextract.toolchain import load_toolchain_contract
 from tests.support.synthetic_pptx import (
     build_installed_font_glyph_fallback_presentation,
     build_minimal_presentation,
@@ -29,7 +30,7 @@ from tests.support.synthetic_pptx import (
     build_table_font_presentation,
 )
 
-RENDERING_IMAGE = "pptextract/document-toolchain:1"
+RENDERING_IMAGE = load_toolchain_contract().rendering_image
 
 
 def _rendering_image_is_available() -> bool:
@@ -47,11 +48,17 @@ def test_render_configuration_version_includes_locked_toolchain_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     contract = tmp_path / "document_toolchain.json"
-    contract.write_text('{"rendering_image_id":"sha256:first"}', encoding="utf-8")
+    contract.write_text(
+        '{"rendering_image":"example.invalid/toolchain@sha256:first"}',
+        encoding="utf-8",
+    )
     monkeypatch.setattr("pptextract.rendering.resources.files", lambda _package: tmp_path)
     first = render_configuration_version(RENDERING_IMAGE)
 
-    contract.write_text('{"rendering_image_id":"sha256:second"}', encoding="utf-8")
+    contract.write_text(
+        '{"rendering_image":"example.invalid/toolchain@sha256:second"}',
+        encoding="utf-8",
+    )
 
     assert render_configuration_version(RENDERING_IMAGE) != first
 

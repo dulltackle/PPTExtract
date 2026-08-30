@@ -1,5 +1,6 @@
 # Agent 工作区
 .claude/
+.codex/
 
 # 编辑器 / IDE
 .idea

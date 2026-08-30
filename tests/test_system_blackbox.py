@@ -18,6 +18,7 @@ import httpx
 import pytest
 from PIL import Image
 
+from pptextract.toolchain import load_toolchain_contract
 from tests.support.synthetic_pptx import (
     build_image_curation_presentation,
     build_minimal_presentation,
@@ -53,15 +54,13 @@ def running_system() -> Iterator[tuple[str, Path]]:
             "PPTEXTRACT_ACTOR_ID": "blackbox-operator",
             "PPTEXTRACT_WORKER_ID": "blackbox-worker",
             "PPTEXTRACT_WEB_DIST": str(project_root / "web" / "dist"),
-            "PPTEXTRACT_RENDER_IMAGE": "pptextract/document-toolchain:1",
+            "PPTEXTRACT_RENDER_IMAGE": load_toolchain_contract().rendering_image,
         }
     )
     worker = subprocess.Popen(
         [sys.executable, "-m", "pptextract.worker"],
         cwd=project_root,
         env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         text=True,
     )
     api = subprocess.Popen(
@@ -74,11 +73,10 @@ def running_system() -> Iterator[tuple[str, Path]]:
             "127.0.0.1",
             "--port",
             str(port),
+            "--no-access-log",
         ],
         cwd=project_root,
         env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         text=True,
     )
     try:
@@ -97,11 +95,7 @@ def running_system() -> Iterator[tuple[str, Path]]:
             except httpx.HTTPError as error:
                 last_error = str(error)
             time.sleep(0.1)
-        worker_error = worker.stderr.read() if worker.poll() is not None and worker.stderr else ""
-        api_error = api.stderr.read() if api.poll() is not None and api.stderr else ""
-        pytest.fail(
-            f"黑盒系统未就绪：{last_error}\nworker: {worker_error}\napi: {api_error}"
-        )
+        pytest.fail(f"黑盒系统未就绪：{last_error}")
     finally:
         for process in (api, worker):
             if process.poll() is None:

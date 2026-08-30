@@ -25,7 +25,7 @@ class ToolchainContract:
     schema_version: int
     anydoc_distribution: str
     anydoc_version: str
-    rendering_image_id: str
+    rendering_image: str
     libreoffice_version: str
     poppler_version: str
     fontconfig_version: str
@@ -40,7 +40,7 @@ class ToolchainContract:
 class ToolchainReport:
     anydoc_distribution: str
     anydoc_version: str
-    rendering_image_id: str
+    rendering_image: str
     libreoffice_version: str
     poppler_version: str
     fontconfig_version: str
@@ -59,9 +59,6 @@ def load_toolchain_contract() -> ToolchainContract:
 
 def probe_toolchain(toolchain: DockerRenderingToolchain) -> ToolchainReport:
     """探测当前实际加载的转换与渲染构建。"""
-    image_id = _run_output(
-        ["docker", "image", "inspect", "--format", "{{.Id}}", toolchain.image]
-    )
     libreoffice = _container_output(toolchain, "libreoffice", "--version")
     poppler = _container_output(toolchain, "pdftoppm", "-v")
     fontconfig = _container_output(toolchain, "fc-list", "--version")
@@ -96,7 +93,7 @@ def probe_toolchain(toolchain: DockerRenderingToolchain) -> ToolchainReport:
     return ToolchainReport(
         anydoc_distribution="firecrawl-anydoc",
         anydoc_version=metadata.version("firecrawl-anydoc"),
-        rendering_image_id=image_id,
+        rendering_image=toolchain.image,
         libreoffice_version=libreoffice.removeprefix("LibreOffice "),
         poppler_version=poppler.splitlines()[0].removeprefix("pdftoppm version "),
         fontconfig_version=fontconfig.removeprefix("fontconfig version "),
@@ -114,7 +111,7 @@ def verify_toolchain_contract(report: ToolchainReport, contract: ToolchainContra
     fields = (
         "anydoc_distribution",
         "anydoc_version",
-        "rendering_image_id",
+        "rendering_image",
         "libreoffice_version",
         "poppler_version",
         "fontconfig_version",
@@ -135,15 +132,26 @@ def verify_toolchain_contract(report: ToolchainReport, contract: ToolchainContra
 
 
 def _contract_from_dict(payload: dict[str, Any]) -> ToolchainContract:
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != 2:
         raise ValueError("不支持的文档工具链契约版本")
+    rendering_image = payload["rendering_image"]
+    if not isinstance(rendering_image, str):
+        raise ValueError("渲染镜像必须使用完整的 sha256 digest 引用")
+    repository, separator, digest = rendering_image.partition("@sha256:")
+    if (
+        not repository
+        or not separator
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError("渲染镜像必须使用完整的 sha256 digest 引用")
     font_packages = tuple(sorted(payload["font_packages"].items()))
     system_packages = tuple(sorted(payload["system_packages"].items()))
     return ToolchainContract(
         schema_version=payload["schema_version"],
         anydoc_distribution=payload["anydoc_distribution"],
         anydoc_version=payload["anydoc_version"],
-        rendering_image_id=payload["rendering_image_id"],
+        rendering_image=rendering_image,
         libreoffice_version=payload["libreoffice_version"],
         poppler_version=payload["poppler_version"],
         fontconfig_version=payload["fontconfig_version"],

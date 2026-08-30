@@ -22,17 +22,16 @@ jobs:
           enable-cache: true
       - name: 安装锁定依赖
         run: uv sync --locked --dev
-      - name: 构建锁定渲染工具链
-        run: >-
-          docker build
-          --provenance=false
-          --platform=linux/amd64
-          --file docker/document-toolchain.Dockerfile
-          --tag pptextract/document-toolchain:1
-          .
+      - name: 读取不可变渲染镜像引用
+        id: rendering_image
+        run: |
+          image="$(uv run python -c 'from pptextract.toolchain import load_toolchain_contract; print(load_toolchain_contract().rendering_image)')"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: 拉取已发布的锁定渲染工具链
+        run: docker pull "${{ steps.rendering_image.outputs.image }}"
       - name: 阻止第三方构建或配置漂移
         run: >-
           uv run python -m pptextract.toolchain
-          --render-image pptextract/document-toolchain:1
+          --render-image "${{ steps.rendering_image.outputs.image }}"
       - name: 执行完整测试（含真实转换与渲染契约）
         run: uv run pytest

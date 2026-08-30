@@ -41,21 +41,19 @@ cd web && npm test && npm run typecheck && npm run build
 
 ### 文档工具链契约门禁
 
-AnyDoc 作为 Python 依赖精确锁定；LibreOffice、Poppler 与字体包由仓库内的容器构建文件固定。构建并验证实际工具链：
+AnyDoc 作为 Python 依赖精确锁定；LibreOffice、Poppler 与字体包封装在一次性发布的公共 GHCR 镜像中。CI、生产和本地验证都使用 `src/pptextract/document_toolchain.json` 内按 registry digest 锁定的同一镜像，不在常规门禁中重新构建：
 
 ```bash
-docker build \
-  --provenance=false \
-  --platform=linux/amd64 \
-  --file docker/document-toolchain.Dockerfile \
-  --tag pptextract/document-toolchain:1 \
-  .
+RENDER_IMAGE="ghcr.io/dulltackle/pptextract-document-toolchain@sha256:96333270f446993a9f228606ca83d42dc5f082b402f8e674916f248cbc8f9501"
+docker pull "$RENDER_IMAGE"
 
 uv run python -m pptextract.toolchain \
-  --render-image pptextract/document-toolchain:1
+  --render-image "$RENDER_IMAGE"
 uv run pytest tests/test_rendering_contract.py tests/test_toolchain_gate.py
 ```
 
-门禁会探测实际加载的 `firecrawl-anydoc`、LibreOffice、Poppler、fontconfig、字体包、容器内容地址及 144 DPI/PDF 导出配置，并与 `src/pptextract/document_toolchain.json` 逐项比较。任一版本或配置变化都会失败；升级时必须先用公开合成夹具和获授权的本地样本完成人工视觉验证，再显式更新契约。
+门禁会验证完整的不可变镜像引用，并探测实际加载的 `firecrawl-anydoc`、LibreOffice、Poppler、fontconfig、字体包及 144 DPI/PDF 导出配置，与 `src/pptextract/document_toolchain.json` 逐项比较。任一版本、镜像 digest 或配置变化都会失败。
+
+升级工具链时，使用一个尚未发布的新整数标签构建候选镜像；先用公开合成夹具和获授权的本地样本完成人工视觉门禁，再将候选镜像发布到 `ghcr.io/dulltackle/pptextract-document-toolchain`。从 `docker push` 的结果取得 registry digest，把合同中的 `rendering_image` 更新为完整的 `image@sha256:…` 引用，并重新运行上述门禁。标签只用于发布导航，运行时不得使用标签；发布后执行 `docker logout ghcr.io`，不要在仓库中保存 registry 凭据。
 
 公开契约测试只在内存中生成虚构 `.pptx`，覆盖纯文字、重复与跨页复用图片、图表、组合形状、复杂合并表格、演讲者备注、隐藏页、重复页、页序变更和缺失字体。真实样本仍按 `fixtures/README.md` 的规则只在本地使用。
