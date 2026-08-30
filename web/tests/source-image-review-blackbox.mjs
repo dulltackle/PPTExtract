@@ -7,7 +7,9 @@ const routePrefix = process.argv[3];
 if (!baseUrl || !routePrefix) throw new Error("缺少 base URL 或图片策展路由");
 
 const browser = await chromium.launch({
-  executablePath: process.env.PPTEXTRACT_CHROME ?? "/usr/bin/google-chrome",
+  ...(process.env.PPTEXTRACT_CHROME
+    ? { executablePath: process.env.PPTEXTRACT_CHROME }
+    : {}),
   headless: true,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });

@@ -11,18 +11,20 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 
 import httpx
 import pytest
 from PIL import Image
 
+from pptextract.downstream import DownstreamSimulator, SourceRequest, SourceResponse
 from pptextract.toolchain import load_toolchain_contract
 from tests.support.synthetic_pptx import (
     build_image_curation_presentation,
     build_minimal_presentation,
     build_plain_text_presentation,
+    build_product_acceptance_presentation,
 )
 
 
@@ -32,8 +34,60 @@ def available_port() -> int:
         return int(listener.getsockname()[1])
 
 
-@pytest.fixture(scope="module")
-def running_system() -> Iterator[tuple[str, Path]]:
+def wait_for_job(
+    client: httpx.Client,
+    base_url: str,
+    job_id: str,
+    *,
+    terminal_states: set[str] | None = None,
+    timeout: float = 90,
+) -> dict[str, object]:
+    terminal = terminal_states or {"succeeded", "failed", "requires_action"}
+    deadline = time.monotonic() + timeout
+    task = client.get(f"{base_url}/api/v1/jobs/{job_id}").json()
+    while task["status"] not in terminal and time.monotonic() < deadline:
+        time.sleep(0.1)
+        task = client.get(f"{base_url}/api/v1/jobs/{job_id}").json()
+    return task
+
+
+def run_product_browser(
+    project_root: Path,
+    base_url: str,
+    mode: str,
+    *arguments: str,
+    timeout: float = 120,
+) -> dict[str, object]:
+    result = subprocess.run(
+        ["node", "tests/product-acceptance.mjs", base_url, mode, *arguments],
+        cwd=project_root / "web",
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def downstream_source(base_url: str) -> SourceRequest:
+    def request(uri: str, headers: Mapping[str, str]) -> SourceResponse:
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            response = client.get(f"{base_url}{uri}", headers=dict(headers))
+        payload = response.content
+        blocks: Iterable[bytes] = (
+            payload[index : index + 23] for index in range(0, len(payload), 23)
+        )
+        return SourceResponse(
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            body=blocks,
+        )
+
+    return request
+
+
+def run_system() -> Iterator[tuple[str, Path]]:
     project_root = Path(__file__).resolve().parents[1]
     subprocess.run(
         ["npm", "run", "build"],
@@ -108,6 +162,16 @@ def running_system() -> Iterator[tuple[str, Path]]:
                 process.wait(timeout=5)
         if data_root.exists():
             shutil.rmtree(data_root)
+
+
+@pytest.fixture(scope="module")
+def running_system() -> Iterator[tuple[str, Path]]:
+    yield from run_system()
+
+
+@pytest.fixture
+def isolated_product_system() -> Iterator[tuple[str, Path]]:
+    yield from run_system()
 
 
 def test_external_system_spine_and_browser_shell(
@@ -571,3 +635,262 @@ def test_anydoc_image_sources_are_disposed_in_a_real_browser(
             "source-load-recovery",
         ],
     }
+
+
+@pytest.mark.product_acceptance
+def test_product_acceptance_from_upload_to_atomic_downstream_switch(
+    isolated_product_system: tuple[str, Path],
+) -> None:
+    base_url, _data_root = isolated_product_system
+    project_root = Path(__file__).resolve().parents[1]
+    media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    actor_headers = {"X-Actor-ID": "blackbox-operator"}
+
+    with httpx.Client(trust_env=False, timeout=60) as client:
+        accepted = client.post(
+            f"{base_url}/api/v1/documents",
+            headers={**actor_headers, "Idempotency-Key": "product-acceptance-baseline"},
+            files={
+                "file": (
+                    "public-product-acceptance.pptx",
+                    build_product_acceptance_presentation(),
+                    media_type,
+                )
+            },
+        )
+        assert accepted.status_code == 202
+        baseline = accepted.json()
+        assert wait_for_job(client, base_url, baseline["job_id"], timeout=120)["status"] == (
+            "succeeded"
+        )
+
+        baseline_pages = [
+            page
+            for page in client.get(
+                f"{base_url}/api/v1/curation/pages", params={"review_status": "all"}
+            ).json()["pages"]
+            if page["document_id"] == baseline["document_id"]
+        ]
+        assert [(page["page_number"], page["review_status"]) for page in baseline_pages] == [
+            (1, "pending"),
+            (2, "pending"),
+            (3, "pending"),
+            (4, "pending"),
+        ]
+
+    route_prefix = (
+        "/curation?document="
+        f"{baseline['document_id']}&version={baseline['version_id']}"
+    )
+    curation_report = run_product_browser(
+        project_root,
+        base_url,
+        "curate",
+        route_prefix,
+        timeout=180,
+    )
+    assert curation_report == {
+        "ok": True,
+        "checks": [
+            "viewport-1280",
+            "viewport-1440",
+            "zero-capture-approved",
+            "source-image-included",
+            "capture-approved",
+            "page-excluded",
+            "forbidden-actions-absent",
+        ],
+    }
+
+    with httpx.Client(trust_env=False, timeout=60) as client:
+        curated_pages = [
+            page
+            for page in client.get(
+                f"{base_url}/api/v1/curation/pages", params={"review_status": "all"}
+            ).json()["pages"]
+            if page["document_id"] == baseline["document_id"]
+        ]
+        baseline_by_number = {page["page_number"]: page for page in curated_pages}
+        assert [page["review_status"] for page in curated_pages] == [
+            "approved",
+            "approved",
+            "approved",
+            "excluded",
+        ]
+
+        incoming = client.post(
+            f"{base_url}/api/v1/documents/{baseline['document_id']}/versions",
+            headers={**actor_headers, "Idempotency-Key": "product-acceptance-reordered"},
+            files={
+                "file": (
+                    "public-product-acceptance-reordered.pptx",
+                    build_product_acceptance_presentation(order=(4, 2, 3, 1)),
+                    media_type,
+                )
+            },
+        )
+        assert incoming.status_code == 202
+        incoming_identity = incoming.json()
+        mapping_task = wait_for_job(
+            client,
+            base_url,
+            incoming_identity["job_id"],
+            timeout=120,
+        )
+        assert mapping_task["status"] == "requires_action"
+        version = client.get(
+            f"{base_url}/api/v1/documents/{baseline['document_id']}"
+            f"/versions/{incoming_identity['version_id']}"
+        ).json()
+        assert version["status"] == "awaiting_mapping"
+        assert client.get(
+            f"{base_url}/api/v1/documents/{baseline['document_id']}"
+        ).json()["current_version_id"] == baseline["version_id"]
+
+    mapping_route = (
+        f"/documents/{baseline['document_id']}/versions/"
+        f"{incoming_identity['version_id']}/page-mapping"
+    )
+    expected_mapping = json.dumps(
+        {
+            "1": baseline_by_number[4]["page_id"],
+            "4": baseline_by_number[1]["page_id"],
+        },
+        separators=(",", ":"),
+    )
+    mapping_report = run_product_browser(
+        project_root,
+        base_url,
+        "map",
+        mapping_route,
+        expected_mapping,
+        timeout=120,
+    )
+    assert mapping_report == {
+        "ok": True,
+        "checks": [
+            "old-version-served-during-mapping",
+            "duplicate-pages-mapped",
+            "mapping-confirmed",
+        ],
+    }
+
+    with httpx.Client(trust_env=False, timeout=30) as client:
+        assert wait_for_job(client, base_url, incoming_identity["job_id"])["status"] == (
+            "succeeded"
+        )
+        inherited_pages = [
+            page
+            for page in client.get(
+                f"{base_url}/api/v1/curation/pages", params={"review_status": "all"}
+            ).json()["pages"]
+            if page["document_id"] == baseline["document_id"]
+        ]
+        assert [page["page_id"] for page in inherited_pages] == [
+            baseline_by_number[4]["page_id"],
+            baseline_by_number[2]["page_id"],
+            baseline_by_number[3]["page_id"],
+            baseline_by_number[1]["page_id"],
+        ]
+        assert [page["review_status"] for page in inherited_pages] == [
+            "excluded",
+            "approved",
+            "approved",
+            "approved",
+        ]
+
+        details = {
+            page["page_id"]: client.get(
+                f"{base_url}/api/v1/pages/{page['page_id']}"
+            ).json()
+            for page in inherited_pages
+        }
+        for detail in details.values():
+            assert detail["review"]["source_version_id"] == baseline["version_id"]
+            assert detail["review"]["inherited_from_page_version_id"]
+        for page_number in (1, 2, 3):
+            detail = details[baseline_by_number[page_number]["page_id"]]
+            snapshot = detail["curation"]["current_snapshot"]
+            assert snapshot["source_confirmation"]["actor_id"] == "blackbox-operator"
+            assert snapshot["source_review"]["actor_id"] == "blackbox-operator"
+            assert detail["review"]["reviewed_by"] == "blackbox-operator"
+        image_detail = details[baseline_by_number[2]["page_id"]]
+        assert image_detail["curation"]["image_sources"]["items"][0]["decided_by"] == (
+            "blackbox-operator"
+        )
+        source_visual = next(
+            visual
+            for visual in image_detail["annotation"]["visuals"]
+            if visual["source_kind"] == "source_image"
+        )
+        assert source_visual["asset"]["byte_contract"] == "anydoc_original"
+        capture_detail = details[baseline_by_number[3]["page_id"]]
+        capture_visual = next(
+            visual
+            for visual in capture_detail["annotation"]["visuals"]
+            if visual["source_kind"] == "capture"
+        )
+        assert capture_visual["asset"]["byte_contract"] == "standard_render_crop"
+
+        warnings = client.get(
+            f"{base_url}/api/v1/documents/{baseline['document_id']}"
+            f"/versions/{incoming_identity['version_id']}/rendering-warnings"
+        ).json()
+        unconfirmed = [
+            warning["warning_id"]
+            for warning in warnings["warnings"]
+            if warning["status"] == "unconfirmed"
+        ]
+        if unconfirmed:
+            confirmation = client.post(
+                f"{base_url}/api/v1/documents/{baseline['document_id']}"
+                f"/versions/{incoming_identity['version_id']}"
+                "/rendering-warnings/confirm-all",
+                headers=actor_headers,
+                json={
+                    "render_config_version": warnings["render_config_version"],
+                    "warning_ids": unconfirmed,
+                },
+            )
+            assert confirmation.status_code == 200
+            assert confirmation.json()["summary"]["unconfirmed"] == 0
+
+    publication_report = run_product_browser(
+        project_root,
+        base_url,
+        "publish",
+        timeout=120,
+    )
+    assert publication_report == {
+        "ok": True,
+        "checks": [
+            "candidate-reviewed",
+            "publication-confirmed",
+            "artifact-published",
+        ],
+    }
+
+    with httpx.Client(trust_env=False, timeout=30) as client:
+        current = client.get(f"{base_url}/api/v1/publications/current")
+        assert current.status_code == 200
+        pointer = current.json()
+        assert pointer["chunk_count"] == 3
+        assert pointer["asset_count"] == 2
+        first_range = client.get(
+            f"{base_url}{pointer['artifact_uri']}", headers={"Range": "bytes=0-63"}
+        )
+        assert first_range.status_code == 206
+        assert first_range.headers["content-range"].startswith("bytes 0-63/")
+
+    downstream = DownstreamSimulator()
+    assert downstream.synchronize(downstream_source(base_url)) is True
+    generation = downstream.current_generation
+    assert generation is not None
+    assert generation.publication_seq == pointer["publication_seq"]
+    assert set(generation.chunks) == {
+        baseline_by_number[1]["chunk_id"],
+        baseline_by_number[2]["chunk_id"],
+        baseline_by_number[3]["chunk_id"],
+    }
+    assert len(generation.assets) == 2
+    assert downstream.synchronize(downstream_source(base_url)) is False

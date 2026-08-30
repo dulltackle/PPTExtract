@@ -13,7 +13,9 @@ const captureRoot = process.env.PPTEXTRACT_CAPTURE_DIR
 if (captureRoot) await mkdir(captureRoot, { recursive: true });
 
 const browser = await chromium.launch({
-  executablePath: process.env.PPTEXTRACT_CHROME ?? "/usr/bin/google-chrome",
+  ...(process.env.PPTEXTRACT_CHROME
+    ? { executablePath: process.env.PPTEXTRACT_CHROME }
+    : {}),
   headless: true,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });

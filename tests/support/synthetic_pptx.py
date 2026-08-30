@@ -193,6 +193,39 @@ def build_image_curation_presentation() -> bytes:
     return output.getvalue()
 
 
+def build_product_acceptance_presentation(
+    *, order: tuple[int, ...] | None = None
+) -> bytes:
+    """构造产品级黑盒门禁的单文档四页合成 PPTX。"""
+    presentation = Presentation()
+    presentation.slide_width = Inches(13.333333)
+    presentation.slide_height = Inches(7.5)
+
+    _add_title_and_body(presentation, "公开重复结论页", "相同内容由人分别批准或排除。")
+
+    image_stream = BytesIO()
+    Image.new("RGB", (80, 48), (36, 112, 176)).save(image_stream, format="PNG")
+    image_page = _add_title_and_body(
+        presentation,
+        "公开来源图片页",
+        "此页验证 AnyDoc 来源图片逐项处置。",
+    )
+    _add_picture(image_page, image_stream.getvalue(), "公开蓝色来源图片", 0.8)
+
+    _add_title_and_body(
+        presentation,
+        "公开人工框选页",
+        "此页需要从标准页渲染结果补充视觉结论。",
+    )
+
+    _add_title_and_body(presentation, "公开重复结论页", "相同内容由人分别批准或排除。")
+
+    output = BytesIO()
+    presentation.save(output)
+    result = output.getvalue()
+    return result if order is None else _reorder_slides(result, order)
+
+
 def build_public_contract_presentation(
     *, order: tuple[int, ...] | None = None
 ) -> bytes:

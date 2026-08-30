@@ -6,7 +6,7 @@ PPTExtract 的初版单机产品脊柱：FastAPI、React 文档入口、一个�
 
 ```bash
 uv sync --dev
-cd web && npm install && cd ..
+cd web && npm install && npx --no-install playwright install chromium && cd ..
 uv run python scripts/dev.py
 ```
 
@@ -38,6 +38,15 @@ uv run mypy src/pptextract
 uv run ruff check src tests
 cd web && npm test && npm run typecheck && npm run build
 ```
+
+产品级门禁把部署后的服务视为黑盒，使用公开合成 PPTX、真实 SQLite、本地持久对象目录、单 worker、锁定文档工具链和 Chrome，贯通上传、页对应、审核继承、四类策展路径、发布、Range 下载与下游 generation 原子切换。事务、文件发布和租约恢复使用独立故障标记：
+
+```bash
+uv run pytest -m product_acceptance
+uv run pytest -m product_fault
+```
+
+公开 CI 不读取 `fixtures/` 中的真实本地样本；产品门禁生成的文件名、内容、渲染和产物均来自仓库内的虚构夹具。
 
 ### 文档工具链契约门禁
 

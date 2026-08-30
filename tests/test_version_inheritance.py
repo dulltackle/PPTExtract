@@ -656,6 +656,7 @@ def test_rollback_to_historical_content_uses_the_latest_matching_review_history(
     assert detail["annotation"]["overview"] == "经人工确认的结论"
 
 
+@pytest.mark.product_fault
 def test_activation_failure_rolls_back_page_versions_inheritance_and_current_pointer(
     system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
 ) -> None:

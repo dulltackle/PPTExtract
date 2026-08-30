@@ -7,7 +7,9 @@ const outputRoot = resolve(process.argv[3] ?? "../.impeccable/review");
 await mkdir(outputRoot, { recursive: true });
 
 const browser = await chromium.launch({
-  executablePath: process.env.PPTEXTRACT_CHROME ?? "/usr/bin/google-chrome",
+  ...(process.env.PPTEXTRACT_CHROME
+    ? { executablePath: process.env.PPTEXTRACT_CHROME }
+    : {}),
   headless: true,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });

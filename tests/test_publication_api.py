@@ -708,6 +708,7 @@ def test_freeze_failure_rolls_back_reserved_sequence_and_frozen_input(
     ("fault_phase", "expected_phase"),
     (("build", "build"), ("store", "store"), ("switch_pointer", "switch_pointer")),
 )
+@pytest.mark.product_fault
 def test_publication_fault_before_pointer_commit_keeps_current_artifact(
     system: tuple[TestClient, Settings],
     monkeypatch: pytest.MonkeyPatch,

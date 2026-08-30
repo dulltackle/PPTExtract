@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -16,7 +18,9 @@ from pptextract.api import create_app
 from pptextract.config import Settings
 from pptextract.db import transaction
 from pptextract.jobs import timestamp
+from pptextract.object_store import LocalObjectStore
 from pptextract.pptx_projection import MAX_XML_PART_BYTES
+from pptextract.storage_maintenance import collect_unreachable_objects
 from pptextract.worker import run_once
 from tests.support.synthetic_pptx import (
     build_minimal_presentation,
@@ -152,6 +156,49 @@ def test_upload_validation_returns_stable_errors_at_the_http_boundary(
     assert expanded_over_limit.json()["error"]["code"] == "source_too_large"
     assert run_once(settings) is False
     assert run_once(limited_settings) is False
+
+
+@pytest.mark.product_fault
+def test_object_written_before_sqlite_acceptance_failure_becomes_recoverable_orphan(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    source = build_plain_text_presentation()
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    with transaction(settings) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_source_object_record
+            BEFORE INSERT ON stored_objects
+            BEGIN
+                SELECT RAISE(ABORT, '注入的 SQLite 接受事务失败');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="注入的 SQLite 接受事务失败"):
+        client.post(
+            "/api/v1/documents",
+            headers={"Idempotency-Key": "object-before-sqlite-failure"},
+            files={
+                "file": (
+                    "public-transaction-fault.pptx",
+                    source,
+                    PPTX_MEDIA_TYPE,
+                )
+            },
+        )
+
+    store = LocalObjectStore(settings.object_store_path)
+    assert store.path_for(source_sha256).read_bytes() == source
+    with transaction(settings) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM document_versions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+    report = collect_unreachable_objects(settings)
+    assert report.marked == (source_sha256,)
+    assert report.deleted == ()
 
 
 def test_first_upload_idempotency_is_scoped_to_actor_and_the_exact_request(

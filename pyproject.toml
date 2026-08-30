@@ -30,6 +30,10 @@ packages = ["src/pptextract"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+  "product_acceptance: 部署后产品级黑盒快乐路径",
+  "product_fault: 产品事务、文件发布与租约恢复故障注入",
+]
 
 [tool.mypy]
 python_version = "3.12"

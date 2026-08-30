@@ -10,7 +10,9 @@ if (!baseUrl || !route) throw new Error("缺少 base URL 或策展路由");
 if (captureRoot) await mkdir(captureRoot, { recursive: true });
 
 const browser = await chromium.launch({
-  executablePath: process.env.PPTEXTRACT_CHROME ?? "/usr/bin/google-chrome",
+  ...(process.env.PPTEXTRACT_CHROME
+    ? { executablePath: process.env.PPTEXTRACT_CHROME }
+    : {}),
   headless: true,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });

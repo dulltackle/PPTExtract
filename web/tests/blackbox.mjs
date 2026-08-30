@@ -4,7 +4,9 @@ const baseUrl = process.argv[2];
 if (!baseUrl) throw new Error("缺少 base URL");
 
 const browser = await chromium.launch({
-  executablePath: process.env.PPTEXTRACT_CHROME ?? "/usr/bin/google-chrome",
+  ...(process.env.PPTEXTRACT_CHROME
+    ? { executablePath: process.env.PPTEXTRACT_CHROME }
+    : {}),
   headless: true,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });

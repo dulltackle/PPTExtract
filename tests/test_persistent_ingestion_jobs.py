@@ -206,6 +206,7 @@ def test_retry_resumes_page_checkpoints_without_exposing_or_duplicating_results(
     assert len({page["chunk_id"] for page in pages}) == 2
 
 
+@pytest.mark.product_fault
 def test_expired_lease_takeover_rejects_updates_from_the_stale_claim(tmp_path: Path) -> None:
     first_worker = replace(Settings.for_test(tmp_path), worker_id="worker-one")
     second_worker = replace(first_worker, worker_id="worker-two")
