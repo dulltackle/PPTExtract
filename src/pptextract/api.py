@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
+from starlette.middleware.base import RequestResponseEndpoint
 
 from pptextract.auth import ActorProvider, HeaderActorProvider
 from pptextract.config import Settings
@@ -31,7 +32,13 @@ from pptextract.curation import (
     save_source_snapshot,
     update_capture_visual,
 )
-from pptextract.db import connect, database_path_is_local, initialize_database, transaction
+from pptextract.db import (
+    RecoveryGateClosedError,
+    connect,
+    database_path_is_local,
+    initialize_database,
+    transaction,
+)
 from pptextract.ingest_workflow import (
     IngestionRequestError,
     MappingPreconditionError,
@@ -86,6 +93,7 @@ from pptextract.runtime_facts import (
     record_timing_sample,
     runtime_facts_csv,
 )
+from pptextract.storage_maintenance import read_recovery_state
 from pptextract.worker import worker_is_fresh
 
 
@@ -322,6 +330,20 @@ def create_app(
     app = FastAPI(title="PPTExtract API", version="0.1.0", lifespan=lifespan)
     app.state.settings = resolved
 
+    @app.middleware("http")
+    async def enforce_recovery_gate(
+        request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            status, _reason = read_recovery_state(resolved)
+            if status != "ready":
+                return error_response(
+                    503,
+                    "recovery_audit_failed",
+                    "恢复引用审计尚未通过，写入与发布保持关闭。",
+                )
+        return await call_next(request)
+
     @app.exception_handler(HTTPException)
     async def handle_http_exception(_request: Request, exception: HTTPException) -> JSONResponse:
         if exception.status_code == 404:
@@ -347,6 +369,16 @@ def create_app(
             for error in exception.errors()
         ]
         return error_response(422, "invalid_request", "请求参数无效。", details)
+
+    @app.exception_handler(RecoveryGateClosedError)
+    async def handle_recovery_gate_closed(
+        _request: Request, _exception: RecoveryGateClosedError
+    ) -> JSONResponse:
+        return error_response(
+            503,
+            "recovery_audit_failed",
+            "恢复引用审计尚未通过，写入与发布保持关闭。",
+        )
 
     @app.get("/api/v1/app/bootstrap")
     async def bootstrap(request: Request) -> dict[str, Any]:
@@ -1720,6 +1752,7 @@ def create_app(
             "api": {"status": "ready"},
             "database": {"status": "unavailable"},
             "object_store": {"status": "unavailable"},
+            "recovery": {"status": "unavailable"},
             "worker": {"status": "unavailable", "worker_id": resolved.worker_id},
         }
 
@@ -1729,6 +1762,15 @@ def create_app(
             if database_path_is_local(resolved.database_path):
                 components["database"] = {"status": "ready"}
         except (OSError, RuntimeError, sqlite3.Error):
+            pass
+
+        try:
+            recovery_status, recovery_reason = read_recovery_state(resolved)
+            components["recovery"] = {
+                "status": recovery_status,
+                **({} if recovery_reason is None else {"reason": recovery_reason}),
+            }
+        except sqlite3.Error:
             pass
 
         try:

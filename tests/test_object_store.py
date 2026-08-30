@@ -29,7 +29,7 @@ def test_repeated_write_reuses_immutable_object(tmp_path: Path) -> None:
     second = store.put(b"same bytes")
 
     assert second == first
-    assert list(store.root.rglob(first.sha256)) == [first.path]
+    assert list(store.root.glob(f"[0-9a-f][0-9a-f]/{first.sha256}")) == [first.path]
 
 
 def test_writable_probe_is_synced_and_removed(tmp_path: Path) -> None:
@@ -47,4 +47,6 @@ def test_oversized_stream_is_not_published(tmp_path: Path) -> None:
         store.put_stream(BytesIO(b"12345"), max_bytes=4)
 
     assert list(store.staging_root.iterdir()) == []
-    assert [path for path in store.root.rglob("*") if path.is_file()] == []
+    assert [
+        path for path in store.root.glob("[0-9a-f][0-9a-f]/*") if path.is_file()
+    ] == []

@@ -13,7 +13,11 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 24
+
+
+class RecoveryGateClosedError(RuntimeError):
+    """恢复引用审计未通过，拒绝新的写事务。"""
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -78,6 +82,31 @@ def initialize_database(settings: Settings) -> None:
                 size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
                 media_type TEXT NOT NULL,
                 verified_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS object_gc_candidates (
+                sha256 TEXT PRIMARY KEY,
+                first_unreachable_at TEXT NOT NULL,
+                last_unreachable_at TEXT NOT NULL,
+                activity_token TEXT,
+                deleted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS storage_recovery_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                status TEXT NOT NULL CHECK (status IN ('ready', 'audit_required', 'blocked')),
+                reason TEXT,
+                updated_at TEXT NOT NULL,
+                last_audit_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS recovery_drills (
+                drill_id TEXT PRIMARY KEY,
+                backup_path TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+                result_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS documents (
@@ -553,6 +582,14 @@ def initialize_database(settings: Settings) -> None:
             connection.execute("ALTER TABLE publication_artifacts ADD COLUMN replaced_at TEXT")
         if "purged_at" not in artifact_columns:
             connection.execute("ALTER TABLE publication_artifacts ADD COLUMN purged_at TEXT")
+        gc_candidate_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(object_gc_candidates)")
+        }
+        if "deleted_at" not in gc_candidate_columns:
+            connection.execute("ALTER TABLE object_gc_candidates ADD COLUMN deleted_at TEXT")
+        if "activity_token" not in gc_candidate_columns:
+            connection.execute("ALTER TABLE object_gc_candidates ADD COLUMN activity_token TEXT")
         if existing_version < 21:
             connection.execute(
                 """
@@ -723,6 +760,13 @@ def initialize_database(settings: Settings) -> None:
             """
             INSERT OR IGNORE INTO publication_sequences (singleton_id, next_value)
             VALUES (1, 1)
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO storage_recovery_state (
+                singleton_id, status, updated_at
+            ) VALUES (1, 'ready', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
             """
         )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -997,10 +1041,20 @@ def _migrate_document_version_states(connection: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def transaction(settings: Settings) -> Iterator[sqlite3.Connection]:
+def transaction(
+    settings: Settings, *, require_recovery_ready: bool = True
+) -> Iterator[sqlite3.Connection]:
     connection = connect(settings)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        if require_recovery_ready:
+            row = connection.execute(
+                "SELECT status FROM storage_recovery_state WHERE singleton_id = 1"
+            ).fetchone()
+            if row is None or row["status"] != "ready":
+                raise RecoveryGateClosedError(
+                    "恢复引用审计尚未通过，拒绝写事务"
+                )
         yield connection
         connection.commit()
     except BaseException:

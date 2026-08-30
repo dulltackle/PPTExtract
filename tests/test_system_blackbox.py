@@ -126,6 +126,7 @@ def test_external_system_spine_and_browser_shell(
             "api": {"status": "ready"},
             "database": {"status": "ready"},
             "object_store": {"status": "ready"},
+            "recovery": {"status": "ready"},
             "worker": {"status": "ready", "worker_id": "blackbox-worker"},
         },
     }

@@ -28,6 +28,7 @@ class Settings:
     job_retry_base_seconds: float = 5.0
     public_artifact_retention_days: int = 7
     internal_artifact_retention_days: int = 90
+    object_gc_grace_seconds: int = 24 * 60 * 60
     allow_temporary_storage: bool = False
 
     @classmethod
@@ -62,6 +63,9 @@ class Settings:
             internal_artifact_retention_days=int(
                 os.environ.get("PPTEXTRACT_INTERNAL_ARTIFACT_RETENTION_DAYS", "90")
             ),
+            object_gc_grace_seconds=int(
+                os.environ.get("PPTEXTRACT_OBJECT_GC_GRACE_SECONDS", str(24 * 60 * 60))
+            ),
         )
 
     @classmethod
@@ -89,6 +93,8 @@ class Settings:
             raise ValueError("旧产物 ZIP 对外保留期不得少于 7 天")
         if self.internal_artifact_retention_days < self.public_artifact_retention_days:
             raise ValueError("旧产物 ZIP 内部保留期不得短于对外保留期")
+        if self.object_gc_grace_seconds <= 0:
+            raise ValueError("对象回收宽限期必须大于 0 秒")
         if (
             not math.isfinite(self.job_retry_base_seconds)
             or self.job_retry_base_seconds < 0

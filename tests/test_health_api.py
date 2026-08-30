@@ -45,6 +45,7 @@ def test_health_reports_api_database_object_store_and_fresh_worker(
             "api": {"status": "ready"},
             "database": {"status": "ready"},
             "object_store": {"status": "ready"},
+            "recovery": {"status": "ready"},
             "worker": {"status": "ready", "worker_id": "test-worker"},
         },
     }

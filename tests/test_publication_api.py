@@ -27,6 +27,7 @@ from pptextract.publication import (
     validate_publication_archive,
 )
 from pptextract.rendering import render_configuration_version
+from pptextract.storage_maintenance import collect_unreachable_objects
 from pptextract.worker import run_once
 
 
@@ -519,6 +520,18 @@ def test_replaced_artifact_remains_public_for_seven_days_and_internal_for_ninety
     expired = read_artifact(settings, 1)
     assert expired is not None
     assert expired.purged_at == (replaced_at + timedelta(days=90)).isoformat()
+    assert expired.path.is_file() is True
+    collect_unreachable_objects(settings, at=replaced_at + timedelta(days=90))
+    collect_unreachable_objects(
+        settings,
+        at=(
+            replaced_at
+            + timedelta(
+                days=90,
+                seconds=settings.object_gc_grace_seconds + 1,
+            )
+        ),
+    )
     assert expired.path.is_file() is False
     assert read_artifact(settings, 2) is not None
 

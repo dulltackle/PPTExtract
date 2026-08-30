@@ -57,3 +57,39 @@ uv run pytest tests/test_rendering_contract.py tests/test_toolchain_gate.py
 升级工具链时，使用一个尚未发布的新整数标签构建候选镜像；先用公开合成夹具和获授权的本地样本完成人工视觉门禁，再将候选镜像发布到 `ghcr.io/dulltackle/pptextract-document-toolchain`。从 `docker push` 的结果取得 registry digest，把合同中的 `rendering_image` 更新为完整的 `image@sha256:…` 引用，并重新运行上述门禁。标签只用于发布导航，运行时不得使用标签；发布后执行 `docker logout ghcr.io`，不要在仓库中保存 registry 凭据。
 
 公开契约测试只在内存中生成虚构 `.pptx`，覆盖纯文字、重复与跨页复用图片、图表、组合形状、复杂合并表格、演讲者备注、隐藏页、重复页、页序变更和缺失字体。真实样本仍按 `fixtures/README.md` 的规则只在本地使用。
+
+## 存储维护、备份与恢复
+
+对象回收统一使用两阶段可达性扫描。第一次扫描只标记候选；同一对象在长于任务租约和正常重试窗口的宽限期后仍不可达，第二次扫描才删除字节：
+
+```bash
+uv run python -m pptextract.storage_maintenance gc
+```
+
+协调备份会用 SQLite backup API 捕获一致快照，再复制该快照同期引用的全部内容寻址对象并执行引用审计。目标目录必须尚不存在：
+
+```bash
+uv run python -m pptextract.storage_maintenance backup /srv/pptextract-backups/2026-08-30
+```
+
+恢复必须在 API 与 worker 停止时进行，并写入尚不存在的新数据根目录；不要预先创建或覆盖目标。命令先在同一文件系统的暂存根目录恢复并同步 SQLite 与对象，审计完成后一次原子切换整个数据根目录，随后校验原始 PPTX、不可变版本来源、正式视觉资产、冻结成员和当前/保留期内产物的存在性、字节数及 SHA-256。只有审计通过，恢复库的写入与发布门禁才会变为 `ready`：
+
+```bash
+uv run python -m pptextract.storage_maintenance restore \
+  /srv/pptextract-backups/2026-08-30 \
+  /srv/pptextract-restored
+```
+
+确认命令退出码为 0 后，再把 `PPTEXTRACT_DATA_ROOT` 切换到新目录并启动 API 与 worker。审计失败时命令退出码为 1，健康检查显示 `recovery: blocked`，所有写请求和 worker 任务保持关闭。可在停机状态下再次执行全量审计：
+
+```bash
+uv run python -m pptextract.storage_maintenance audit
+```
+
+恢复演练在隔离目录中恢复同一协调备份，通过真实 worker 从检查点续跑一个非终态摄取任务，再读取和校验当前产物；结果写入生产库的 `recovery_drills`。用于演练的备份必须包含一个可控的 `queued` 或 `running` 摄取任务和一个当前产物，演练工作目录也必须尚不存在。初版只记录结果，不验证量化 RPO/RTO：
+
+```bash
+uv run python -m pptextract.storage_maintenance drill \
+  /srv/pptextract-backups/2026-08-30 \
+  /srv/pptextract-drills/2026-08-30
+```

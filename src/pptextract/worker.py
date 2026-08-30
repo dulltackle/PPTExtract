@@ -5,7 +5,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 
 from pptextract.config import Settings
-from pptextract.db import connect, initialize_database, transaction
+from pptextract.db import RecoveryGateClosedError, connect, initialize_database, transaction
 from pptextract.ingest_workflow import (
     enqueue_stale_render_jobs,
     fail_hidden_page_job,
@@ -18,6 +18,7 @@ from pptextract.ingest_workflow import (
 from pptextract.jobs import claim_next_job, finish_job
 from pptextract.object_store import LocalObjectStore
 from pptextract.publication import fail_publication_job, process_publication_job
+from pptextract.storage_maintenance import read_recovery_state
 
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_AFTER = timedelta(seconds=10)
@@ -59,9 +60,15 @@ def worker_is_fresh(settings: Settings, *, at: datetime | None = None) -> bool:
 
 
 def run_once(settings: Settings) -> bool:
-    record_heartbeat(settings)
-    enqueue_stale_render_jobs(settings)
-    job = claim_next_job(settings)
+    recovery_status, _reason = read_recovery_state(settings)
+    if recovery_status != "ready":
+        return False
+    try:
+        record_heartbeat(settings)
+        enqueue_stale_render_jobs(settings)
+        job = claim_next_job(settings)
+    except RecoveryGateClosedError:
+        return False
     if job is None:
         return False
     if job.kind == "system.noop":
@@ -69,16 +76,22 @@ def run_once(settings: Settings) -> bool:
     elif job.kind == "document.ingest":
         try:
             process_ingestion_job(settings, job)
+        except RecoveryGateClosedError:
+            return False
         except Exception as error:
             fail_ingestion_job(settings, job, error)
     elif job.kind == "page.enable":
         try:
             process_hidden_page_job(settings, job)
+        except RecoveryGateClosedError:
+            return False
         except Exception as error:
             fail_hidden_page_job(settings, job, error)
     elif job.kind == "version.rerender":
         try:
             process_rerender_job(settings, job)
+        except RecoveryGateClosedError:
+            return False
         except Exception as error:
             fail_rerender_job(settings, job, error)
         else:
@@ -86,6 +99,8 @@ def run_once(settings: Settings) -> bool:
     elif job.kind == "publication.build":
         try:
             process_publication_job(settings, job)
+        except RecoveryGateClosedError:
+            return False
         except Exception as error:
             fail_publication_job(settings, job, error)
     else:

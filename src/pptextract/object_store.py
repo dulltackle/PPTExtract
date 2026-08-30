@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -26,7 +29,21 @@ class LocalObjectStore:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.staging_root = self.root / ".staging"
+        self.activity_root = self.root / ".activity"
         self.staging_root.mkdir(parents=True, exist_ok=True)
+        self.activity_root.mkdir(parents=True, exist_ok=True)
+        self.lock_path = self.root / ".maintenance.lock"
+
+    @contextmanager
+    def maintenance_lock(self, *, exclusive: bool) -> Iterator[None]:
+        """协调对象发布和回收；业务写共享，回收独占。"""
+
+        with self.lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def path_for(self, sha256: str) -> Path:
         if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256):
@@ -40,6 +57,12 @@ class LocalObjectStore:
         self, source: BinaryIO, *, max_bytes: int | None = None
     ) -> StoredObject:
         """流式写入、同步并复验源对象，最后发布到不可变内容键。"""
+        with self.maintenance_lock(exclusive=False):
+            return self._put_stream_locked(source, max_bytes=max_bytes)
+
+    def _put_stream_locked(
+        self, source: BinaryIO, *, max_bytes: int | None
+    ) -> StoredObject:
         staging_path = self.staging_root / f"{uuid.uuid4().hex}.partial"
         digest = hashlib.sha256()
         size_bytes = 0
@@ -58,6 +81,7 @@ class LocalObjectStore:
             if destination.exists():
                 if not self.verify(sha256):
                     raise OSError(f"内容寻址对象校验失败：{sha256}")
+                self._record_activity(sha256)
                 return StoredObject(
                     sha256=sha256, size_bytes=size_bytes, path=destination
                 )
@@ -79,10 +103,38 @@ class LocalObjectStore:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+            self._record_activity(sha256)
         finally:
             staging_path.unlink(missing_ok=True)
 
         return StoredObject(sha256=sha256, size_bytes=size_bytes, path=destination)
+
+    def _record_activity(self, sha256: str) -> None:
+        marker = self.activity_root / sha256
+        staging = self.activity_root / f".{sha256}.{uuid.uuid4().hex}.partial"
+        try:
+            with staging.open("x", encoding="ascii") as handle:
+                handle.write(uuid.uuid4().hex)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(staging, marker)
+            directory_fd = os.open(self.activity_root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            staging.unlink(missing_ok=True)
+
+    def activity_token(self, sha256: str) -> str | None:
+        marker = self.activity_root / sha256
+        try:
+            return marker.read_text(encoding="ascii")
+        except FileNotFoundError:
+            return None
+
+    def forget_activity(self, sha256: str) -> None:
+        (self.activity_root / sha256).unlink(missing_ok=True)
 
     def check_writable(self) -> None:
         """以真实落盘、同步和清理验证 staging 目录仍可写。"""

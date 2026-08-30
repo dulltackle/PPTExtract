@@ -1504,7 +1504,6 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
         raise ValueError("发布 ZIP 写入后校验失败")
     _checkpoint(settings, job, "switch_pointer", len(chunks))
     published_at = timestamp()
-    expired_object_sha256s: list[str] = []
     with transaction(settings) as connection:
         connection.execute(
             """
@@ -1555,7 +1554,7 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
                 """,
                 (int(candidate["publication_seq"]),),
             )
-            _, expired_object_sha256s = _mark_expired_publication_artifacts(
+            _mark_expired_publication_artifacts(
                 connection,
                 settings,
                 at=datetime.fromisoformat(published_at),
@@ -1587,7 +1586,6 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
         )
         if updated.rowcount != 1:
             raise RuntimeError("worker 无法原子完成发布任务")
-    _delete_purged_archive_objects(settings, expired_object_sha256s)
 
 
 def fail_publication_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:
@@ -1767,7 +1765,7 @@ def _mark_expired_publication_artifacts(
     settings: Settings,
     *,
     at: datetime,
-) -> tuple[list[int], list[str]]:
+) -> list[int]:
     cutoff = (at - timedelta(days=settings.internal_artifact_retention_days)).isoformat()
     rows = connection.execute(
         """
@@ -1793,27 +1791,7 @@ def _mark_expired_publication_artifacts(
             f"WHERE publication_seq IN ({placeholders}) AND purged_at IS NULL",
             (at.isoformat(), *publication_sequences),
         )
-    object_sha256s: list[str] = []
-    for sha256 in dict.fromkeys(str(row["artifact_sha256"]) for row in rows):
-        referenced = connection.execute(
-            """
-            SELECT 1 FROM publication_artifacts
-            WHERE artifact_sha256 = ? AND purged_at IS NULL LIMIT 1
-            """,
-            (sha256,),
-        ).fetchone()
-        if referenced is None:
-            object_sha256s.append(sha256)
-    return publication_sequences, object_sha256s
-
-
-def _delete_purged_archive_objects(settings: Settings, sha256s: list[str]) -> None:
-    store = LocalObjectStore(settings.object_store_path)
-    for sha256 in sha256s:
-        try:
-            store.path_for(sha256).unlink(missing_ok=True)
-        except OSError:
-            continue
+    return publication_sequences
 
 
 def purge_expired_publication_artifacts(
@@ -1822,12 +1800,11 @@ def purge_expired_publication_artifacts(
     at: datetime | None = None,
 ) -> list[int]:
     with transaction(settings) as connection:
-        publication_sequences, object_sha256s = _mark_expired_publication_artifacts(
+        publication_sequences = _mark_expired_publication_artifacts(
             connection,
             settings,
             at=at or datetime.now(UTC),
         )
-    _delete_purged_archive_objects(settings, object_sha256s)
     return publication_sequences
 
 
