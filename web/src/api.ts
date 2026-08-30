@@ -418,7 +418,10 @@ export interface PublicationArtifact {
 
 export interface PublicationTask {
   job_id: string;
+  candidate_id: string;
+  publication_seq: number;
   status: "queued" | "running" | "succeeded" | "failed";
+  phase: "frozen_input" | "build" | "validate" | "store" | "switch_pointer" | "succeeded";
   progress: {
     phase: "frozen_input" | "build" | "validate" | "store" | "switch_pointer" | "succeeded";
     completed_pages: number;
@@ -525,11 +528,16 @@ interface ErrorEnvelope {
   error?: {
     code?: string;
     message?: string;
+    details?: unknown;
   };
 }
 
 export class OperatorError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: string | null = null,
+    readonly details: unknown = null,
+  ) {
     super(message);
     this.name = "OperatorError";
   }
@@ -566,7 +574,11 @@ export async function loadBootstrap(signal?: AbortSignal): Promise<BootstrapData
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
   const payload = (await response.json().catch(() => ({}))) as T & ErrorEnvelope;
   if (!response.ok) {
-    throw new OperatorError(payload.error?.message ?? fallback);
+    throw new OperatorError(
+      payload.error?.message ?? fallback,
+      payload.error?.code ?? null,
+      payload.error?.details ?? null,
+    );
   }
   return payload;
 }

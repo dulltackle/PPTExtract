@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import zipfile
 from collections.abc import Iterator
 from dataclasses import replace
@@ -18,6 +19,7 @@ from pptextract.jobs import claim_next_job
 from pptextract.object_store import LocalObjectStore
 from pptextract.publication import (
     _checkpoint,
+    confirm_candidate,
     fail_publication_job,
     validate_publication_archive,
 )
@@ -386,6 +388,72 @@ def test_no_change_does_not_create_zip_or_increment_sequence_and_active_build_is
     assert client.get("/api/v1/publications/current").json()["publication_seq"] == 1
 
 
+def test_busy_conflict_exposes_active_task_and_workspace_keeps_frozen_candidate(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    frozen_candidate = _create_candidate(client)
+    confirmation = client.post(
+        f"/api/v1/publications/candidates/{frozen_candidate['candidate_id']}/confirm"
+    ).json()
+
+    newer_candidate = _create_candidate(client)
+    busy = client.post(
+        f"/api/v1/publications/candidates/{newer_candidate['candidate_id']}/confirm"
+    )
+
+    assert busy.status_code == 409
+    error = busy.json()["error"]
+    assert error["code"] == "publication_busy"
+    assert error["details"] == {
+        "job_id": confirmation["job_id"],
+        "candidate_id": frozen_candidate["candidate_id"],
+        "publication_seq": confirmation["publication_seq"],
+        "status": "queued",
+        "phase": "frozen_input",
+        "updated_at": error["details"]["updated_at"],
+    }
+
+    workspace = client.get("/api/v1/publications").json()
+    assert workspace["candidate"]["candidate_id"] == frozen_candidate["candidate_id"]
+    assert workspace["task"] == {
+        "job_id": confirmation["job_id"],
+        "candidate_id": frozen_candidate["candidate_id"],
+        "publication_seq": confirmation["publication_seq"],
+        "status": "queued",
+        "phase": "frozen_input",
+        "progress": {
+            "phase": "frozen_input",
+            "completed_pages": 0,
+            "total_pages": frozen_candidate["chunk_count"],
+        },
+        "error": None,
+        "attempts": 0,
+        "updated_at": error["details"]["updated_at"],
+    }
+
+    with (
+        connect(settings) as connection,
+        pytest.raises(sqlite3.IntegrityError, match="jobs.kind"),
+    ):
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, kind, payload_json, status, actor_id, idempotency_key,
+                checkpoint_json, created_at, updated_at
+            ) VALUES ('job-forbidden', 'publication.build', ?, 'running',
+                      'publisher-2', 'publication:forbidden', ?, ?, ?)
+            """,
+            (
+                json.dumps({"candidate_id": "candidate-forbidden", "publication_seq": 99}),
+                json.dumps({"phase": "build", "completed_pages": 0, "total_pages": 0}),
+                "2026-08-29T00:10:00+00:00",
+                "2026-08-29T00:10:00+00:00",
+            ),
+        )
+
+
 def test_failed_build_keeps_current_and_retry_reuses_original_frozen_input(
     system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -447,6 +515,166 @@ def test_failed_build_keeps_current_and_retry_reuses_original_frozen_input(
     ] == "succeeded"
 
 
+def test_freeze_failure_rolls_back_reserved_sequence_and_frozen_input(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    candidate = _create_candidate(client)
+    with connect(settings) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_publication_freeze
+            BEFORE INSERT ON jobs
+            WHEN NEW.kind = 'publication.build'
+            BEGIN
+                SELECT RAISE(ABORT, '注入的冻结失败');
+            END
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="注入的冻结失败"):
+        confirm_candidate(
+            settings,
+            candidate_id=str(candidate["candidate_id"]),
+            actor_id="publisher-freeze-fault",
+        )
+
+    with connect(settings) as connection:
+        assert connection.execute(
+            "SELECT next_value FROM publication_sequences WHERE singleton_id = 1"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM publication_frozen_chunks WHERE candidate_id = ?",
+            (candidate["candidate_id"],),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT status FROM publication_candidates WHERE candidate_id = ?",
+            (candidate["candidate_id"],),
+        ).fetchone()[0] == "ready"
+    assert client.get("/api/v1/publications/current").status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("fault_phase", "expected_phase"),
+    (("build", "build"), ("store", "store"), ("switch_pointer", "switch_pointer")),
+)
+def test_publication_fault_before_pointer_commit_keeps_current_artifact(
+    system: tuple[TestClient, Settings],
+    monkeypatch: pytest.MonkeyPatch,
+    fault_phase: str,
+    expected_phase: str,
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    first = _create_candidate(client)
+    client.post(f"/api/v1/publications/candidates/{first['candidate_id']}/confirm")
+    assert run_once(settings) is True
+    original = client.get("/api/v1/publications/current").json()
+
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE page_versions SET review_status = 'approved', "
+            "current_snapshot_id = 'snapshot-approved', "
+            "reviewed_by = 'curator-1', "
+            "reviewed_at = '2026-08-29T00:00:00+00:00', "
+            "review_source_version_id = 'version-approved' "
+            "WHERE page_version_id = 'page-version-pending'"
+        )
+        connection.commit()
+    candidate = _create_candidate(client)
+    confirmation = client.post(
+        f"/api/v1/publications/candidates/{candidate['candidate_id']}/confirm"
+    ).json()
+
+    def reject_phase(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"注入的 {fault_phase} 失败")
+
+    if fault_phase == "build":
+        monkeypatch.setattr("pptextract.publication._archive_bytes", reject_phase)
+    elif fault_phase == "store":
+        monkeypatch.setattr("pptextract.publication.LocalObjectStore.put", reject_phase)
+    else:
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_publication_pointer
+                BEFORE UPDATE ON current_publication
+                BEGIN
+                    SELECT RAISE(ABORT, '注入的指针事务失败');
+                END
+                """
+            )
+            connection.commit()
+
+    assert run_once(settings) is True
+
+    failed = client.get(f"/api/v1/jobs/{confirmation['job_id']}").json()
+    assert failed["status"] == "failed"
+    assert failed["error"]["phase"] == expected_phase
+    assert client.get("/api/v1/publications/current").json() == original
+    artifact = client.get(
+        f"/api/v1/publications/{confirmation['publication_seq']}/artifact"
+    )
+    assert artifact.status_code == 404
+
+
+def test_failed_sequence_cannot_be_retried_after_a_newer_publication_succeeds(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    first = _create_candidate(client)
+    assert (
+        client.post(f"/api/v1/publications/candidates/{first['candidate_id']}/confirm").status_code
+        == 202
+    )
+    assert run_once(settings) is True
+
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE page_versions SET review_status = 'approved', "
+            "current_snapshot_id = 'snapshot-approved', "
+            "reviewed_by = 'curator-1', "
+            "reviewed_at = '2026-08-29T00:00:00+00:00', "
+            "review_source_version_id = 'version-approved' "
+            "WHERE page_version_id = 'page-version-pending'"
+        )
+        connection.commit()
+
+    failed_candidate = _create_candidate(client)
+    failed_confirmation = client.post(
+        f"/api/v1/publications/candidates/{failed_candidate['candidate_id']}/confirm"
+    ).json()
+    failed_claim = claim_next_job(settings)
+    assert failed_claim is not None
+    fail_publication_job(settings, failed_claim, RuntimeError("保留序号空洞"))
+
+    newer_candidate = _create_candidate(client)
+    newer_confirmation = client.post(
+        f"/api/v1/publications/candidates/{newer_candidate['candidate_id']}/confirm"
+    ).json()
+    assert newer_confirmation["publication_seq"] == 3
+    assert run_once(settings) is True
+    assert client.get("/api/v1/publications/current").json()["publication_seq"] == 3
+
+    superseded = client.post(
+        f"/api/v1/publications/tasks/{failed_confirmation['job_id']}/retry"
+    )
+
+    assert superseded.status_code == 409
+    assert superseded.json()["error"] == {
+        "code": "publication_sequence_superseded",
+        "message": "该失败序号已被更高的当前产物越过，请按最新业务状态创建新候选。",
+        "details": {"failed_publication_seq": 2, "current_publication_seq": 3},
+    }
+    assert client.get("/api/v1/publications/current").json()["publication_seq"] == 3
+    assert client.get(
+        f"/api/v1/publications/candidates/{failed_candidate['candidate_id']}"
+    ).json()["status"] == "failed"
+
+
 def test_footer_noise_change_invalidates_candidate(
     system: tuple[TestClient, Settings],
 ) -> None:
@@ -488,6 +716,48 @@ def test_footer_noise_change_invalidates_candidate(
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "publication_candidate_stale"
+
+
+def test_soft_delete_restore_and_content_update_are_reflected_in_candidate_diff(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    first = _create_candidate(client)
+    client.post(f"/api/v1/publications/candidates/{first['candidate_id']}/confirm")
+    assert run_once(settings) is True
+
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE documents SET deleted_at = '2026-08-29T01:00:00+00:00' "
+            "WHERE document_id = 'doc-approved'"
+        )
+        connection.commit()
+    removed = _create_candidate(client)
+    assert removed["diff"] == {"added": 0, "updated": 0, "removed": 1, "unchanged": 0}
+    assert removed["excluded"]["soft_deleted_documents"] == 1
+    assert removed["chunk_count"] == 0
+    client.post(f"/api/v1/publications/candidates/{removed['candidate_id']}/confirm")
+    assert run_once(settings) is True
+
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE documents SET deleted_at = NULL WHERE document_id = 'doc-approved'"
+        )
+        connection.commit()
+    restored = _create_candidate(client)
+    assert restored["diff"] == {"added": 1, "updated": 0, "removed": 0, "unchanged": 0}
+    client.post(f"/api/v1/publications/candidates/{restored['candidate_id']}/confirm")
+    assert run_once(settings) is True
+
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE curation_snapshots SET overview = '公开页总述已更新。' "
+            "WHERE snapshot_id = 'snapshot-approved'"
+        )
+        connection.commit()
+    updated = _create_candidate(client)
+    assert updated["diff"] == {"added": 0, "updated": 1, "removed": 0, "unchanged": 0}
 
 
 def test_publication_checkpoint_renews_lease_and_stale_failure_cannot_revert_candidate(

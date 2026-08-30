@@ -784,6 +784,57 @@ def _reserve_sequence(connection: sqlite3.Connection) -> int:
     return value
 
 
+def _publication_task_content(row: sqlite3.Row) -> dict[str, Any]:
+    payload = json.loads(str(row["payload_json"]))
+    progress = (
+        json.loads(str(row["checkpoint_json"])) if row["checkpoint_json"] else None
+    )
+    return {
+        "job_id": str(row["job_id"]),
+        "candidate_id": str(payload["candidate_id"]),
+        "publication_seq": int(payload["publication_seq"]),
+        "status": str(row["status"]),
+        "phase": str(progress.get("phase", "unknown")) if progress else "unknown",
+        "progress": progress,
+        "error": json.loads(str(row["error_json"])) if row["error_json"] else None,
+        "attempts": int(row["attempts"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _active_publication_task(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT job_id, payload_json, status, checkpoint_json, error_json,
+               attempts, updated_at
+        FROM jobs
+        WHERE kind = 'publication.build' AND status IN ('queued', 'running')
+        ORDER BY created_at, job_id LIMIT 1
+        """
+    ).fetchone()
+    return None if row is None else _publication_task_content(row)
+
+
+def _publication_busy_error(active: dict[str, Any]) -> PublicationRequestError:
+    details = {
+        field: active[field]
+        for field in (
+            "job_id",
+            "candidate_id",
+            "publication_seq",
+            "status",
+            "phase",
+            "updated_at",
+        )
+    }
+    return PublicationRequestError(
+        409,
+        "publication_busy",
+        "已有发布任务正在构建，请等待完成后再确认。",
+        details,
+    )
+
+
 def confirm_candidate(
     settings: Settings, *, candidate_id: str, actor_id: str
 ) -> tuple[int, dict[str, Any]]:
@@ -812,14 +863,9 @@ def confirm_candidate(
             # 事务提交状态后再由事务外抛错。
             pass
         else:
-            active = connection.execute(
-                "SELECT job_id FROM jobs WHERE kind = 'publication.build' "
-                "AND status IN ('queued', 'running') LIMIT 1"
-            ).fetchone()
+            active = _active_publication_task(connection)
             if active is not None:
-                raise PublicationRequestError(
-                    409, "publication_busy", "已有发布任务正在构建，请等待完成后再确认。"
-                )
+                raise _publication_busy_error(active)
             current = connection.execute(
                 """
                 SELECT artifacts.content_set_hash
@@ -1546,12 +1592,23 @@ def retry_publication_job(
                 "publication_already_succeeded",
                 "该冻结候选已有不可变产物，不能再次重试旧失败任务。",
             )
-        active = connection.execute(
-            "SELECT 1 FROM jobs WHERE kind = 'publication.build' "
-            "AND status IN ('queued', 'running')"
+        current = connection.execute(
+            "SELECT publication_seq FROM current_publication WHERE singleton_id = 1"
         ).fetchone()
+        failed_sequence = int(candidate["publication_seq"])
+        if current is not None and int(current["publication_seq"]) > failed_sequence:
+            raise PublicationRequestError(
+                409,
+                "publication_sequence_superseded",
+                "该失败序号已被更高的当前产物越过，请按最新业务状态创建新候选。",
+                {
+                    "failed_publication_seq": failed_sequence,
+                    "current_publication_seq": int(current["publication_seq"]),
+                },
+            )
+        active = _active_publication_task(connection)
         if active is not None:
-            raise PublicationRequestError(409, "publication_busy", "已有发布任务正在构建。")
+            raise _publication_busy_error(active)
         job_id = uuid.uuid4().hex
         now = timestamp()
         total = int(
@@ -1618,14 +1675,20 @@ def read_artifact(settings: Settings, publication_seq: int) -> PublicationArtifa
 
 def read_current_artifact(settings: Settings) -> PublicationArtifact | None:
     with connect(settings) as connection:
-        row = connection.execute(
-            """
-            SELECT artifacts.* FROM current_publication AS current
-            JOIN publication_artifacts AS artifacts
-              ON artifacts.publication_seq = current.publication_seq
-            WHERE current.singleton_id = 1
-            """
-        ).fetchone()
+        return _read_current_artifact(connection, settings)
+
+
+def _read_current_artifact(
+    connection: sqlite3.Connection, settings: Settings
+) -> PublicationArtifact | None:
+    row = connection.execute(
+        """
+        SELECT artifacts.* FROM current_publication AS current
+        JOIN publication_artifacts AS artifacts
+          ON artifacts.publication_seq = current.publication_seq
+        WHERE current.singleton_id = 1
+        """
+    ).fetchone()
     return None if row is None else _artifact_from_row(settings, row)
 
 
@@ -1658,36 +1721,34 @@ def iter_file(path: Path, *, start: int = 0, end: int | None = None) -> Iterator
 
 
 def read_publication_workspace(settings: Settings) -> dict[str, Any]:
-    current = read_current_artifact(settings)
     with connect(settings) as connection:
-        candidate = connection.execute(
-            "SELECT * FROM publication_candidates "
-            "ORDER BY created_at DESC, candidate_id DESC LIMIT 1"
-        ).fetchone()
-        task = None
-        if candidate is not None:
-            task = connection.execute(
+        connection.execute("BEGIN")
+        current = _read_current_artifact(connection, settings)
+        task_content = _active_publication_task(connection)
+        if task_content is not None:
+            candidate = connection.execute(
+                "SELECT * FROM publication_candidates WHERE candidate_id = ?",
+                (task_content["candidate_id"],),
+            ).fetchone()
+        else:
+            candidate = connection.execute(
+                "SELECT * FROM publication_candidates "
+                "ORDER BY created_at DESC, candidate_id DESC LIMIT 1"
+            ).fetchone()
+            task = None
+            if candidate is not None:
+                task = connection.execute(
                 """
-                SELECT job_id, status, checkpoint_json, error_json, attempts, updated_at
+                SELECT job_id, payload_json, status, checkpoint_json, error_json,
+                       attempts, updated_at
                 FROM jobs WHERE kind = 'publication.build'
                   AND json_extract(payload_json, '$.candidate_id') = ?
                 ORDER BY created_at DESC, job_id DESC LIMIT 1
                 """,
                 (candidate["candidate_id"],),
             ).fetchone()
+            task_content = None if task is None else _publication_task_content(task)
         preflight = publication_preflight(connection, settings)
-    task_content = None
-    if task is not None:
-        task_content = {
-            "job_id": str(task["job_id"]),
-            "status": str(task["status"]),
-            "progress": json.loads(str(task["checkpoint_json"]))
-            if task["checkpoint_json"]
-            else None,
-            "error": json.loads(str(task["error_json"])) if task["error_json"] else None,
-            "attempts": int(task["attempts"]),
-            "updated_at": str(task["updated_at"]),
-        }
     return {
         "preflight": preflight,
         "current": None if current is None else artifact_content(current),

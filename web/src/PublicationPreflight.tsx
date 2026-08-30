@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import {
   confirmPublicationCandidate,
@@ -254,6 +254,8 @@ function PublicationControl({
   onCreate,
   onConfirm,
   onRetry,
+  onRefresh,
+  primaryActionRef,
 }: {
   workspace: PublicationWorkspace;
   action: ActionKind;
@@ -262,6 +264,8 @@ function PublicationControl({
   onCreate: () => void;
   onConfirm: () => void;
   onRetry: () => void;
+  onRefresh: () => void;
+  primaryActionRef: RefObject<HTMLButtonElement | null>;
 }) {
   const { candidate, task, current } = workspace;
   const active = task?.status === "queued" || task?.status === "running";
@@ -277,7 +281,7 @@ function PublicationControl({
           <p>{candidate?.status === "stale"
             ? "业务状态已变化，旧候选不能继续确认。重新捕获当前一致视图。"
             : "由人显式捕获当前一致业务视图；策展状态变化不会自动发起发布。"}</p>
-          <button type="button" disabled={!workspace.preflight.can_publish || action !== null} onClick={onCreate}>
+          <button ref={primaryActionRef} type="button" disabled={!workspace.preflight.can_publish || action !== null} onClick={onCreate}>
             {action === "create" ? "正在创建候选" : candidate ? "重新创建发布候选" : "创建发布候选"}
           </button>
         </section>
@@ -290,7 +294,7 @@ function PublicationControl({
             <div><dt>候选</dt><dd>{candidate.candidate_id}</dd></div>
             <div><dt>业务状态</dt><dd>{candidate.business_state_token}</dd></div>
           </dl>
-          <button type="button" onClick={() => setConfirmOpen(!confirmOpen)} aria-expanded={confirmOpen}>
+          <button ref={primaryActionRef} type="button" onClick={() => setConfirmOpen(!confirmOpen)} aria-expanded={confirmOpen}>
             确认发布
           </button>
           {confirmOpen ? (
@@ -317,27 +321,47 @@ function PublicationControl({
         <section className="control-section no-change-control">
           <header><h3>内容集合无变化</h3><span>no_change</span></header>
           <p>未生成重复 ZIP，也未递增发布序号。当前产物保持不变。</p>
-          <button type="button" disabled={!workspace.preflight.can_publish || action !== null} onClick={onCreate}>重新检查当前范围</button>
+          <button ref={primaryActionRef} type="button" disabled={!workspace.preflight.can_publish || action !== null} onClick={onCreate}>重新检查当前范围</button>
         </section>
       ) : null}
 
       {task ? (
-        <section className={`control-section task-control is-${task.status}`}>
+        <section
+          className={`control-section task-control is-${task.status}`}
+          aria-label={active ? "活动发布任务" : undefined}
+        >
           <header>
-            <h3>{task.status === "failed" ? "本次任务失败" : task.status === "succeeded" ? "发布完成" : "构建与切换"}</h3>
+            <h3>{task.status === "failed" ? "本次任务失败" : task.status === "succeeded" ? "发布完成" : "发布占用中"}</h3>
             <span>{candidate?.publication_seq ? `发布序号 #${candidate.publication_seq}` : task.status}</span>
           </header>
+          {active ? (
+            <dl className="task-identity">
+              <div><dt>任务</dt><dd>{task.job_id}</dd></div>
+              <div><dt>冻结候选</dt><dd>{task.candidate_id}</dd></div>
+              <div><dt>预留序号</dt><dd>#{task.publication_seq}</dd></div>
+              <div><dt>状态 / 阶段</dt><dd>{task.status} · {task.phase}</dd></div>
+              <div><dt>最近更新</dt><dd>{formatDate(task.updated_at)}</dd></div>
+            </dl>
+          ) : null}
           <TaskRail task={task} />
           {task.status === "failed" ? (
             <div className="task-failure">
               <strong>{current ? `当前产物仍为 #${current.publication_seq}` : "当前仍无发布产物"}</strong>
               <p>{task.error?.message ?? "构建未完成；当前产物保持不变。"}</p>
-              <button type="button" disabled={action !== null} onClick={onRetry}>
-                {action === "retry" ? "正在复用原冻结输入" : "使用原冻结输入重试"}
-              </button>
+              <div className="task-recovery-actions">
+                <button type="button" className="quiet-action" disabled={action !== null} onClick={onRetry}>
+                  {action === "retry" ? "正在复用原冻结输入" : "使用原冻结输入重试"}
+                </button>
+                <button ref={primaryActionRef} type="button" className="task-rebuild-action" disabled={!workspace.preflight.can_publish || action !== null} onClick={onCreate}>
+                  {action === "create" ? "正在捕获最新状态" : "按最新业务状态创建新候选"}
+                </button>
+              </div>
             </div>
           ) : active ? (
-            <p className="frozen-proof">候选摘要已冻结，轮询只更新任务进度。</p>
+            <>
+              <p className="frozen-proof">候选摘要已冻结，轮询只更新任务进度。</p>
+              <button ref={primaryActionRef} type="button" className="quiet-action task-refresh" onClick={onRefresh}>刷新活动状态</button>
+            </>
           ) : null}
         </section>
       ) : null}
@@ -351,16 +375,24 @@ export function PublicationPreflight() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [announcement, setAnnouncement] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [restoreActionFocus, setRestoreActionFocus] = useState(false);
   const request = useRef<AbortController | null>(null);
   const errorRef = useRef<HTMLDivElement | null>(null);
+  const primaryActionRef = useRef<HTMLButtonElement | null>(null);
 
-  const load = useCallback((showLoading = true) => {
+  const load = useCallback((showLoading = true, recoverAction = false) => {
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     if (showLoading) setState({ kind: "loading" });
     loadPublicationWorkspace(controller.signal)
-      .then((data) => setState({ kind: "ready", data }))
+      .then((data) => {
+        setState({ kind: "ready", data });
+        if (recoverAction) {
+          setActionError(null);
+          setRestoreActionFocus(true);
+        }
+      })
       .catch((cause) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
         setState({
@@ -379,6 +411,12 @@ export function PublicationPreflight() {
     if (actionError) errorRef.current?.focus();
   }, [actionError]);
 
+  useEffect(() => {
+    if (!restoreActionFocus || state.kind !== "ready") return;
+    primaryActionRef.current?.focus();
+    setRestoreActionFocus(false);
+  }, [restoreActionFocus, state]);
+
   const workspace = state.kind === "ready" ? state.data : null;
   useEffect(() => {
     if (!workspace || (workspace.task?.status !== "queued" && workspace.task?.status !== "running")) return;
@@ -395,7 +433,10 @@ export function PublicationPreflight() {
     }
     const task: PublicationTask = {
       job_id: confirmation.job_id ?? "",
+      candidate_id: workspace.candidate.candidate_id,
+      publication_seq: confirmation.publication_seq ?? 0,
       status: "queued",
+      phase: "frozen_input",
       progress: { phase: "frozen_input", completed_pages: 0, total_pages: workspace.candidate.chunk_count },
       error: null,
       attempts: retrying ? (workspace.task?.attempts ?? 0) + 1 : 0,
@@ -426,7 +467,7 @@ export function PublicationPreflight() {
       await command();
     } catch (cause) {
       setActionError(cause instanceof OperatorError ? cause.message : "操作未完成，请重试。");
-      if (kind !== "retry") load(false);
+      load(false, true);
     } finally {
       setAction(null);
     }
@@ -476,6 +517,8 @@ export function PublicationPreflight() {
             if (!data.task) return;
             applyConfirmation(await retryPublicationTask(data.task.job_id), true);
           })}
+          onRefresh={() => load(false)}
+          primaryActionRef={primaryActionRef}
         />
       </div>
       {announcement ? <p className="sr-only" role="status" aria-live="polite">{announcement}</p> : null}
