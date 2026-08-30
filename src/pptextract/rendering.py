@@ -450,6 +450,7 @@ def _render_with_docker(root: Path, toolchain: DockerRenderingToolchain) -> tupl
             "--entrypoint",
             "libreoffice",
             toolchain.image,
+            "-env:UserInstallation=file:///tmp/libreoffice-profile",
             "--headless",
             "--convert-to",
             PDF_EXPORT_FILTER,

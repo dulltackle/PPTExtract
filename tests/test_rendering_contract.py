@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -101,6 +104,34 @@ def test_standard_render_uses_144_dpi_and_preserves_source_page_size() -> None:
         rendered[0].height_px,
     ) == (1, "image/png", 144, 1921, 1080)
     assert rendered[0].data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.skipif(not _rendering_image_is_available(), reason="缺少锁定的渲染契约镜像")
+def test_render_supports_host_uid_missing_from_container_passwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def shared_temporary_directory(*, prefix: str) -> Iterator[str]:
+        del prefix
+        tmp_path.chmod(0o777)
+        yield str(tmp_path)
+
+    monkeypatch.setattr(
+        "pptextract.rendering.TemporaryDirectory", shared_temporary_directory
+    )
+    monkeypatch.setattr("pptextract.rendering.os.getuid", lambda: 1001)
+    monkeypatch.setattr("pptextract.rendering.os.getgid", lambda: 128)
+
+    previous_umask = os.umask(0)
+    try:
+        (rendered,) = render_standard_pages(
+            build_minimal_presentation(),
+            toolchain=DockerRenderingToolchain(RENDERING_IMAGE),
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert rendered.data.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 @pytest.mark.skipif(not _rendering_image_is_available(), reason="缺少锁定的渲染契约镜像")
