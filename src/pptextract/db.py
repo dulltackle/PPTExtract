@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pptextract.config import Settings
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 
 def connect(settings: Settings) -> sqlite3.Connection:
@@ -506,7 +506,9 @@ def initialize_database(settings: Settings) -> None:
                 size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
                 chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
                 asset_count INTEGER NOT NULL CHECK (asset_count >= 0),
-                published_at TEXT NOT NULL
+                published_at TEXT NOT NULL,
+                replaced_at TEXT,
+                purged_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS current_publication (
@@ -543,6 +545,26 @@ def initialize_database(settings: Settings) -> None:
             )
         if "next_attempt_at" not in job_columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN next_attempt_at TEXT")
+        artifact_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(publication_artifacts)")
+        }
+        if "replaced_at" not in artifact_columns:
+            connection.execute("ALTER TABLE publication_artifacts ADD COLUMN replaced_at TEXT")
+        if "purged_at" not in artifact_columns:
+            connection.execute("ALTER TABLE publication_artifacts ADD COLUMN purged_at TEXT")
+        if existing_version < 21:
+            connection.execute(
+                """
+                UPDATE publication_artifacts
+                SET replaced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                WHERE replaced_at IS NULL
+                  AND publication_seq <> COALESCE(
+                    (SELECT publication_seq FROM current_publication WHERE singleton_id = 1),
+                    -1
+                )
+                """
+            )
         _migrate_job_states(connection)
         page_result_columns = {
             str(row["name"])

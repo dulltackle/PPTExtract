@@ -58,9 +58,9 @@ from pptextract.publication import (
     artifact_content,
     create_candidate,
     iter_file,
-    read_artifact,
     read_candidate,
     read_current_artifact,
+    read_public_artifact,
     read_publication_workspace,
     retry_publication_job,
 )
@@ -96,6 +96,49 @@ def error_response(
     if details is not None:
         error["details"] = details
     return JSONResponse(status_code=status_code, content={"error": error})
+
+
+def _etag_matches(header_value: str | None, etag: str, *, weak: bool) -> bool:
+    if header_value is None:
+        return False
+    expected = etag[2:] if weak and etag.startswith("W/") else etag
+    for candidate in (part.strip() for part in header_value.split(",")):
+        if candidate == "*":
+            return True
+        if weak and candidate.startswith("W/"):
+            candidate = candidate[2:]
+        if candidate == expected:
+            return True
+    return False
+
+
+def _parse_byte_range(value: str, size_bytes: int) -> tuple[int, int] | None:
+    if not value.startswith("bytes=") or "," in value:
+        return None
+    start_text, separator, end_text = value[6:].partition("-")
+    if not separator:
+        return None
+    if start_text:
+        if (
+            len(start_text) > 20
+            or len(end_text) > 20
+            or not start_text.isdigit()
+            or (end_text and not end_text.isdigit())
+        ):
+            return None
+        start = int(start_text)
+        end = int(end_text) if end_text else size_bytes - 1
+    else:
+        if len(end_text) > 20 or not end_text.isdigit():
+            return None
+        suffix = int(end_text)
+        if suffix <= 0:
+            return None
+        start = max(0, size_bytes - suffix)
+        end = size_bytes - 1
+    if start >= size_bytes or end < start:
+        return None
+    return start, min(end, size_bytes - 1)
 
 
 class LifecycleCommand(BaseModel):
@@ -1030,17 +1073,25 @@ def create_app(
         if artifact is None:
             return error_response(404, "current_publication_not_found", "尚无当前产物。")
         etag = f'"{artifact.sha256}"'
-        if request.headers.get("if-none-match") == etag:
+        if request.headers.get("if-match") is not None and not _etag_matches(
+            request.headers.get("if-match"), etag, weak=False
+        ):
+            return Response(status_code=412, headers={"ETag": etag})
+        if _etag_matches(request.headers.get("if-none-match"), etag, weak=True):
             return Response(status_code=304, headers={"ETag": etag})
         return JSONResponse(content=artifact_content(artifact), headers={"ETag": etag})
 
     @app.get("/api/v1/publications/{publication_seq}/artifact")
     async def download_publication_artifact(request: Request, publication_seq: int) -> Response:
-        artifact = read_artifact(resolved, publication_seq)
+        artifact = read_public_artifact(resolved, publication_seq)
         if artifact is None or not artifact.path.is_file():
             return error_response(404, "publication_artifact_not_found", "未找到发布产物。")
         etag = f'"{artifact.sha256}"'
-        if request.headers.get("if-none-match") == etag:
+        if request.headers.get("if-match") is not None and not _etag_matches(
+            request.headers.get("if-match"), etag, weak=False
+        ):
+            return Response(status_code=412, headers={"ETag": etag})
+        if _etag_matches(request.headers.get("if-none-match"), etag, weak=True):
             return Response(status_code=304, headers={"ETag": etag})
         common_headers = {
             "Accept-Ranges": "bytes",
@@ -1050,8 +1101,13 @@ def create_app(
             ),
         }
         range_header = request.headers.get("range")
-        if range_header:
-            if not range_header.startswith("bytes=") or "," in range_header:
+        if_range = request.headers.get("if-range")
+        range_allowed = if_range is None or (
+            if_range != "*" and _etag_matches(if_range, etag, weak=False)
+        )
+        if range_header and range_allowed:
+            parsed_range = _parse_byte_range(range_header, artifact.size_bytes)
+            if parsed_range is None:
                 return Response(
                     status_code=416,
                     headers={
@@ -1059,28 +1115,7 @@ def create_app(
                         "Content-Range": f"bytes */{artifact.size_bytes}",
                     },
                 )
-            start_text, separator, end_text = range_header[6:].partition("-")
-            try:
-                if not separator:
-                    raise ValueError
-                if start_text:
-                    start = int(start_text)
-                    end = int(end_text) if end_text else artifact.size_bytes - 1
-                else:
-                    suffix = int(end_text)
-                    start = max(0, artifact.size_bytes - suffix)
-                    end = artifact.size_bytes - 1
-                if start < 0 or end < start or start >= artifact.size_bytes:
-                    raise ValueError
-                end = min(end, artifact.size_bytes - 1)
-            except ValueError:
-                return Response(
-                    status_code=416,
-                    headers={
-                        **common_headers,
-                        "Content-Range": f"bytes */{artifact.size_bytes}",
-                    },
-                )
+            start, end = parsed_range
             return StreamingResponse(
                 iter_file(artifact.path, start=start, end=end),
                 status_code=206,

@@ -162,6 +162,10 @@ def test_v2_database_migrates_version_states_and_active_job_targets(tmp_path: Pa
             """
         ).fetchone() is not None
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert {"replaced_at", "purged_at"} <= {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(publication_artifacts)")
+        }
         assert dict(
             connection.execute(
                 "SELECT version_id, document_id, status FROM document_versions"
@@ -384,3 +388,58 @@ def test_v3_job_table_migrates_states_index_and_idempotency_foreign_key(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (table,),
             ).fetchone() is not None
+
+
+def test_v20_retention_backfill_recovers_after_columns_were_already_added(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.for_test(tmp_path)
+    initialize_database(settings)
+    sha256 = "a" * 64
+    now = "2026-08-29T00:00:00+00:00"
+    with connect(settings) as connection:
+        connection.execute(
+            "INSERT INTO stored_objects VALUES (?, 1, 'application/zip', ?)",
+            (sha256, now),
+        )
+        for publication_seq in (1, 2):
+            candidate_id = f"candidate-{publication_seq}"
+            connection.execute(
+                """
+                INSERT INTO publication_candidates (
+                    candidate_id, business_state_token, content_set_hash, scope_json,
+                    status, created_by, created_at, publication_seq
+                ) VALUES (?, ?, ?, '{}', 'succeeded', 'publisher', ?, ?)
+                """,
+                (candidate_id, f"token-{publication_seq}", sha256, now, publication_seq),
+            )
+            connection.execute(
+                """
+                INSERT INTO publication_artifacts (
+                    publication_seq, candidate_id, snapshot_id, content_set_hash,
+                    artifact_sha256, media_type, size_bytes, chunk_count,
+                    asset_count, published_at
+                ) VALUES (?, ?, ?, ?, ?, 'application/zip', 1, 0, 0, ?)
+                """,
+                (
+                    publication_seq,
+                    candidate_id,
+                    f"snapshot-{publication_seq}",
+                    sha256,
+                    sha256,
+                    now,
+                ),
+            )
+        connection.execute("INSERT INTO current_publication VALUES (1, 2)")
+        connection.execute("PRAGMA user_version = 20")
+        connection.commit()
+
+    initialize_database(settings)
+
+    with connect(settings) as connection:
+        rows = connection.execute(
+            "SELECT publication_seq, replaced_at FROM publication_artifacts "
+            "ORDER BY publication_seq"
+        ).fetchall()
+    assert rows[0]["replaced_at"] is not None
+    assert rows[1]["replaced_at"] is None

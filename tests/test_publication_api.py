@@ -6,6 +6,7 @@ import sqlite3
 import zipfile
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from pptextract.publication import (
     _checkpoint,
     confirm_candidate,
     fail_publication_job,
+    purge_expired_publication_artifacts,
+    read_artifact,
     validate_publication_archive,
 )
 from pptextract.rendering import render_configuration_version
@@ -280,15 +283,22 @@ def test_confirmed_candidate_builds_verified_immutable_zip_and_switches_current_
     assert run_once(settings) is True
     current = client.get("/api/v1/publications/current")
     assert current.status_code == 200
-    assert current.json()["publication_seq"] == 1
-    assert current.json()["chunk_count"] == 1
-    assert current.json()["asset_count"] == 1
+    pointer = current.json()
+    assert pointer["publication_seq"] == 1
+    assert pointer["snapshot_id"] == candidate["candidate_id"]
+    assert pointer["published_at"]
+    assert pointer["artifact_uri"] == "/api/v1/publications/1/artifact"
+    assert pointer["media_type"] == "application/zip"
+    assert pointer["size_bytes"] > 0
+    assert len(pointer["sha256"]) == 64
+    assert pointer["chunk_count"] == 1
+    assert pointer["asset_count"] == 1
     assert current.headers["etag"]
 
-    archive = client.get(current.json()["download_url"])
+    archive = client.get(pointer["artifact_uri"])
     assert archive.status_code == 200
     assert archive.headers["etag"] == current.headers["etag"]
-    assert _sha(archive.content) == current.json()["sha256"]
+    assert _sha(archive.content) == pointer["sha256"]
     with zipfile.ZipFile(BytesIO(archive.content)) as bundle:
         assert set(bundle.namelist()) == {
             "manifest.json",
@@ -346,7 +356,7 @@ def test_confirmed_candidate_builds_verified_immutable_zip_and_switches_current_
     with pytest.raises(ValueError, match="视觉资产引用描述"):
         validate_publication_archive(tampered.getvalue())
 
-    partial = client.get(current.json()["download_url"], headers={"Range": "bytes=0-31"})
+    partial = client.get(pointer["artifact_uri"], headers={"Range": "bytes=0-31"})
     assert partial.status_code == 206
     assert partial.headers["content-range"].startswith("bytes 0-31/")
     assert partial.content == archive.content[:32]
@@ -386,6 +396,131 @@ def test_no_change_does_not_create_zip_or_increment_sequence_and_active_build_is
         "job_id": None,
     }
     assert client.get("/api/v1/publications/current").json()["publication_seq"] == 1
+
+
+def test_artifact_conditionals_and_ranges_have_deterministic_semantics(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    candidate = _create_candidate(client)
+    client.post(f"/api/v1/publications/candidates/{candidate['candidate_id']}/confirm")
+    assert run_once(settings) is True
+
+    current = client.get("/api/v1/publications/current")
+    pointer = current.json()
+    artifact_uri = pointer["artifact_uri"]
+    etag = current.headers["etag"]
+    archive = client.get(artifact_uri)
+
+    assert client.get(
+        "/api/v1/publications/current",
+        headers={"If-None-Match": f'"other", W/{etag}'},
+    ).status_code == 304
+    assert client.get(
+        artifact_uri,
+        headers={"If-None-Match": f'"other", W/{etag}'},
+    ).status_code == 304
+
+    precondition_failed = client.get(artifact_uri, headers={"If-Match": '"other"'})
+    assert precondition_failed.status_code == 412
+    assert precondition_failed.headers["etag"] == etag
+
+    stale_if_range = client.get(
+        artifact_uri,
+        headers={"Range": "bytes=0-15", "If-Range": '"other"'},
+    )
+    assert stale_if_range.status_code == 200
+    assert stale_if_range.content == archive.content
+    matching_if_range = client.get(
+        artifact_uri,
+        headers={"Range": "bytes=0-15", "If-Range": etag},
+    )
+    assert matching_if_range.status_code == 206
+    assert matching_if_range.content == archive.content[:16]
+    wildcard_if_range = client.get(
+        artifact_uri,
+        headers={"Range": "bytes=0-15", "If-Range": "*"},
+    )
+    assert wildcard_if_range.status_code == 200
+    assert wildcard_if_range.content == archive.content
+
+    for invalid_range in (
+        "items=0-1",
+        "bytes=999999-",
+        "bytes=0-1,2-3",
+        "bytes=-0",
+        f"bytes={'9' * 5000}-",
+    ):
+        invalid = client.get(artifact_uri, headers={"Range": invalid_range})
+        assert invalid.status_code == 416
+        assert invalid.headers["content-range"] == f"bytes */{pointer['size_bytes']}"
+        assert invalid.headers["etag"] == etag
+
+
+def test_replaced_artifact_remains_public_for_seven_days_and_internal_for_ninety(
+    system: tuple[TestClient, Settings],
+) -> None:
+    client, settings = system
+    _seed_publication_scope(settings)
+    first = _create_candidate(client)
+    client.post(f"/api/v1/publications/candidates/{first['candidate_id']}/confirm")
+    assert run_once(settings) is True
+    first_pointer = client.get("/api/v1/publications/current").json()
+
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE curation_snapshots SET overview = '第二代公开页总述。' "
+            "WHERE snapshot_id = 'snapshot-approved'"
+        )
+        connection.commit()
+    second = _create_candidate(client)
+    client.post(f"/api/v1/publications/candidates/{second['candidate_id']}/confirm")
+    assert run_once(settings) is True
+    second_pointer = client.get("/api/v1/publications/current").json()
+
+    assert second_pointer["publication_seq"] == 2
+    with connect(settings) as connection:
+        first_row = connection.execute(
+            "SELECT replaced_at FROM publication_artifacts WHERE publication_seq = 1"
+        ).fetchone()
+        second_row = connection.execute(
+            "SELECT replaced_at FROM publication_artifacts WHERE publication_seq = 2"
+        ).fetchone()
+    assert first_row is not None and first_row["replaced_at"] is not None
+    assert second_row is not None and second_row["replaced_at"] is None
+
+    now = datetime.now(UTC)
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE publication_artifacts SET replaced_at = ? WHERE publication_seq = 1",
+            ((now - timedelta(days=6)).isoformat(),),
+        )
+        connection.commit()
+    assert client.get(first_pointer["artifact_uri"]).status_code == 200
+
+    replaced_at = now - timedelta(days=8)
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE publication_artifacts SET replaced_at = ? WHERE publication_seq = 1",
+            (replaced_at.isoformat(),),
+        )
+        connection.commit()
+    assert client.get(first_pointer["artifact_uri"]).status_code == 404
+    assert client.get(second_pointer["artifact_uri"]).status_code == 200
+    assert read_artifact(settings, 1) is not None
+
+    assert purge_expired_publication_artifacts(
+        settings, at=replaced_at + timedelta(days=89)
+    ) == []
+    assert purge_expired_publication_artifacts(
+        settings, at=replaced_at + timedelta(days=90)
+    ) == [1]
+    expired = read_artifact(settings, 1)
+    assert expired is not None
+    assert expired.purged_at == (replaced_at + timedelta(days=90)).isoformat()
+    assert expired.path.is_file() is False
+    assert read_artifact(settings, 2) is not None
 
 
 def test_busy_conflict_exposes_active_task_and_workspace_keeps_frozen_candidate(

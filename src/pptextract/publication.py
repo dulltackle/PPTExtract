@@ -7,6 +7,7 @@ import uuid
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -53,6 +54,8 @@ class PublicationArtifact:
     chunk_count: int
     asset_count: int
     published_at: str
+    replaced_at: str | None
+    purged_at: str | None
     path: Path
 
 
@@ -1254,19 +1257,65 @@ def validate_publication_archive(payload: bytes) -> None:
         if not {"manifest.json", "chunks.jsonl"} <= set(names):
             raise ValueError("ZIP 缺少 manifest 或 Chunk JSONL")
         manifest = json.loads(archive.read("manifest.json"))
-        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
-            raise ValueError("manifest Schema 版本不受支持")
         if (
-            not isinstance(manifest.get("publication_seq"), int)
-            or manifest["publication_seq"] <= 0
-            or not str(manifest.get("snapshot_id", ""))
-            or len(str(manifest.get("content_set_hash", ""))) != 64
+            not isinstance(manifest, dict)
+            or not isinstance(manifest.get("schema_version"), int)
+            or isinstance(manifest.get("schema_version"), bool)
+            or manifest["schema_version"] != 1
+        ):
+            raise ValueError("manifest Schema 版本不受支持")
+        captured_at = manifest.get("captured_at")
+        try:
+            captured_timestamp = (
+                datetime.fromisoformat(captured_at)
+                if isinstance(captured_at, str) and captured_at
+                else None
+            )
+        except ValueError as error:
+            raise ValueError("manifest 发布时间无效") from error
+        publication_seq = manifest.get("publication_seq")
+        snapshot_id = manifest.get("snapshot_id")
+        content_set_hash = manifest.get("content_set_hash")
+        chunk_count = manifest.get("chunk_count")
+        asset_count = manifest.get("asset_count")
+        if (
+            not isinstance(publication_seq, int)
+            or isinstance(publication_seq, bool)
+            or publication_seq <= 0
+            or not isinstance(snapshot_id, str)
+            or not snapshot_id
+            or captured_timestamp is None
+            or captured_timestamp.tzinfo is None
+            or not isinstance(content_set_hash, str)
+            or len(content_set_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_set_hash)
+            or not isinstance(chunk_count, int)
+            or isinstance(chunk_count, bool)
+            or chunk_count < 0
+            or not isinstance(asset_count, int)
+            or isinstance(asset_count, bool)
+            or asset_count < 0
         ):
             raise ValueError("manifest 身份字段不完整")
+        chunks_manifest = manifest.get("chunks")
+        if not isinstance(chunks_manifest, dict):
+            raise ValueError("manifest Chunk 描述不完整")
+        chunks_sha256 = chunks_manifest.get("sha256")
+        chunks_size = chunks_manifest.get("size_bytes")
+        if (
+            chunks_manifest.get("path") != "chunks.jsonl"
+            or not isinstance(chunks_sha256, str)
+            or len(chunks_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in chunks_sha256)
+            or not isinstance(chunks_size, int)
+            or isinstance(chunks_size, bool)
+            or chunks_size < 0
+        ):
+            raise ValueError("manifest Chunk 描述不完整")
         chunks_bytes = archive.read("chunks.jsonl")
-        if hashlib.sha256(chunks_bytes).hexdigest() != manifest["chunks"]["sha256"]:
+        if hashlib.sha256(chunks_bytes).hexdigest() != chunks_sha256:
             raise ValueError("Chunk JSONL 哈希不一致")
-        if len(chunks_bytes) != int(manifest["chunks"]["size_bytes"]):
+        if len(chunks_bytes) != chunks_size:
             raise ValueError("Chunk JSONL 字节数不一致")
         if (
             chunks_bytes.startswith(b"\xef\xbb\xbf")
@@ -1297,7 +1346,7 @@ def validate_publication_archive(payload: bytes) -> None:
         if sort_keys != sorted(sort_keys):
             raise ValueError("Chunk JSONL 行顺序不符合确定性排序")
         chunk_ids = [str(chunk["chunk_id"]) for chunk in chunks]
-        if len(chunk_ids) != len(set(chunk_ids)) or len(chunks) != int(manifest["chunk_count"]):
+        if len(chunk_ids) != len(set(chunk_ids)) or len(chunks) != chunk_count:
             raise ValueError("Chunk ID 重复或计数不一致")
         references = [
             visual["asset"]
@@ -1314,7 +1363,7 @@ def validate_publication_archive(payload: bytes) -> None:
         if len(declared_paths) != len(set(declared_paths)):
             raise ValueError("manifest 视觉资产含重复路径")
         declared = {str(asset["path"]): asset for asset in raw_assets}
-        if int(manifest["asset_count"]) != len(declared):
+        if asset_count != len(declared):
             raise ValueError("manifest 视觉资产计数不一致")
         missing_declarations = referenced - set(declared)
         if missing_declarations:
@@ -1336,8 +1385,15 @@ def validate_publication_archive(payload: bytes) -> None:
             ):
                 raise ValueError("视觉资产 SHA-256 不完整")
             media_type = asset.get("media_type")
+            size_bytes = asset.get("size_bytes")
             if not isinstance(media_type, str) or _asset_extension(media_type) == "bin":
                 raise ValueError("视觉资产媒体类型不受支持")
+            if (
+                not isinstance(size_bytes, int)
+                or isinstance(size_bytes, bool)
+                or size_bytes < 0
+            ):
+                raise ValueError("视觉资产字节数无效")
             if path != f"assets/{sha256}.{_asset_extension(media_type)}":
                 raise ValueError("视觉资产路径与内容哈希或媒体类型不一致")
             if asset.get("byte_contract") not in {"standard_render_crop", "anydoc_original"}:
@@ -1347,7 +1403,7 @@ def validate_publication_archive(payload: bytes) -> None:
             data = archive.read(path)
             if hashlib.sha256(data).hexdigest() != sha256:
                 raise ValueError("视觉资产哈希不一致")
-            if len(data) != int(asset["size_bytes"]):
+            if len(data) != size_bytes:
                 raise ValueError("视觉资产字节数不一致")
             if not _asset_bytes_match_media_type(data, media_type):
                 raise ValueError("视觉资产媒体类型与实际字节不一致")
@@ -1448,6 +1504,7 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
         raise ValueError("发布 ZIP 写入后校验失败")
     _checkpoint(settings, job, "switch_pointer", len(chunks))
     published_at = timestamp()
+    expired_object_sha256s: list[str] = []
     with transaction(settings) as connection:
         connection.execute(
             """
@@ -1482,6 +1539,14 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
             "SELECT publication_seq FROM current_publication WHERE singleton_id = 1"
         ).fetchone()
         if current is None or int(current["publication_seq"]) < int(candidate["publication_seq"]):
+            if current is not None:
+                connection.execute(
+                    """
+                    UPDATE publication_artifacts SET replaced_at = COALESCE(replaced_at, ?)
+                    WHERE publication_seq = ?
+                    """,
+                    (published_at, int(current["publication_seq"])),
+                )
             connection.execute(
                 """
                 INSERT INTO current_publication (singleton_id, publication_seq)
@@ -1489,6 +1554,11 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
                 ON CONFLICT(singleton_id) DO UPDATE SET publication_seq = excluded.publication_seq
                 """,
                 (int(candidate["publication_seq"]),),
+            )
+            _, expired_object_sha256s = _mark_expired_publication_artifacts(
+                connection,
+                settings,
+                at=datetime.fromisoformat(published_at),
             )
         connection.execute(
             "UPDATE publication_candidates SET status = 'succeeded' WHERE candidate_id = ?",
@@ -1517,6 +1587,7 @@ def process_publication_job(settings: Settings, job: ClaimedJob) -> None:
         )
         if updated.rowcount != 1:
             raise RuntimeError("worker 无法原子完成发布任务")
+    _delete_purged_archive_objects(settings, expired_object_sha256s)
 
 
 def fail_publication_job(settings: Settings, job: ClaimedJob, error: Exception) -> None:
@@ -1660,6 +1731,8 @@ def _artifact_from_row(settings: Settings, row: sqlite3.Row) -> PublicationArtif
         chunk_count=int(row["chunk_count"]),
         asset_count=int(row["asset_count"]),
         published_at=str(row["published_at"]),
+        replaced_at=None if row["replaced_at"] is None else str(row["replaced_at"]),
+        purged_at=None if row["purged_at"] is None else str(row["purged_at"]),
         path=LocalObjectStore(settings.object_store_path).path_for(sha256),
     )
 
@@ -1671,6 +1744,91 @@ def read_artifact(settings: Settings, publication_seq: int) -> PublicationArtifa
             (publication_seq,),
         ).fetchone()
     return None if row is None else _artifact_from_row(settings, row)
+
+
+def read_public_artifact(
+    settings: Settings,
+    publication_seq: int,
+    *,
+    at: datetime | None = None,
+) -> PublicationArtifact | None:
+    artifact = read_artifact(settings, publication_seq)
+    if artifact is None or artifact.replaced_at is None:
+        return artifact
+    replaced_at = datetime.fromisoformat(artifact.replaced_at)
+    checked_at = at or datetime.now(UTC)
+    if checked_at >= replaced_at + timedelta(days=settings.public_artifact_retention_days):
+        return None
+    return artifact
+
+
+def _mark_expired_publication_artifacts(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    *,
+    at: datetime,
+) -> tuple[list[int], list[str]]:
+    cutoff = (at - timedelta(days=settings.internal_artifact_retention_days)).isoformat()
+    rows = connection.execute(
+        """
+        SELECT artifacts.publication_seq, artifacts.artifact_sha256,
+               artifacts.purged_at
+        FROM publication_artifacts AS artifacts
+        LEFT JOIN current_publication AS current
+          ON current.publication_seq = artifacts.publication_seq
+        WHERE current.publication_seq IS NULL
+          AND artifacts.replaced_at IS NOT NULL
+          AND artifacts.replaced_at <= ?
+        ORDER BY artifacts.publication_seq
+        """,
+        (cutoff,),
+    ).fetchall()
+    publication_sequences = [
+        int(row["publication_seq"]) for row in rows if row["purged_at"] is None
+    ]
+    if publication_sequences:
+        placeholders = ",".join("?" for _ in publication_sequences)
+        connection.execute(
+            f"UPDATE publication_artifacts SET purged_at = ? "
+            f"WHERE publication_seq IN ({placeholders}) AND purged_at IS NULL",
+            (at.isoformat(), *publication_sequences),
+        )
+    object_sha256s: list[str] = []
+    for sha256 in dict.fromkeys(str(row["artifact_sha256"]) for row in rows):
+        referenced = connection.execute(
+            """
+            SELECT 1 FROM publication_artifacts
+            WHERE artifact_sha256 = ? AND purged_at IS NULL LIMIT 1
+            """,
+            (sha256,),
+        ).fetchone()
+        if referenced is None:
+            object_sha256s.append(sha256)
+    return publication_sequences, object_sha256s
+
+
+def _delete_purged_archive_objects(settings: Settings, sha256s: list[str]) -> None:
+    store = LocalObjectStore(settings.object_store_path)
+    for sha256 in sha256s:
+        try:
+            store.path_for(sha256).unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def purge_expired_publication_artifacts(
+    settings: Settings,
+    *,
+    at: datetime | None = None,
+) -> list[int]:
+    with transaction(settings) as connection:
+        publication_sequences, object_sha256s = _mark_expired_publication_artifacts(
+            connection,
+            settings,
+            at=at or datetime.now(UTC),
+        )
+    _delete_purged_archive_objects(settings, object_sha256s)
+    return publication_sequences
 
 
 def read_current_artifact(settings: Settings) -> PublicationArtifact | None:
@@ -1693,6 +1851,7 @@ def _read_current_artifact(
 
 
 def artifact_content(artifact: PublicationArtifact) -> dict[str, Any]:
+    artifact_uri = f"/api/v1/publications/{artifact.publication_seq}/artifact"
     return {
         "publication_seq": artifact.publication_seq,
         "candidate_id": artifact.candidate_id,
@@ -1703,7 +1862,8 @@ def artifact_content(artifact: PublicationArtifact) -> dict[str, Any]:
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "media_type": artifact.media_type,
-        "download_url": f"/api/v1/publications/{artifact.publication_seq}/artifact",
+        "artifact_uri": artifact_uri,
+        "download_url": artifact_uri,
     }
 
 

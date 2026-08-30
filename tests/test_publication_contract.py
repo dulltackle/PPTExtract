@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import zipfile
+from collections.abc import Callable
 from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -104,6 +106,21 @@ def _replace_chunks_bytes(archive_payload: bytes, chunks_bytes: bytes) -> bytes:
         manifest, sort_keys=True, separators=(",", ":")
     ).encode()
     files["chunks.jsonl"] = chunks_bytes
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        for name, payload in files.items():
+            bundle.writestr(name, payload)
+    return output.getvalue()
+
+
+def _replace_manifest(archive_payload: bytes, mutate: Callable[[dict[str, Any]], None]) -> bytes:
+    with zipfile.ZipFile(BytesIO(archive_payload)) as source:
+        files = {name: source.read(name) for name in source.namelist()}
+    manifest = json.loads(files["manifest.json"])
+    mutate(manifest)
+    files["manifest.json"] = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
     output = BytesIO()
     with zipfile.ZipFile(output, "w") as bundle:
         for name, payload in files.items():
@@ -700,6 +717,31 @@ def test_archive_validator_rejects_manifest_content_set_hash_mismatch() -> None:
 
 
 @pytest.mark.parametrize(
+    "case",
+    ["captured_at", "chunks_path", "chunk_count", "asset_count", "chunks_size"],
+)
+def test_archive_validator_rejects_manifest_field_type_and_value_mismatches(
+    case: str,
+) -> None:
+    def mutate(manifest: dict[str, Any]) -> None:
+        if case == "captured_at":
+            manifest["captured_at"] = None
+        elif case == "chunks_path":
+            manifest["chunks"]["path"] = "other.jsonl"
+        elif case == "chunk_count":
+            manifest["chunk_count"] = "1"
+        elif case == "asset_count":
+            manifest["asset_count"] = "0"
+        else:
+            manifest["chunks"]["size_bytes"] = str(manifest["chunks"]["size_bytes"])
+
+    archive = _replace_manifest(_contract_archive(_valid_chunk()), mutate)
+
+    with pytest.raises(ValueError, match="manifest"):
+        validate_publication_archive(archive)
+
+
+@pytest.mark.parametrize(
     ("case", "expected_error"),
     [
         ("missing_file", "缺失"),
@@ -710,6 +752,7 @@ def test_archive_validator_rejects_manifest_content_set_hash_mismatch() -> None:
         ("symlink", "符号链接"),
         ("media_type", "媒体类型"),
         ("size", "字节数"),
+        ("size_type", "字节数"),
     ],
 )
 def test_archive_validator_rejects_asset_and_path_contract_mismatches(
@@ -752,6 +795,10 @@ def test_archive_validator_rejects_asset_and_path_contract_mismatches(
         chunk = _chunk_with_asset(asset)
     elif case == "size":
         asset["size_bytes"] = len(payload) + 1
+        assets = [dict(asset)]
+        chunk = _chunk_with_asset(asset)
+    elif case == "size_type":
+        asset["size_bytes"] = str(len(payload))
         assets = [dict(asset)]
         chunk = _chunk_with_asset(asset)
 

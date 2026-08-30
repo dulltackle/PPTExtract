@@ -60,3 +60,19 @@ def test_render_generation_must_be_positive(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="渲染配置代次"):
         settings.validate()
+
+
+def test_publication_retention_defaults_and_minimums(tmp_path: Path) -> None:
+    settings = Settings.for_test(tmp_path)
+
+    assert settings.public_artifact_retention_days == 7
+    assert settings.internal_artifact_retention_days == 90
+
+    with pytest.raises(ValueError, match="对外保留期不得少于 7 天"):
+        replace(settings, public_artifact_retention_days=6).validate()
+    with pytest.raises(ValueError, match="内部保留期不得短于对外保留期"):
+        replace(
+            settings,
+            public_artifact_retention_days=30,
+            internal_artifact_retention_days=29,
+        ).validate()

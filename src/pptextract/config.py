@@ -26,6 +26,8 @@ class Settings:
     max_source_upload_bytes: int = 128 * 1024 * 1024
     sqlite_busy_timeout_ms: int = 5_000
     job_retry_base_seconds: float = 5.0
+    public_artifact_retention_days: int = 7
+    internal_artifact_retention_days: int = 90
     allow_temporary_storage: bool = False
 
     @classmethod
@@ -54,6 +56,12 @@ class Settings:
             job_retry_base_seconds=float(
                 os.environ.get("PPTEXTRACT_JOB_RETRY_BASE_SECONDS", "5")
             ),
+            public_artifact_retention_days=int(
+                os.environ.get("PPTEXTRACT_PUBLIC_ARTIFACT_RETENTION_DAYS", "7")
+            ),
+            internal_artifact_retention_days=int(
+                os.environ.get("PPTEXTRACT_INTERNAL_ARTIFACT_RETENTION_DAYS", "90")
+            ),
         )
 
     @classmethod
@@ -77,6 +85,10 @@ class Settings:
             raise ValueError("渲染配置代次必须为正整数")
         if self.max_source_upload_bytes <= 0:
             raise ValueError("PPTX 上传上限必须大于 0")
+        if self.public_artifact_retention_days < 7:
+            raise ValueError("旧产物 ZIP 对外保留期不得少于 7 天")
+        if self.internal_artifact_retention_days < self.public_artifact_retention_days:
+            raise ValueError("旧产物 ZIP 内部保留期不得短于对外保留期")
         if (
             not math.isfinite(self.job_retry_base_seconds)
             or self.job_retry_base_seconds < 0
