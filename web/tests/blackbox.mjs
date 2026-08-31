@@ -40,8 +40,15 @@ try {
     if (!(await upload.evaluate((element) => element === document.activeElement))) {
       throw new Error(`${width}px 上传入口无法获得键盘焦点`);
     }
+    const fileChooserPromise = page.waitForEvent("filechooser");
     await upload.click();
-    await page.getByRole("status").getByText("上传流程将在 #20 接入", { exact: false }).waitFor();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles({
+      name: `browser-contract-${width}.pptx`,
+      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      buffer: Buffer.from("not a valid OOXML package"),
+    });
+    await page.getByRole("alert").getByText("上传内容不是有效的 PPTX。", { exact: true }).waitFor();
     checks.push(`viewport-${width}`);
     await page.close();
   }

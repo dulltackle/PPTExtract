@@ -161,20 +161,121 @@ describe("默认文档入口", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("上传入口响应操作但不发送票外请求", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(bootstrap), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+  it("选择 PPTX 后可靠提交并刷新文档跑道", async () => {
+    const accepted = {
+      document_id: "document-uploaded",
+      version_id: "version-uploaded",
+      job_id: "job-uploaded",
+      status: "accepted",
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(bootstrap), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(accepted), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(bootstrap), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
     render(<App />);
     await screen.findByText("操作者 operator-zhang");
 
-    await userEvent.click(screen.getByRole("button", { name: "上传 PPTX（暂未开放）" }));
+    const file = new File(["public synthetic pptx"], "季度复盘.pptx", {
+      type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    });
+    await userEvent.upload(screen.getByLabelText("选择 PPTX 文件"), file);
 
-    expect(screen.getByRole("status")).toHaveTextContent("上传流程将在 #20 接入");
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "已接收“季度复盘.pptx”",
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const [uploadUrl, uploadInit] = fetchMock.mock.calls[1];
+    expect(uploadUrl).toBe("/api/v1/documents");
+    expect(uploadInit).toMatchObject({
+      method: "POST",
+      headers: expect.objectContaining({
+        Accept: "application/json",
+        "Idempotency-Key": expect.stringMatching(/^browser-upload-/),
+      }),
+    });
+    expect(uploadInit?.body).toBeInstanceOf(FormData);
+    expect((uploadInit?.body as FormData).get("file")).toEqual(file);
+  });
+
+  it("上传失败时显示服务端原因并用同一幂等键重试", async () => {
+    const accepted = {
+      document_id: "document-uploaded",
+      version_id: "version-uploaded",
+      job_id: "job-uploaded",
+      status: "accepted",
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(bootstrap), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "invalid_presentation",
+              message: "文件不是有效的 PPTX，请重新选择。",
+            },
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(accepted), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(bootstrap), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    render(<App />);
+    await screen.findByText("操作者 operator-zhang");
+
+    const file = new File(["invalid pptx"], "损坏演示.pptx", {
+      type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    });
+    await userEvent.upload(screen.getByLabelText("选择 PPTX 文件"), file);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "文件不是有效的 PPTX，请重新选择。",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "重试上传" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "已接收“损坏演示.pptx”",
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+
+    const firstKey = (fetchMock.mock.calls[1][1]?.headers as Record<string, string>)[
+      "Idempotency-Key"
+    ];
+    const retryKey = (fetchMock.mock.calls[2][1]?.headers as Record<string, string>)[
+      "Idempotency-Key"
+    ];
+    expect(retryKey).toBe(firstKey);
   });
 
   it("重复刷新会取消旧请求且忽略过期响应", async () => {

@@ -205,7 +205,7 @@ textarea:focus-visible {
   background: var(--selection-teal-deep);
   font-size: 13px;
   font-weight: 700;
-  cursor: help;
+  cursor: pointer;
   transition: background-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
     border-color 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -216,17 +216,30 @@ textarea:focus-visible {
   background: #328184;
 }
 
+.upload-button:disabled {
+  border-color: #4d5961;
+  color: #a9b2b7;
+  background: #293138;
+  cursor: wait;
+  opacity: 0.82;
+}
+
+.upload-button.is-uploading .icon {
+  animation: upload-pulse 1s ease-in-out infinite;
+}
+
 .upload-notice {
   position: absolute;
   top: calc(100% + 9px);
   right: 0;
-  width: 286px;
+  width: min(340px, calc(100vw - 32px));
   padding: 11px 12px;
   border: 1px solid #52606a;
   border-radius: 7px;
   color: #eef1f2;
   background: #252d34;
   box-shadow: 0 12px 28px rgb(0 0 0 / 35%);
+  overflow-wrap: anywhere;
 }
 
 .upload-notice::before {
@@ -257,6 +270,69 @@ textarea:focus-visible {
   color: #c4cbcf;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.upload-notice--success {
+  border-color: #4f8069;
+}
+
+.upload-notice--success::before {
+  border-color: #4f8069 transparent transparent #4f8069;
+}
+
+.upload-notice--success strong {
+  color: #b9e4cc;
+}
+
+.upload-notice--error {
+  border-color: #a84d43;
+  background: #302526;
+}
+
+.upload-notice--error::before {
+  border-color: #a84d43 transparent transparent #a84d43;
+  background: #302526;
+}
+
+.upload-notice--error strong {
+  color: #ffd0ca;
+}
+
+.upload-notice-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgb(196 203 207 / 22%);
+}
+
+.upload-notice-actions button {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid #6b777f;
+  border-radius: 5px;
+  color: #f1f4f5;
+  background: #30383e;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.upload-notice-actions button:hover {
+  border-color: var(--focus-cyan);
+  background: #3a454d;
+}
+
+@keyframes upload-pulse {
+  0%,
+  100% {
+    opacity: 0.62;
+    transform: translateY(1px);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
 }
 
 .workspace {
@@ -534,6 +610,10 @@ kbd {
 
   .upload-button {
     transition: none;
+  }
+
+  .upload-button.is-uploading .icon {
+    animation: none;
   }
 }
 

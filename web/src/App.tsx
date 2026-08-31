@@ -1,5 +1,6 @@
 import {
   Component,
+  type ChangeEvent,
   type ErrorInfo,
   type ReactNode,
   useCallback,
@@ -8,7 +9,13 @@ import {
   useState,
 } from "react";
 
-import { type BootstrapData, loadBootstrap, OperatorError, type Runway } from "./api";
+import {
+  type BootstrapData,
+  loadBootstrap,
+  OperatorError,
+  type Runway,
+  uploadDocument,
+} from "./api";
 import { CurationWorkbench, type CurationCommandState } from "./CurationWorkbench";
 import { PageMappingWorkbench } from "./PageMappingWorkbench";
 import { PublicationPreflight } from "./PublicationPreflight";
@@ -19,11 +26,30 @@ type LoadState =
   | { kind: "ready"; data: BootstrapData }
   | { kind: "error"; message: string };
 
+type UploadState =
+  | { kind: "idle" }
+  | { kind: "uploading"; fileName: string }
+  | { kind: "success"; fileName: string; jobId: string }
+  | { kind: "error"; fileName: string; message: string };
+
+interface UploadAttempt {
+  file: File;
+  idempotencyKey: string;
+}
+
+function createUploadIdempotencyKey(): string {
+  const suffix =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `browser-upload-${suffix}`;
+}
+
 const runwayCopy: Record<Runway["id"], { description: string; empty: string; next: string }> = {
   pending: {
     description: "等待开始处理的文档",
     empty: "还没有待处理文档",
-    next: "上传入口开放后，新文档会先出现在这里。",
+    next: "上传新文档后，它会先出现在这里。",
   },
   processing: {
     description: "正在建立可策展版本",
@@ -182,9 +208,12 @@ export function App() {
   const isCuration = window.location.pathname.startsWith("/curation");
   const isPublication = window.location.pathname.startsWith("/publication");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
-  const [showUploadBoundary, setShowUploadBoundary] = useState(false);
+  const [uploadState, setUploadState] = useState<UploadState>({ kind: "idle" });
   const [curationCommands, setCurationCommands] = useState<CurationCommandState | null>(null);
   const activeRequest = useRef<{ controller: AbortController; requestId: number } | null>(null);
+  const uploadInput = useRef<HTMLInputElement | null>(null);
+  const uploadRequest = useRef<AbortController | null>(null);
+  const uploadAttempt = useRef<UploadAttempt | null>(null);
   const nextRequestId = useRef(0);
 
   const refresh = useCallback(() => {
@@ -210,12 +239,76 @@ export function App() {
       });
   }, []);
 
+  const submitUpload = useCallback(
+    (attempt: UploadAttempt) => {
+      uploadRequest.current?.abort();
+      const controller = new AbortController();
+      uploadRequest.current = controller;
+      setUploadState({ kind: "uploading", fileName: attempt.file.name });
+
+      uploadDocument(attempt.file, attempt.idempotencyKey, controller.signal)
+        .then((accepted) => {
+          if (uploadRequest.current !== controller) return;
+          setUploadState({
+            kind: "success",
+            fileName: attempt.file.name,
+            jobId: accepted.job_id,
+          });
+          refresh();
+        })
+        .catch((error: unknown) => {
+          if (uploadRequest.current !== controller) return;
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          setUploadState({
+            kind: "error",
+            fileName: attempt.file.name,
+            message:
+              error instanceof OperatorError
+                ? error.message
+                : "上传发生未知错误，文件尚未提交。请重试或重新选择文件。",
+          });
+        })
+        .finally(() => {
+          if (uploadRequest.current === controller) uploadRequest.current = null;
+        });
+    },
+    [refresh],
+  );
+
+  const chooseUpload = useCallback(() => {
+    uploadInput.current?.click();
+  }, []);
+
+  const onUploadSelected = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (!file) return;
+      if (!file.name.toLocaleLowerCase().endsWith(".pptx")) {
+        uploadAttempt.current = null;
+        setUploadState({
+          kind: "error",
+          fileName: file.name,
+          message: "仅支持 .pptx 文件，请重新选择 PowerPoint 演示文稿。",
+        });
+        return;
+      }
+      const attempt = { file, idempotencyKey: createUploadIdempotencyKey() };
+      uploadAttempt.current = attempt;
+      submitUpload(attempt);
+    },
+    [submitUpload],
+  );
+
   useEffect(() => {
     if (window.location.pathname === "/") {
       window.history.replaceState(null, "", "/documents");
     }
     refresh();
-    return () => activeRequest.current?.controller.abort();
+    return () => {
+      activeRequest.current?.controller.abort();
+      uploadRequest.current?.abort();
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -267,23 +360,75 @@ export function App() {
           </div>
           {!isCuration && !isMapping && !isPublication ? (
             <div className="upload-boundary">
+              <input
+                ref={uploadInput}
+                hidden
+                type="file"
+                accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                aria-label="选择 PPTX 文件"
+                disabled={state.kind !== "ready" || uploadState.kind === "uploading"}
+                onChange={onUploadSelected}
+              />
               <button
                 type="button"
-                className="upload-button"
-                aria-describedby="upload-boundary-copy"
-                aria-expanded={showUploadBoundary}
-                onClick={() => setShowUploadBoundary((visible) => !visible)}
+                className={`upload-button${uploadState.kind === "uploading" ? " is-uploading" : ""}`}
+                aria-describedby="upload-button-help"
+                aria-expanded={uploadState.kind !== "idle"}
+                aria-controls="upload-feedback"
+                disabled={state.kind !== "ready" || uploadState.kind === "uploading"}
+                onClick={chooseUpload}
               >
                 <UploadIcon />
-                上传 PPTX<span className="sr-only">（暂未开放）</span>
+                {uploadState.kind === "uploading" ? "正在上传…" : "上传 PPTX"}
               </button>
-              <span id="upload-boundary-copy" className="sr-only">
-                上传流程将在 #20 接入，本版本不会提交文件。
+              <span id="upload-button-help" className="sr-only">
+                选择一个 PPTX 文件，可靠保存后启动后台处理。
               </span>
-              {showUploadBoundary ? (
-                <div className="upload-notice" role="status">
-                  <strong>上传暂未开放</strong>
-                  <span>上传流程将在 #20 接入；本版本不会提交文件。</span>
+              {uploadState.kind !== "idle" ? (
+                <div
+                  id="upload-feedback"
+                  className={`upload-notice upload-notice--${uploadState.kind}`}
+                  role={uploadState.kind === "error" ? "alert" : "status"}
+                  aria-live="polite"
+                >
+                  {uploadState.kind === "uploading" ? (
+                    <>
+                      <strong>正在可靠提交“{uploadState.fileName}”</strong>
+                      <span>请保持此页面打开，完整保存源文件后才会启动后台处理。</span>
+                    </>
+                  ) : null}
+                  {uploadState.kind === "success" ? (
+                    <>
+                      <strong>已接收“{uploadState.fileName}”</strong>
+                      <span>源文件已可靠保存，后台处理已启动；文档跑道正在刷新。</span>
+                      <div className="upload-notice-actions">
+                        <button type="button" onClick={() => setUploadState({ kind: "idle" })}>
+                          关闭提示
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+                  {uploadState.kind === "error" ? (
+                    <>
+                      <strong>“{uploadState.fileName}”上传未完成</strong>
+                      <span>{uploadState.message}</span>
+                      <div className="upload-notice-actions">
+                        {uploadAttempt.current ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (uploadAttempt.current) submitUpload(uploadAttempt.current);
+                            }}
+                          >
+                            重试上传
+                          </button>
+                        ) : null}
+                        <button type="button" onClick={chooseUpload}>
+                          重新选择
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -343,7 +488,13 @@ export function App() {
               ? curationCommands?.status ?? "正在读取策展工作位"
               : isPublication
                 ? "发布工作位就绪"
-              : "入口就绪"
+              : uploadState.kind === "uploading"
+                ? "正在可靠提交文件"
+                : uploadState.kind === "error"
+                  ? "上传需要处理"
+                  : uploadState.kind === "success"
+                    ? "上传已接受"
+                    : "入口就绪"
             : state.kind === "error"
               ? "需要恢复"
               : "连接中"}

@@ -24,6 +24,13 @@ export interface BootstrapData {
   runways: Runway[];
 }
 
+export interface UploadAccepted {
+  document_id: string;
+  version_id: string;
+  job_id: string;
+  status: "accepted" | "coalesced" | "no_change";
+}
+
 export interface SourceReference {
   slide_id: number;
   relationship_id: string;
@@ -569,6 +576,33 @@ export async function loadBootstrap(signal?: AbortSignal): Promise<BootstrapData
     throw new OperatorError(payload.error?.message ?? "文档入口暂时不可用，请稍后重试。");
   }
   return payload;
+}
+
+export async function uploadDocument(
+  file: File,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+): Promise<UploadAccepted> {
+  const form = new FormData();
+  form.append("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch("/api/v1/documents", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: form,
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new OperatorError("无法连接上传服务，文件尚未提交。请检查网络后重试。");
+  }
+
+  return readJson<UploadAccepted>(response, "上传未能完成，请稍后重试。");
 }
 
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
