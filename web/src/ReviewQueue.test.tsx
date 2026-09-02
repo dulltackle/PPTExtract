@@ -297,6 +297,97 @@ describe("审核队列、排除与重开", () => {
     expect(screen.getByRole("combobox", { name: "统一排除原因" })).toHaveValue("duplicate");
   });
 
+  it("方向键、筛选和包含当前页的批量排除共用文字导航保护", async () => {
+    let pages = [page(1, "pending"), page(2, "pending")];
+    const batchRequests: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.startsWith("/api/v1/curation/pages?review_status=")) {
+        const selectedFilter = new URL(url, "http://local").searchParams.get("review_status");
+        const visible = selectedFilter === "all"
+          ? pages
+          : pages.filter((item) => item.review_status === selectedFilter);
+        return Promise.resolve(new Response(JSON.stringify({ pages: visible }), { status: 200 }));
+      }
+      const detailMatch = url.match(/^\/api\/v1\/pages\/(page-\d+)$/);
+      if (detailMatch && !init?.method) {
+        const selected = pages.find((item) => item.page_id === detailMatch[1])!;
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: selected.page_id,
+          page_number: selected.page_number,
+          review_status: selected.review_status,
+          review: selected.review,
+          source_content: { ...source, titles: [selected.title] },
+          curation: curation(selected.review_status),
+        }), { status: 200 }));
+      }
+      if (url === "/api/v1/pages/batch-exclude" && init?.method === "POST") {
+        const payload = JSON.parse(String(init.body));
+        batchRequests.push(payload);
+        pages = pages.map((item) => payload.page_ids.includes(item.page_id)
+          ? { ...item, review_status: "excluded" as const }
+          : item);
+        return Promise.resolve(new Response(JSON.stringify({
+          requested: payload.page_ids.length,
+          excluded: payload.page_ids,
+          failed: [],
+          complete: true,
+        }), { status: 200 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑标题 1" }));
+    const title = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
+    await userEvent.clear(title);
+    await userEvent.type(title, "尚未保存的队列标题");
+    title.blur();
+
+    const currentRow = screen.getByRole("button", { name: /第 1 页，队列页 1，待处理/ });
+    currentRow.focus();
+    fireEvent.keyDown(currentRow, { key: "ArrowRight" });
+    expect(screen.getByRole("dialog", { name: "放弃当前页的文字修改？" }))
+      .toHaveTextContent("转到第 02 页");
+    await userEvent.keyboard("{Escape}");
+    expect(title).toHaveValue("尚未保存的队列标题");
+
+    await userEvent.click(screen.getByRole("button", { name: "全部" }));
+    expect(screen.getByRole("dialog", { name: "放弃当前页的文字修改？" }))
+      .toHaveTextContent("切换到“全部”筛选");
+    await userEvent.keyboard("{Escape}");
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择第 1 页，队列页 1" }));
+    const batch = screen.getByRole("region", { name: "批量排除" });
+    await userEvent.selectOptions(
+      within(batch).getByRole("combobox", { name: "统一排除原因" }),
+      "duplicate",
+    );
+    await userEvent.click(within(batch).getByRole("button", { name: "批量排除 1 页" }));
+    const firstBatchDialog = screen.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+    expect(firstBatchDialog).toHaveTextContent("提交批量排除并离开当前页");
+    expect(batchRequests).toHaveLength(0);
+    await userEvent.keyboard("{Enter}");
+    expect(title).toHaveValue("尚未保存的队列标题");
+
+    await userEvent.click(within(batch).getByRole("button", { name: "批量排除 1 页" }));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "留在当前页" }),
+    ).toHaveFocus());
+    await userEvent.tab();
+    expect(screen.getByRole("button", { name: "放弃修改并离开" })).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+
+    await waitFor(() => expect(batchRequests).toHaveLength(1));
+    await waitFor(() => expect(within(
+      screen.getByRole("region", { name: "标题与正文核对稿" }),
+    ).getByText("队列页 2")).toBeInTheDocument());
+    expect(screen.queryByText("尚未保存的队列标题")).not.toBeInTheDocument();
+  });
+
   it("方向键移动页面，输入聚焦时停用全局快捷键，X 只聚焦排除原因", async () => {
     const pages = [page(1, "pending"), page(2, "pending")];
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {

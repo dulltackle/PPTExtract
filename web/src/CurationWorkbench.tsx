@@ -1,8 +1,10 @@
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,9 +37,21 @@ import {
   updateCaptureVisual,
   type VisualType,
 } from "./api";
-import { SourceReviewLog } from "./SourceReviewLog";
+import { SourceReviewLog, type SourceDraftActions } from "./SourceReviewLog";
 
 type Filter = "pending" | "inherited" | "all" | "rendering-warnings";
+
+const FILTER_LABELS: Record<Filter, string> = {
+  pending: "待处理",
+  inherited: "已继承",
+  all: "全部",
+  "rendering-warnings": "渲染警告",
+};
+
+interface PendingNavigation {
+  destination: string;
+  run: () => void;
+}
 
 interface PageOperation {
   submitting: boolean;
@@ -140,6 +154,7 @@ function HiddenRenderPlaceholder() {
 }
 
 function PageRail({
+  railRef,
   pages,
   filter,
   selectedKey,
@@ -157,6 +172,7 @@ function PageRail({
   onBatchNote,
   onBatchExclude,
 }: {
+  railRef: RefObject<HTMLElement | null>;
   pages: CurationPage[];
   filter: Filter;
   selectedKey: string | null;
@@ -176,7 +192,7 @@ function PageRail({
 }) {
   const selectedCount = selectedForBatch.size;
   return (
-    <aside className="page-rail" aria-label="页清单">
+    <aside ref={railRef} className="page-rail" aria-label="页清单">
       <div className="page-rail-heading">
         <div>
           <h1>逐页策展</h1>
@@ -1536,6 +1552,10 @@ function InspectorPanel({
   onSourceReviewCompleted,
   onModalStateChange,
   onSourceDirtyChange,
+  onSourceTextDirtyChange,
+  onSourceImageDirtyChange,
+  onSourceDraftActionsChange,
+  onSourceOperationStateChange,
   onApproved,
   onExcluded,
   onReopened,
@@ -1573,6 +1593,10 @@ function InspectorPanel({
   onSourceReviewCompleted: () => void;
   onModalStateChange: (open: boolean) => void;
   onSourceDirtyChange: (dirty: boolean) => void;
+  onSourceTextDirtyChange: (dirty: boolean) => void;
+  onSourceImageDirtyChange: (dirty: boolean) => void;
+  onSourceDraftActionsChange: (actions: SourceDraftActions | null) => void;
+  onSourceOperationStateChange: (busy: boolean) => void;
   onApproved: () => Promise<void>;
   onExcluded: () => Promise<void>;
   onReopened: () => Promise<void>;
@@ -1608,6 +1632,10 @@ function InspectorPanel({
           arrivalAnnouncement={curationAnnouncement ?? announcement}
           statusRef={statusRef}
           onDirtyChange={onSourceDirtyChange}
+          onTextDirtyChange={onSourceTextDirtyChange}
+          onImageDirtyChange={onSourceImageDirtyChange}
+          onDraftActionsChange={onSourceDraftActionsChange}
+          onOperationStateChange={onSourceOperationStateChange}
           onApproved={onApproved}
           onExcluded={onExcluded}
           onReopened={onReopened}
@@ -1654,6 +1682,10 @@ export function CurationWorkbench({
   const [error, setError] = useState<string | null>(null);
   const [operations, setOperations] = useState<Record<string, PageOperation>>({});
   const [sourceDirty, setSourceDirty] = useState(false);
+  const [sourceTextDirty, setSourceTextDirty] = useState(false);
+  const [sourceImageDirty, setSourceImageDirty] = useState(false);
+  const [sourceOperationBusy, setSourceOperationBusy] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation | null>(null);
   const [curationAnnouncement, setCurationAnnouncement] = useState<string | null>(null);
   const [selectedCuration, setSelectedCuration] = useState<CurationState | null>(null);
   const [loadedCurationPageId, setLoadedCurationPageId] = useState<string | null>(null);
@@ -1680,10 +1712,16 @@ export function CurationWorkbench({
   const poll = useRef<AbortController | null>(null);
   const timer = useRef<number | null>(null);
   const statusRef = useRef<HTMLDivElement>(null);
+  const pageRailRef = useRef<HTMLElement>(null);
+  const navigationDialogRef = useRef<HTMLElement>(null);
+  const navigationStayRef = useRef<HTMLButtonElement>(null);
+  const sourceDraftActionsRef = useRef<SourceDraftActions | null>(null);
   const deleteDialogRef = useRef<HTMLElement>(null);
   const deleteSubmitRef = useRef<HTMLButtonElement>(null);
   const selectedKeyRef = useRef<string | null>(null);
   selectedKeyRef.current = selectedKey;
+  const pagesRef = useRef<CurationPage[]>([]);
+  pagesRef.current = pages;
 
   useEffect(() => {
     void retryPendingCurationTimingSamples();
@@ -1780,10 +1818,13 @@ export function CurationWorkbench({
 
   useEffect(() => {
     if (!onCommandStateChange) return;
-    const busy = Boolean(selectedOperation?.submitting || visualOperation || batchSubmitting);
+    const busy = Boolean(
+      selectedOperation?.submitting || visualOperation || batchSubmitting || sourceOperationBusy,
+    );
     const blockerCount = selectedCuration?.blockers.length ?? 0;
     onCommandStateChange({
-      navigation: pages.length > 1 && !captureEditing && !batchSubmitting && !sourceModalOpen,
+      navigation: pages.length > 1 && !captureEditing && !batchSubmitting && !sourceOperationBusy &&
+        !sourceModalOpen && !pendingNavigation,
       approve: Boolean(
         selected?.review_status === "pending" && selectedCuration?.can_approve &&
         approvalPathReady && !sourceDirty && !busy && !sourceModalOpen,
@@ -1792,13 +1833,15 @@ export function CurationWorkbench({
       reopen: Boolean(
         selected?.review_status && selected.review_status !== "pending" && !busy && !sourceModalOpen,
       ),
-      cancel: sourceModalOpen || captureEditing || selectedForBatch.size > 0,
+      cancel: sourceModalOpen || Boolean(pendingNavigation) || captureEditing || selectedForBatch.size > 0,
       status: loading
         ? "正在读取策展工作位"
         : busy
           ? "正在保存，快捷键已暂停"
           : sourceModalOpen
             ? "确认对话框已打开，可按 Esc 返回检查"
+          : pendingNavigation
+            ? "文字导航保护已打开，可按 Esc 留在当前页"
           : captureEditing
             ? "视觉对象编辑中，可按 Esc 放弃本地修改"
             : sourceDirty
@@ -1816,6 +1859,7 @@ export function CurationWorkbench({
     loading,
     onCommandStateChange,
     pages.length,
+    pendingNavigation,
     selected,
     selectedCuration?.blockers.length,
     selectedCuration?.can_approve,
@@ -1823,6 +1867,7 @@ export function CurationWorkbench({
     selectedOperation?.submitting,
     sourceDirty,
     sourceModalOpen,
+    sourceOperationBusy,
     visualOperation,
   ]);
 
@@ -1868,30 +1913,111 @@ export function CurationWorkbench({
     );
   }, []);
 
-  const confirmDiscard = useCallback(() => {
-    if (!sourceDirty) return true;
-    return window.confirm("当前页仍有未保存的来源修改。放弃这些修改并继续吗？");
-  }, [sourceDirty]);
+  const handleDraftActionsChange = useCallback((actions: SourceDraftActions | null) => {
+    sourceDraftActionsRef.current = actions;
+  }, []);
 
-  const handleSelect = useCallback((key: string) => {
-    if (captureEditing) return;
-    if (!confirmDiscard()) return;
+  const runPageSelection = useCallback((key: string) => {
+    if (!pagesRef.current.some((page) => pageKey(page) === key)) {
+      setCurationAnnouncement(
+        "原导航目标已变化；持久文字内容已恢复，请从页清单重新选择。",
+      );
+      window.requestAnimationFrame(() => {
+        pageRailRef.current?.querySelector<HTMLElement>(
+          ".page-row:not([disabled]), .filter-tabs button:not([disabled])",
+        )?.focus();
+      });
+      return;
+    }
     setSourceDirty(false);
+    setSourceTextDirty(false);
+    setSourceImageDirty(false);
     setCurationAnnouncement(null);
     setSelectedKey(key);
-  }, [captureEditing, confirmDiscard]);
+  }, []);
 
-  const handleFilter = useCallback((nextFilter: Filter) => {
-    if (captureEditing) return;
-    if (!confirmDiscard()) return;
+  const runFilterChange = useCallback((nextFilter: Filter) => {
     setSourceDirty(false);
+    setSourceTextDirty(false);
+    setSourceImageDirty(false);
     setCurationAnnouncement(null);
     setSelectedForBatch(new Set());
     setBatchReason("");
     setBatchNote("");
     setBatchAnnouncement(null);
     setFilter(nextFilter);
-  }, [captureEditing, confirmDiscard]);
+  }, []);
+
+  const requestNavigation = useCallback((intent: PendingNavigation) => {
+    if (captureEditing || sourceModalOpen || pendingNavigation || sourceOperationBusy) return;
+    if (sourceTextDirty) {
+      setPendingNavigation(intent);
+      return;
+    }
+    if (
+      sourceDirty &&
+      !window.confirm("当前页仍有未保存的图片来源修改。放弃这些修改并继续吗？")
+    ) return;
+    intent.run();
+  }, [
+    captureEditing,
+    pendingNavigation,
+    sourceDirty,
+    sourceModalOpen,
+    sourceOperationBusy,
+    sourceTextDirty,
+  ]);
+
+  const handleSelect = useCallback((key: string) => {
+    if (key === selectedKeyRef.current) return;
+    const target = pagesRef.current.find((page) => pageKey(page) === key);
+    if (!target) return;
+    requestNavigation({
+      destination: `转到第 ${String(target.page_number).padStart(2, "0")} 页`,
+      run: () => runPageSelection(key),
+    });
+  }, [requestNavigation, runPageSelection]);
+
+  const handleFilter = useCallback((nextFilter: Filter) => {
+    if (nextFilter === filter) return;
+    requestNavigation({
+      destination: `切换到“${FILTER_LABELS[nextFilter]}”筛选`,
+      run: () => runFilterChange(nextFilter),
+    });
+  }, [filter, requestNavigation, runFilterChange]);
+
+  const stayOnCurrentPage = useCallback(() => {
+    setPendingNavigation(null);
+    window.requestAnimationFrame(() => {
+      sourceDraftActionsRef.current?.restoreTextFocus();
+    });
+  }, []);
+
+  const discardTextAndNavigate = useCallback(() => {
+    if (!pendingNavigation) return;
+    const intent = pendingNavigation;
+    sourceDraftActionsRef.current?.discardText();
+    sourceDraftActionsRef.current?.discardImages();
+    setSourceDirty(false);
+    setSourceTextDirty(false);
+    setSourceImageDirty(false);
+    setPendingNavigation(null);
+    window.requestAnimationFrame(() => intent.run());
+  }, [pendingNavigation]);
+
+  useLayoutEffect(() => {
+    if (!pendingNavigation) return;
+    navigationStayRef.current?.focus();
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      stayOnCurrentPage();
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [pendingNavigation, stayOnCurrentPage]);
 
   const handleToggleBatch = useCallback((key: string, checked: boolean) => {
     setSelectedForBatch((current) => {
@@ -1905,7 +2031,11 @@ export function CurationWorkbench({
 
   useEffect(() => {
     const handleQueueKeyboard = (event: KeyboardEvent) => {
-      if (captureEditing || batchSubmitting || sourceModalOpen || isTextEntryTarget(event.target)) return;
+      if (
+        captureEditing || batchSubmitting || sourceModalOpen || sourceOperationBusy ||
+        pendingNavigation ||
+        isTextEntryTarget(event.target)
+      ) return;
       if (event.key === "Escape" && selectedForBatch.size > 0) {
         event.preventDefault();
         setSelectedForBatch(new Set());
@@ -1927,7 +2057,16 @@ export function CurationWorkbench({
     };
     document.addEventListener("keydown", handleQueueKeyboard);
     return () => document.removeEventListener("keydown", handleQueueKeyboard);
-  }, [batchSubmitting, captureEditing, handleSelect, pages, selectedForBatch.size, sourceModalOpen]);
+  }, [
+    batchSubmitting,
+    captureEditing,
+    handleSelect,
+    pages,
+    pendingNavigation,
+    selectedForBatch.size,
+    sourceModalOpen,
+    sourceOperationBusy,
+  ]);
 
   const updateOperation = useCallback(
     (targetKey: string, update: Partial<PageOperation>) => {
@@ -2148,7 +2287,7 @@ export function CurationWorkbench({
     setCurationAnnouncement("页面已重新打开，恢复为待处理并解锁编辑。");
   }, [filter, loadPages]);
 
-  const handleBatchExclude = useCallback(async () => {
+  const performBatchExclude = useCallback(async () => {
     if (!batchReason || batchSubmitting || selectedForBatch.size === 0) return;
     const selectedPages = pages.filter((page) => (
       selectedForBatch.has(pageKey(page)) && page.review_status === "pending" && page.page_id
@@ -2183,9 +2322,12 @@ export function CurationWorkbench({
       }
       const currentKey = selectedKeyRef.current;
       const currentPageId = pages.find((page) => pageKey(page) === currentKey)?.page_id;
-      const preferredNextKey = nextPendingKeyAfter(currentKey, new Set(result.excluded));
+      const currentWasExcluded = Boolean(currentPageId && result.excluded.includes(currentPageId));
+      const preferredNextKey = currentWasExcluded
+        ? nextPendingKeyAfter(currentKey, new Set(result.excluded))
+        : currentKey;
       const nextPages = await loadPages(filter, preferredNextKey);
-      if (currentPageId && result.excluded.includes(currentPageId)) {
+      if (currentWasExcluded) {
         const nextPending = nextPages.find((page) => (
           page.review_status === "pending" &&
           (preferredNextKey === null || pageKey(page) === preferredNextKey)
@@ -2202,6 +2344,19 @@ export function CurationWorkbench({
       setBatchSubmitting(false);
     }
   }, [batchNote, batchReason, batchSubmitting, filter, loadPages, nextPendingKeyAfter, pages, selectedForBatch]);
+
+  const handleBatchExclude = useCallback(() => {
+    const currentKey = selectedKeyRef.current;
+    const replacesCurrentPage = Boolean(currentKey && selectedForBatch.has(currentKey));
+    if (!sourceTextDirty || !replacesCurrentPage) {
+      void performBatchExclude();
+      return;
+    }
+    requestNavigation({
+      destination: "提交批量排除并离开当前页",
+      run: () => void performBatchExclude(),
+    });
+  }, [performBatchExclude, requestNavigation, selectedForBatch, sourceTextDirty]);
 
   const applyVisualMutation = useCallback((result: {
     curation: CurationState;
@@ -2371,16 +2526,19 @@ export function CurationWorkbench({
   return (
     <>
     <main
-      className={`curation-workspace ${captureEditing ? "has-protected-operation" : ""}`}
+      className={`curation-workspace ${captureEditing || pendingNavigation ? "has-protected-operation" : ""}`}
       aria-busy={loading}
-      inert={deleteCandidate ? true : undefined}
+      inert={deleteCandidate || pendingNavigation ? true : undefined}
     >
       <PageRail
+        railRef={pageRailRef}
         pages={pages}
         filter={filter}
         selectedKey={selectedKey}
         versionWarningSummary={selected?.version_rendering_warnings}
-        interactionLocked={captureEditing}
+        interactionLocked={
+          captureEditing || sourceModalOpen || sourceOperationBusy || Boolean(pendingNavigation)
+        }
         selectedForBatch={selectedForBatch}
         batchReason={batchReason}
         batchNote={batchNote}
@@ -2444,11 +2602,67 @@ export function CurationWorkbench({
         }}
         onModalStateChange={setSourceModalOpen}
         onSourceDirtyChange={setSourceDirty}
+        onSourceTextDirtyChange={setSourceTextDirty}
+        onSourceImageDirtyChange={setSourceImageDirty}
+        onSourceDraftActionsChange={handleDraftActionsChange}
+        onSourceOperationStateChange={setSourceOperationBusy}
         onApproved={handleApproved}
         onExcluded={handleExcluded}
         onReopened={handleReopened}
       />
     </main>
+    {pendingNavigation ? (
+      <div className="dialog-backdrop navigation-guard-backdrop">
+        <section
+          ref={navigationDialogRef}
+          className="navigation-guard-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="navigation-guard-heading"
+          aria-describedby="navigation-guard-copy"
+          onKeyDown={(event) => {
+            if (event.key !== "Tab") return;
+            const controls = Array.from(
+              navigationDialogRef.current?.querySelectorAll<HTMLButtonElement>(
+                "button:not([disabled])",
+              ) ?? [],
+            );
+            if (!controls.length) return;
+            const first = controls[0];
+            const last = controls[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
+        >
+          <header>
+            <span aria-hidden="true">未保存</span>
+            <div>
+              <h2 id="navigation-guard-heading">放弃当前页的文字修改？</h2>
+              <p id="navigation-guard-copy">
+                这些文字修改只存在于本地。
+                {sourceImageDirty
+                  ? " 当前页另有未保存的图片来源修改；离开时也会恢复其持久状态。"
+                  : ""}
+                放弃后将恢复持久文字内容，再{pendingNavigation.destination}。
+              </p>
+            </div>
+          </header>
+          <div className="navigation-guard-actions">
+            <button ref={navigationStayRef} type="button" onClick={stayOnCurrentPage}>
+              留在当前页
+            </button>
+            <button type="button" className="is-danger" onClick={discardTextAndNavigate}>
+              放弃修改并离开
+            </button>
+          </div>
+        </section>
+      </div>
+    ) : null}
     {deleteCandidate ? (
       <div
         className="dialog-backdrop capture-delete-backdrop"

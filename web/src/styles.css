@@ -3103,6 +3103,109 @@ kbd {
   background: rgb(8 12 15 / 64%);
 }
 
+.navigation-guard-backdrop {
+  background: rgb(6 10 12 / 76%);
+}
+
+.navigation-guard-dialog {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 20px;
+  border-radius: 10px;
+  color: var(--log-ink);
+  background: #f6f7f7;
+  box-shadow: 0 28px 64px rgb(0 0 0 / 48%);
+}
+
+.navigation-guard-dialog > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.navigation-guard-dialog > header > span {
+  padding: 3px 8px;
+  border: 1px solid #c58a22;
+  border-radius: 999px;
+  color: #5c4000;
+  background: #fff0c9;
+  font: 650 11px/1.45 var(--ui-font);
+}
+
+.navigation-guard-dialog h2,
+.navigation-guard-dialog p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.navigation-guard-dialog h2 {
+  font-size: 17px;
+  line-height: 1.45;
+  letter-spacing: -0.02em;
+}
+
+.navigation-guard-dialog p {
+  margin-top: 7px;
+  max-width: 65ch;
+  color: #59666d;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.navigation-guard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.navigation-guard-actions button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #889298;
+  border-radius: 7px;
+  color: #263239;
+  background: #e4e8e9;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.navigation-guard-actions button:hover {
+  background: #d9dfe1;
+}
+
+.navigation-guard-actions button.is-danger {
+  border-color: var(--exclusion-red-deep);
+  color: white;
+  background: var(--exclusion-red-deep);
+}
+
+.navigation-guard-actions button.is-danger:hover {
+  background: #74251f;
+}
+
+@media (max-width: 640px) {
+  .navigation-guard-dialog > header {
+    grid-template-columns: 1fr;
+  }
+
+  .navigation-guard-dialog > header > span {
+    justify-self: start;
+  }
+
+  .navigation-guard-actions {
+    flex-direction: column;
+  }
+
+  .navigation-guard-actions button {
+    width: 100%;
+  }
+}
+
 .reopen-page-dialog {
   width: min(420px, calc(100vw - 32px));
   padding: 20px;

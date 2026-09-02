@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1300,10 +1300,7 @@ describe("来源文字审核工作台", () => {
     expect(document.querySelector("[data-visual-ref='visual-b']")).not.toBeNull();
   });
 
-  it("切换页面前明确询问是否放弃未保存的来源修改", async () => {
-    const confirm = vi.spyOn(window, "confirm")
-      .mockReturnValueOnce(false)
-      .mockReturnValueOnce(true);
+  it("用可访问对话框保护跨页文字草稿并恢复编辑焦点", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url === "/api/v1/app/bootstrap") {
@@ -1343,16 +1340,220 @@ describe("来源文字审核工作台", () => {
     const secondRow = screen.getByRole("button", {
       name: "第 2 页，第二页来源标题，待处理",
     });
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "整页排除原因" }),
+      "irrelevant",
+    );
+    expect(screen.getByRole("button", { name: "排除并转到下一待处理页" })).toBeDisabled();
 
     await userEvent.click(secondRow);
-    expect(confirm).toHaveBeenCalledTimes(1);
+    const dialog = screen.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+    expect(dialog).toHaveTextContent("转到第 02 页");
+    expect(within(dialog).getAllByRole("button")).toHaveLength(2);
+    const stay = within(dialog).getByRole("button", { name: "留在当前页" });
+    const discard = within(dialog).getByRole("button", { name: "放弃修改并离开" });
+    await waitFor(() => expect(stay).toHaveFocus());
+    await userEvent.tab();
+    expect(discard).toHaveFocus();
+    await userEvent.tab();
+    expect(stay).toHaveFocus();
+
+    fireEvent.mouseDown(dialog.parentElement!);
+    expect(screen.getByRole("dialog", { name: "放弃当前页的文字修改？" })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "放弃当前页的文字修改？" })).not.toBeInTheDocument();
     expect(title).toHaveValue("公开来源标题（本地修改）");
+    await waitFor(() => expect(title).toHaveFocus());
 
     await userEvent.click(secondRow);
-    expect(confirm).toHaveBeenCalledTimes(2);
+    await userEvent.click(screen.getByRole("button", { name: "放弃修改并离开" }));
     await waitFor(() => expect(
       screen.getAllByText("第二页来源标题").length,
     ).toBeGreaterThan(0));
+    expect(screen.queryByText("公开来源标题（本地修改）")).not.toBeInTheDocument();
+  });
+
+  it("文字核对请求进行中锁住页清单、筛选与方向键导航", async () => {
+    let resolveTextReview!: (response: Response) => void;
+    const delayedTextReview = new Promise<Response>((resolve) => {
+      resolveTextReview = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("review_status=pending")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [pendingPage, secondPage] }), { status: 200 }),
+        );
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: originalSource,
+          curation: curationState(null),
+        }), { status: 200 }));
+      }
+      if (url.endsWith("/curation/text-review") && init?.method === "POST") {
+        return delayedTextReview;
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑标题 1" }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "标题 1 当前编辑值" }),
+      "（等待保存）",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "保存并确认修改" }));
+
+    const secondRow = screen.getByRole("button", {
+      name: "第 2 页，第二页来源标题，待处理",
+    });
+    await waitFor(() => expect(secondRow).toBeDisabled());
+    expect(screen.getByRole("button", { name: "全部" })).toBeDisabled();
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(screen.queryByRole("dialog", { name: "放弃当前页的文字修改？" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "标题 1 当前编辑值" }))
+      .toHaveValue("公开来源标题（等待保存）");
+
+    await act(async () => {
+      resolveTextReview(new Response(JSON.stringify({
+        error: {
+          code: "curation_text_review_failed",
+          message: "模拟延迟保存失败；持久状态未改变。",
+        },
+      }), { status: 503 }));
+      await delayedTextReview;
+    });
+    expect(await screen.findByText(
+      "模拟延迟保存失败；持久审核状态未改变，本地文字修改仍保留。",
+    )).toBeInTheDocument();
+    await waitFor(() => expect(secondRow).toBeEnabled());
+  });
+
+  it("文字与图片草稿并存时由同一对话框保留或一并恢复", async () => {
+    const source = {
+      ...originalSource,
+      images: [{
+        reference_index: 0,
+        alt_text: "公开流程图",
+        media_type: "image/png",
+        origin_part: "ppt/media/flow.png",
+      }],
+    };
+    const confirmedSnapshot = {
+      snapshot_id: "snapshot-confirmed",
+      source_snapshot_id: null,
+      source_content: source,
+      created_by: "operator-zhang",
+      created_at: "2026-08-24T18:00:00+00:00",
+      source_confirmation: {
+        actor_id: "operator-zhang",
+        confirmed_at: "2026-08-24T18:00:00+00:00",
+      },
+      source_review: null,
+      image_source_decisions: [],
+    };
+    const imageItem = {
+      ...source.images[0],
+      source_ref: "source-1",
+      position: 0,
+      object_sha256: "a".repeat(64),
+      size_bytes: 2048,
+      integrity: "verified",
+      duplicate_object: false,
+      preview_url: "/api/v1/pages/page-1/source-images/source-1",
+      disposition: null,
+      summary: null,
+      ignore_reason: null,
+      ignore_note: null,
+      visual_ref: null,
+      decided_by: null,
+      decided_at: null,
+    };
+    const imageCuration = {
+      current_snapshot: confirmedSnapshot,
+      image_sources: { total: 1, unresolved: 1, items: [imageItem] },
+      chunk_body: { nonempty: true },
+      blockers: [
+        { code: "source_review_incomplete", message: "来源审核尚未完成。" },
+        {
+          code: "image_disposition_required",
+          message: "图片来源 01：尚未选择保留或忽略。",
+          source_ref: "source-1",
+        },
+      ],
+      can_confirm_source: true,
+      can_complete_source_review: false,
+      can_approve: false,
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.endsWith("review_status=pending")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [pendingPage, secondPage] }), { status: 200 }),
+        );
+      }
+      if ((url === "/api/v1/pages/page-1" || url === "/api/v1/pages/page-2") && !init?.method) {
+        const second = url.endsWith("page-2");
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: second ? "page-2" : "page-1",
+          page_number: second ? 2 : 1,
+          review_status: "pending",
+          source_content: second
+            ? { ...originalSource, titles: ["第二页来源标题"] }
+            : source,
+          curation: second ? curationState(null) : imageCuration,
+        }), { status: 200 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+    const confirm = vi.spyOn(window, "confirm");
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("radio", { name: "保留原始图片" }));
+    const imageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
+    await userEvent.type(imageSummary, "尚未保存的图片说明");
+    await userEvent.click(screen.getByRole("button", { name: "展开文字核对" }));
+    await userEvent.click(screen.getByRole("button", { name: "修改文字" }));
+    await userEvent.click(screen.getByRole("button", { name: "编辑标题 1" }));
+    const title = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
+    await userEvent.type(title, "（文字草稿）");
+    const secondRow = screen.getByRole("button", {
+      name: "第 2 页，第二页来源标题，待处理",
+    });
+
+    await userEvent.click(secondRow);
+    const dialog = screen.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+    expect(dialog).toHaveTextContent("另有未保存的图片来源修改");
+    await userEvent.keyboard("{Escape}");
+    expect(title).toHaveValue("公开来源标题（文字草稿）");
+    await waitFor(() => expect(title).toHaveFocus());
+    await userEvent.keyboard("{Escape}");
+    expect(await screen.findByRole("textbox", { name: "图片来源 01 summary" }))
+      .toHaveValue("尚未保存的图片说明");
+
+    await userEvent.click(screen.getByRole("button", { name: "编辑标题 1" }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "标题 1 当前编辑值" }),
+      "（再次修改）",
+    );
+    await userEvent.click(secondRow);
+    await userEvent.click(screen.getByRole("button", { name: "放弃修改并离开" }));
+
+    await waitFor(() => expect(screen.getAllByText("第二页来源标题").length).toBeGreaterThan(0));
+    expect(screen.queryByText("尚未保存的图片说明")).not.toBeInTheDocument();
+    expect(screen.queryByText("公开来源标题（再次修改）")).not.toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("文字核对失败时保留全部本地草稿并把焦点送回恢复动作", async () => {
@@ -1397,7 +1598,7 @@ describe("来源文字审核工作台", () => {
     await userEvent.click(submit);
 
     expect(await screen.findByText(
-      "文字核对未能提交；持久状态未改变。 本地文字修改仍保留。",
+      "文字核对未能提交；持久审核状态未改变，本地文字修改仍保留。",
     )).toBeInTheDocument();
     expect(screen.getByText("失败后保留的标题")).toBeInTheDocument();
     expect(body).toHaveValue("失败后保留的正文");

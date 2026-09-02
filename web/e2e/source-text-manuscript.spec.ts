@@ -133,6 +133,91 @@ async function mockCurationApi(
   });
 }
 
+async function mockNavigationGuardApi(page: Page) {
+  const pageSource = (pageNumber: number) => ({
+    ...source,
+    titles: [`第 ${pageNumber} 页持久标题`],
+    body: [`第 ${pageNumber} 页持久正文`],
+  });
+  let pages = [1, 2].map((pageNumber) => ({
+    ...pageSummary,
+    page_id: `page-${pageNumber}`,
+    chunk_id: `chunk-${pageNumber}`,
+    page_number: pageNumber,
+    title: pageSource(pageNumber).titles[0],
+  }));
+  let batchRequestCount = 0;
+
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "sendBeacon", {
+      configurable: true,
+      value: () => true,
+    });
+  });
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    if (path === "/api/v1/app/bootstrap") {
+      await route.fulfill({
+        json: {
+          actor: { actor_id: "operator-browser", display_name: "操作者 operator-browser" },
+          runways: [
+            { id: "pending", label: "待处理", documents: [] },
+            { id: "processing", label: "处理中", documents: [] },
+            { id: "curatable", label: "可策展", documents: [] },
+          ],
+        },
+      });
+      return;
+    }
+    if (path === "/api/v1/curation/pages") {
+      const selectedFilter = url.searchParams.get("review_status");
+      await route.fulfill({
+        json: {
+          pages: selectedFilter === "all"
+            ? pages
+            : pages.filter((item) => item.review_status === selectedFilter),
+        },
+      });
+      return;
+    }
+    const detail = path.match(/^\/api\/v1\/pages\/page-(\d+)$/);
+    if (detail && request.method() === "GET") {
+      const pageNumber = Number(detail[1]);
+      await route.fulfill({
+        json: {
+          page_id: `page-${pageNumber}`,
+          page_number: pageNumber,
+          review_status: "pending",
+          source_content: pageSource(pageNumber),
+          curation: curation(null),
+        },
+      });
+      return;
+    }
+    if (path === "/api/v1/pages/batch-exclude" && request.method() === "POST") {
+      batchRequestCount += 1;
+      const payload = request.postDataJSON() as { page_ids: string[] };
+      pages = pages.map((item) => payload.page_ids.includes(item.page_id)
+        ? { ...item, review_status: "excluded" }
+        : item);
+      await route.fulfill({
+        json: {
+          requested: payload.page_ids.length,
+          excluded: payload.page_ids,
+          failed: [],
+          complete: true,
+        },
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { error: { message: `未覆盖的请求：${path}` } } });
+  });
+
+  return { batchRequestCount: () => batchRequestCount };
+}
+
 test("长页核对稿支持完整阅读、原位多块草稿与组合提交", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   let submitted: unknown = null;
@@ -197,6 +282,74 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
   });
 });
 
+test("页点击、方向键、筛选与批量排除共用键盘可达的文字导航保护", async ({ page }) => {
+  const api = await mockNavigationGuardApi(page);
+  await page.goto("/curation");
+
+  await page.getByRole("button", { name: "编辑标题 1" }).click();
+  const editor = page.getByRole("textbox", { name: "标题 1 当前编辑值" });
+  await editor.fill("只存在于第 1 页的本地草稿");
+  const platformLeaveProtected = await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(platformLeaveProtected).toBe(true);
+
+  await page.getByRole("button", { name: /第 2 页，第 2 页持久标题，待处理/ }).click();
+  let dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await expect(dialog).toContainText("转到第 02 页");
+  await expect(dialog.getByRole("button")).toHaveCount(2);
+  await expect(dialog.getByRole("button", { name: "留在当前页" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(editor).toHaveValue("只存在于第 1 页的本地草稿");
+  await expect(editor).toBeFocused();
+
+  await editor.blur();
+  const currentRow = page.getByRole("button", { name: /第 1 页，第 1 页持久标题，待处理/ });
+  await currentRow.focus();
+  await page.keyboard.press("ArrowRight");
+  dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await expect(dialog).toContainText("转到第 02 页");
+  await page.keyboard.press("Escape");
+  await expect(editor).toHaveValue("只存在于第 1 页的本地草稿");
+
+  await page.getByRole("button", { name: "全部" }).click();
+  dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await expect(dialog).toContainText("切换到“全部”筛选");
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("checkbox", { name: "选择第 1 页，第 1 页持久标题" }).check();
+  const batch = page.getByRole("region", { name: "批量排除" });
+  await batch.getByRole("combobox", { name: "统一排除原因" }).selectOption("duplicate");
+  await batch.getByRole("button", { name: "批量排除 1 页" }).click();
+  dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await expect(dialog).toContainText("提交批量排除并离开当前页");
+  await expect.poll(api.batchRequestCount).toBe(0);
+  await page.keyboard.press("Enter");
+  await expect(editor).toHaveValue("只存在于第 1 页的本地草稿");
+
+  await batch.getByRole("button", { name: "批量排除 1 页" }).click();
+  await expect(page.getByRole("button", { name: "留在当前页" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "放弃修改并离开" })).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect.poll(api.batchRequestCount).toBe(1);
+  await expect(page.getByRole("region", { name: "标题与正文核对稿" }))
+    .toContainText("第 2 页持久标题");
+  await expect(page.getByText("只存在于第 1 页的本地草稿", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("checkbox", { name: "选择第 2 页，第 2 页持久标题" }).check();
+  const remainingBatch = page.getByRole("region", { name: "批量排除" });
+  await remainingBatch.getByRole("combobox", { name: "统一排除原因" }).selectOption("duplicate");
+  await remainingBatch.getByRole("button", { name: "批量排除 1 页" }).click();
+  await expect(page.getByText("待处理队列为空")).toBeVisible();
+  await page.getByRole("button", { name: "查看全部" }).click();
+  await expect(page.getByRole("button", { name: /第 1 页，第 1 页持久标题，已排除/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /第 2 页，第 2 页持久标题，已排除/ })).toBeVisible();
+});
+
 test("1280 屏幕的 200% 缩放下转为单列且无页面级横向溢出", async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 900 });
   await mockCurationApi(page);
@@ -220,7 +373,20 @@ test("1280 屏幕的 200% 缩放下转为单列且无页面级横向溢出", asy
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "文字一致，确认" })).toBeFocused();
   await page.getByRole("button", { name: "编辑正文 11" }).click();
-  await expect(page.getByRole("textbox", { name: "正文 11 当前编辑值" })).toBeFocused();
+  const lastEditor = page.getByRole("textbox", { name: "正文 11 当前编辑值" });
+  await expect(lastEditor).toBeFocused();
+  await lastEditor.fill("200% 缩放下仍受保护的本地草稿");
+  await page.getByRole("button", { name: "全部" }).click();
+  const dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "留在当前页" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "放弃修改并离开" })).toBeVisible();
+  const bounds = await dialog.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.y).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(640);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(900);
 });
 
 test("空标题与正文需要显式确认，并在成功后留下零计数摘要", async ({ page }) => {

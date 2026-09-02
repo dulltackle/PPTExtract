@@ -1,4 +1,12 @@
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   approveCurationPage,
@@ -38,6 +46,12 @@ interface ActiveTextEditor {
   kind: SourceTextKind;
   index: number;
   baseline: string;
+}
+
+export interface SourceDraftActions {
+  discardText: () => void;
+  discardImages: () => void;
+  restoreTextFocus: () => void;
 }
 
 const IGNORE_REASONS: Array<{ value: ImageIgnoreReason; label: string }> = [
@@ -247,6 +261,10 @@ export function SourceReviewLog({
   arrivalAnnouncement,
   statusRef,
   onDirtyChange,
+  onTextDirtyChange,
+  onImageDirtyChange,
+  onDraftActionsChange,
+  onOperationStateChange,
   onApproved,
   onExcluded,
   onReopened,
@@ -269,6 +287,10 @@ export function SourceReviewLog({
   arrivalAnnouncement: string | null;
   statusRef: RefObject<HTMLDivElement | null>;
   onDirtyChange: (dirty: boolean) => void;
+  onTextDirtyChange: (dirty: boolean) => void;
+  onImageDirtyChange: (dirty: boolean) => void;
+  onDraftActionsChange: (actions: SourceDraftActions | null) => void;
+  onOperationStateChange: (busy: boolean) => void;
   onApproved: () => Promise<void>;
   onExcluded: () => Promise<void>;
   onReopened: () => Promise<void>;
@@ -335,6 +357,18 @@ export function SourceReviewLog({
   const noiseTriggerRef = useRef<HTMLElement | null>(null);
   const imageChoiceRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const imageFieldRefs = useRef<Record<string, HTMLElement | null>>({});
+  const lastModifiedTextKeyRef = useRef<string | null>(null);
+  const textDraftNavigationRef = useRef<{
+    activeTextEditor: ActiveTextEditor | null;
+    savedSource: SourceContent | null;
+    sourceConfirmed: boolean;
+    imageSources: CurationImageSource[];
+  }>({
+    activeTextEditor: null,
+    savedSource: null,
+    sourceConfirmed: false,
+    imageSources: [],
+  });
 
   useEffect(() => {
     onModalStateChange(showReopen || noiseCandidate !== null);
@@ -371,6 +405,7 @@ export function SourceReviewLog({
         setTextExpanded(!curation.current_snapshot?.source_confirmation);
         setTextEditingEnabled(!curation.current_snapshot?.source_confirmation);
         setActiveTextEditor(null);
+        lastModifiedTextKeyRef.current = null;
         setExclusionReason("");
         setExclusionNote("");
         setShowReopen(false);
@@ -413,6 +448,53 @@ export function SourceReviewLog({
   const imageDirty = imageDirtyRefs.length > 0;
   const dirty = textDirty || imageDirty;
 
+  textDraftNavigationRef.current = {
+    activeTextEditor,
+    savedSource,
+    sourceConfirmed: Boolean(curation?.current_snapshot?.source_confirmation),
+    imageSources: curation?.image_sources.items ?? [],
+  };
+
+  const discardTextDraft = useCallback(() => {
+    const { savedSource: persisted, sourceConfirmed } = textDraftNavigationRef.current;
+    if (!persisted) return;
+    setTitles([...persisted.titles]);
+    setBody([...persisted.body]);
+    setActiveTextEditor(null);
+    setTextEditingEnabled(!sourceConfirmed);
+    lastModifiedTextKeyRef.current = null;
+  }, []);
+
+  const restoreTextDraftFocus = useCallback(() => {
+    const active = textDraftNavigationRef.current.activeTextEditor;
+    const key = active
+      ? `${active.kind}-${active.index}`
+      : lastModifiedTextKeyRef.current;
+    if (key) setTextExpanded(true);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      if (document.querySelector("[aria-modal='true']")) return;
+      const target = active
+        ? textEditorRefs.current[key ?? ""]
+        : key
+          ? textEditButtonRefs.current[key]
+          : firstFieldRef.current;
+      target?.focus();
+    }));
+  }, []);
+
+  const discardImageDrafts = useCallback(() => {
+    setDrafts(imageDrafts(textDraftNavigationRef.current.imageSources));
+  }, []);
+
+  useEffect(() => {
+    onDraftActionsChange({
+      discardText: discardTextDraft,
+      discardImages: discardImageDrafts,
+      restoreTextFocus: restoreTextDraftFocus,
+    });
+    return () => onDraftActionsChange(null);
+  }, [discardImageDrafts, discardTextDraft, onDraftActionsChange, restoreTextDraftFocus]);
+
   useEffect(() => {
     onDirtyChange(dirty);
     const warnBeforeLeave = (event: BeforeUnloadEvent) => {
@@ -426,6 +508,16 @@ export function SourceReviewLog({
       onDirtyChange(false);
     };
   }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    onTextDirtyChange(textDirty);
+    return () => onTextDirtyChange(false);
+  }, [onTextDirtyChange, textDirty]);
+
+  useEffect(() => {
+    onImageDirtyChange(imageDirty);
+    return () => onImageDirtyChange(false);
+  }, [imageDirty, onImageDirtyChange]);
 
   const blockers = useMemo<CurationBlocker[]>(() => {
     if (!curation) return [];
@@ -457,6 +549,11 @@ export function SourceReviewLog({
   const snapshot = curation?.current_snapshot ?? null;
   const busy = operation !== null;
   const pending = (detail?.review_status ?? page.review_status) === "pending";
+
+  useLayoutEffect(() => {
+    onOperationStateChange(busy);
+    return () => onOperationStateChange(false);
+  }, [busy, onOperationStateChange]);
 
   const textBlockKey = (kind: SourceTextKind, index: number) => `${kind}-${index}`;
   const textBlockLabel = (kind: SourceTextKind, index: number) => (
@@ -554,6 +651,7 @@ export function SourceReviewLog({
     setBody(effective.body);
     setTextEditingEnabled(!refreshedCuration.current_snapshot?.source_confirmation);
     setActiveTextEditor(null);
+    lastModifiedTextKeyRef.current = null;
     setDrafts(imageDrafts(refreshedCuration.image_sources.items));
     onDetailLoaded(normalizedDetail);
     onCurationChange(refreshedCuration);
@@ -687,11 +785,12 @@ export function SourceReviewLog({
         onSourceReviewCompleted();
       }
     } catch (cause) {
-      setAnnouncement(
-        cause instanceof OperatorError
-          ? `${cause.message} 本地文字修改仍保留。`
-          : "文字核对未能提交；持久状态未改变，本地文字修改仍保留。",
-      );
+      const reason = cause instanceof OperatorError
+        ? cause.message
+          .replace(/[；。]?\s*持久(?:审核)?状态未改变。?\s*$/, "")
+          .replace(/[；。]\s*$/, "")
+        : "文字核对未能提交";
+      setAnnouncement(`${reason}；持久审核状态未改变，本地文字修改仍保留。`);
       window.requestAnimationFrame(() => textReviewRef.current?.focus());
     } finally {
       setOperation(null);
@@ -852,7 +951,7 @@ export function SourceReviewLog({
   }, [approvalPathReady, busy, curation?.can_approve, dirty, onApproved, page.page_id, snapshot]);
 
   const handleExclude = useCallback(async () => {
-    if (!page.page_id || !pending || !exclusionReason || busy) return;
+    if (!page.page_id || !pending || !exclusionReason || dirty || busy) return;
     setOperation("exclude");
     setAnnouncement("正在记录整页排除原因并冻结当前页面…");
     try {
@@ -877,7 +976,7 @@ export function SourceReviewLog({
     } finally {
       setOperation(null);
     }
-  }, [busy, exclusionNote, exclusionReason, onExcluded, page.page_id, pending]);
+  }, [busy, dirty, exclusionNote, exclusionReason, onExcluded, page.page_id, pending]);
 
   const closeReopenDialog = useCallback(() => {
     setShowReopen(false);
@@ -1074,6 +1173,7 @@ export function SourceReviewLog({
                 disabled={busy}
                 onChange={(event) => {
                   const value = event.target.value;
+                  lastModifiedTextKeyRef.current = key;
                   if (kind === "title") {
                     setTitles((current) => current.map(
                       (item, candidate) => candidate === index ? value : item,
@@ -1862,7 +1962,7 @@ export function SourceReviewLog({
               <button
                 type="button"
                 className="is-danger"
-                disabled={busy || !exclusionReason}
+                disabled={busy || dirty || !exclusionReason}
                 onClick={() => void handleExclude()}
               >
                 {operation === "exclude" ? "正在排除" : "排除并转到下一待处理页"}
