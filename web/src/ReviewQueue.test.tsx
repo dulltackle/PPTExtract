@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -81,7 +81,7 @@ describe("审核队列、排除与重开", () => {
     const pages = [page(1, "pending"), page(2, "pending")];
     const samples: Array<Record<string, unknown>> = [];
     let monotonicNow = 100;
-    vi.spyOn(performance, "now").mockImplementation(() => monotonicNow);
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => monotonicNow);
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url === "/api/v1/app/bootstrap") {
@@ -110,7 +110,9 @@ describe("审核队列、排除与重开", () => {
     });
 
     render(<App />);
-    expect(await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" })).toHaveValue("队列页 1");
+    expect(await screen.findByRole("button", { name: "编辑标题 1" })).toBeInTheDocument();
+    expect(screen.getAllByText("队列页 1").length).toBeGreaterThan(0);
+    await waitFor(() => expect(performanceNow).toHaveBeenCalled());
     monotonicNow = 1_350;
     window.dispatchEvent(new Event("pagehide"));
     await waitFor(() => expect(samples).toHaveLength(1));
@@ -241,7 +243,7 @@ describe("审核队列、排除与重开", () => {
     await userEvent.keyboard("r");
     await userEvent.click(await screen.findByRole("button", { name: "确认重新打开" }));
     expect(await screen.findByText("页面已重新打开，恢复为待处理并解锁编辑。")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "编辑标题 1" })).toBeEnabled();
   });
 
   it("批量排除部分冲突时只保留未处理页的选择与统一原因", async () => {
@@ -321,12 +323,18 @@ describe("审核队列、排除与重开", () => {
     });
 
     render(<App />);
-    const title = await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" });
+    await userEvent.click(await screen.findByRole("button", { name: "编辑标题 1" }));
+    const title = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
     expect(title).toHaveValue("队列页 1");
     title.blur();
-    await userEvent.keyboard("{ArrowRight}");
-    expect(await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" })).toHaveValue("队列页 2");
-    const secondTitle = screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" });
+    const selectedRow = screen.getByRole("button", { name: /第 1 页，队列页 1，待处理/ });
+    selectedRow.focus();
+    fireEvent.keyDown(selectedRow, { key: "ArrowRight" });
+    await waitFor(() => expect(within(
+      screen.getByRole("region", { name: "标题与正文核对稿" }),
+    ).getByText("队列页 2")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "编辑标题 1" }));
+    const secondTitle = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
     secondTitle.focus();
     await userEvent.keyboard("{ArrowLeft}");
     expect(secondTitle).toHaveValue("队列页 2");
@@ -378,7 +386,8 @@ describe("审核队列、排除与重开", () => {
     });
 
     render(<App />);
-    expect(await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" })).toHaveValue("队列页 2");
+    const initialManuscript = await screen.findByRole("region", { name: "标题与正文核对稿" });
+    expect(within(initialManuscript).getByText("队列页 2")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("checkbox", { name: "选择第 2 页，队列页 2" }));
     expect(screen.getByRole("region", { name: "批量排除" })).toHaveTextContent("已选 1 页");
     await userEvent.selectOptions(
@@ -387,7 +396,9 @@ describe("审核队列、排除与重开", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "排除并转到下一待处理页" }));
 
-    expect(await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" })).toHaveValue("队列页 3");
+    await waitFor(() => expect(within(
+      screen.getByRole("region", { name: "标题与正文核对稿" }),
+    ).getByText("队列页 3")).toBeInTheDocument());
     expect(screen.queryByRole("region", { name: "批量排除" })).not.toBeInTheDocument();
   });
 });

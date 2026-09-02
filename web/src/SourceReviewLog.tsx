@@ -32,6 +32,14 @@ interface ImageDraft {
   ignoreNote: string;
 }
 
+type SourceTextKind = "title" | "body";
+
+interface ActiveTextEditor {
+  kind: SourceTextKind;
+  index: number;
+  baseline: string;
+}
+
 const IGNORE_REASONS: Array<{ value: ImageIgnoreReason; label: string }> = [
   { value: "decorative", label: "装饰性内容" },
   { value: "duplicate_source", label: "重复来源" },
@@ -297,6 +305,8 @@ export function SourceReviewLog({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryRevision, setRetryRevision] = useState(0);
   const [textExpanded, setTextExpanded] = useState(true);
+  const [textEditingEnabled, setTextEditingEnabled] = useState(true);
+  const [activeTextEditor, setActiveTextEditor] = useState<ActiveTextEditor | null>(null);
   const [operation, setOperation] = useState<
     "text-review" | "image" | "review" | "approve" | "exclude" | "reopen" |
     "noise-preview" | "noise-confirm" | "noise-revoke" | null
@@ -309,7 +319,9 @@ export function SourceReviewLog({
   const [noiseCandidate, setNoiseCandidate] = useState<RepeatedFooterNoiseCandidate | null>(null);
   const [noiseAcknowledged, setNoiseAcknowledged] = useState(false);
   const [noiseNote, setNoiseNote] = useState("");
-  const firstFieldRef = useRef<HTMLTextAreaElement>(null);
+  const firstFieldRef = useRef<HTMLButtonElement>(null);
+  const textEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const textEditButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const textReviewRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
@@ -357,6 +369,8 @@ export function SourceReviewLog({
         setPreviewFailures({});
         setPreviewRevisions({});
         setTextExpanded(true);
+        setTextEditingEnabled(!curation.current_snapshot?.source_confirmation);
+        setActiveTextEditor(null);
         setExclusionReason("");
         setExclusionNote("");
         setShowReopen(false);
@@ -444,6 +458,49 @@ export function SourceReviewLog({
   const busy = operation !== null;
   const pending = (detail?.review_status ?? page.review_status) === "pending";
 
+  const textBlockKey = (kind: SourceTextKind, index: number) => `${kind}-${index}`;
+  const textBlockLabel = (kind: SourceTextKind, index: number) => (
+    kind === "title" ? `标题 ${index + 1}` : `正文 ${String(index + 1).padStart(2, "0")}`
+  );
+  const textBlockValue = (kind: SourceTextKind, index: number) => (
+    kind === "title" ? titles[index] ?? "" : body[index] ?? ""
+  );
+
+  const openTextEditor = (kind: SourceTextKind, index: number) => {
+    if (!pending || busy || !textEditingEnabled) return;
+    const key = textBlockKey(kind, index);
+    setActiveTextEditor({ kind, index, baseline: textBlockValue(kind, index) });
+    window.requestAnimationFrame(() => textEditorRefs.current[key]?.focus());
+  };
+
+  const cancelTextEditor = () => {
+    if (!activeTextEditor) return;
+    const { kind, index, baseline } = activeTextEditor;
+    if (kind === "title") {
+      setTitles((current) => current.map(
+        (item, candidate) => candidate === index ? baseline : item,
+      ));
+    } else {
+      setBody((current) => current.map(
+        (item, candidate) => candidate === index ? baseline : item,
+      ));
+    }
+    const key = textBlockKey(kind, index);
+    setActiveTextEditor(null);
+    window.requestAnimationFrame(() => textEditButtonRefs.current[key]?.focus());
+  };
+
+  const enableTextEditing = () => {
+    if (!pending || busy) return;
+    setTextEditingEnabled(true);
+    setAnnouncement(
+      "已进入文字修订；重新保存会使此前文字确认及来源审核失效。",
+    );
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      firstFieldRef.current?.focus();
+    }));
+  };
+
   useEffect(() => {
     if (busy || !focusTarget) return;
     const target = focusTarget === "review"
@@ -495,6 +552,8 @@ export function SourceReviewLog({
     setDetail(normalizedDetail);
     setTitles(effective.titles);
     setBody(effective.body);
+    setTextEditingEnabled(!refreshedCuration.current_snapshot?.source_confirmation);
+    setActiveTextEditor(null);
     setDrafts(imageDrafts(refreshedCuration.image_sources.items));
     onDetailLoaded(normalizedDetail);
     onCurationChange(refreshedCuration);
@@ -616,6 +675,8 @@ export function SourceReviewLog({
         body,
       );
       applyCuration(result.curation, { preserveImageDrafts: imageDirty });
+      setActiveTextEditor(null);
+      setTextEditingEnabled(false);
       setTextExpanded(false);
       if (result.next_unresolved_image) {
         setExpandedSourceRef(result.next_unresolved_image.source_ref);
@@ -980,6 +1041,97 @@ export function SourceReviewLog({
   const frozenLabel = frozenStatus === "excluded" ? "已排除" : "已批准";
   const frozenCopy = frozenStatus === "excluded" ? "排除结论已冻结" : "批准结论已冻结";
 
+  const renderTextBlock = (
+    kind: SourceTextKind,
+    index: number,
+    originalValue: string,
+    attachedState?: React.ReactNode,
+  ) => {
+    const key = textBlockKey(kind, index);
+    const label = textBlockLabel(kind, index);
+    const currentValue = textBlockValue(kind, index);
+    const modified = currentValue !== originalValue;
+    const active = activeTextEditor?.kind === kind && activeTextEditor.index === index;
+    const isFirst = (kind === "title" && index === 0) || (
+      kind === "body" && original.titles.length === 0 && index === 0
+    );
+    return (
+      <article
+        className={`source-manuscript-block ${modified ? "is-modified" : ""}`}
+        data-source-text-block={key}
+        key={key}
+      >
+        <span className="source-manuscript-number">{label}</span>
+        <div className="source-manuscript-content">
+          {active ? (
+            <label className="source-inline-editor">
+              <span>{`${label} 当前编辑值`}</span>
+              <textarea
+                ref={(element) => { textEditorRefs.current[key] = element; }}
+                aria-label={`${label} 当前编辑值`}
+                rows={kind === "title" ? 2 : 5}
+                value={currentValue}
+                disabled={busy}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (kind === "title") {
+                    setTitles((current) => current.map(
+                      (item, candidate) => candidate === index ? value : item,
+                    ));
+                  } else {
+                    setBody((current) => current.map(
+                      (item, candidate) => candidate === index ? value : item,
+                    ));
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelTextEditor();
+                }}
+              />
+            </label>
+          ) : (
+            <p
+              className={`source-manuscript-text ${
+                pending && textEditingEnabled && !busy ? "is-editable" : ""
+              }`}
+              title={pending && textEditingEnabled && !busy ? `点击编辑${label}` : undefined}
+              onClick={() => openTextEditor(kind, index)}
+            >
+              {currentValue || <span className="source-empty-inline">空块</span>}
+            </p>
+          )}
+          <div className="source-manuscript-actions">
+            {modified ? <span className="source-modified-status">已修改</span> : null}
+            {pending && textEditingEnabled ? (
+              <button
+                type="button"
+                ref={(element) => {
+                  textEditButtonRefs.current[key] = element;
+                  if (isFirst) firstFieldRef.current = element;
+                }}
+                aria-label={`编辑${label}`}
+                disabled={busy || active}
+                onClick={() => openTextEditor(kind, index)}
+              >
+                {active ? "正在编辑" : "编辑"}
+              </button>
+            ) : null}
+          </div>
+          {modified ? (
+            <details className="source-original-disclosure">
+              <summary>{`查看${label}的原始提取`}</summary>
+              <p>{originalValue || "空块"}</p>
+            </details>
+          ) : null}
+          {attachedState}
+        </div>
+      </article>
+    );
+  };
+
   return (
     <>
     <div
@@ -992,7 +1144,7 @@ export function SourceReviewLog({
           <h2>来源日志</h2>
           <p>
             <span>页已进入普通策展流程</span>
-            <span>原始提取与当前编辑值并置</span>
+            <span>完整核对来源文字，按需原位修订</span>
           </p>
         </div>
         <span className={`pending-chip ${pending ? "" : frozenStatus === "excluded" ? "is-excluded" : "is-approved"}`}>
@@ -1039,30 +1191,20 @@ export function SourceReviewLog({
 
           {textExpanded ? (
           <div className="source-text-work" id="source-text-work">
-          <div className="source-field-group">
-            <span className="source-field-label">标题</span>
-            {original.titles.length ? original.titles.map((value, index) => (
-              <label className="source-edit-block" key={`title-${index}`}>
-                <span>标题来源 {index + 1}</span>
-                <small>原始提取</small>
-                <p>{value || "空标题"}</p>
-                <small>当前编辑值</small>
-                <textarea
-                  ref={index === 0 ? firstFieldRef : undefined}
-                  aria-label={`标题来源 ${index + 1} 当前编辑值`}
-                  rows={2}
-                  value={titles[index] ?? ""}
-                  disabled={!pending}
-                  onChange={(event) => setTitles((current) => current.map(
-                    (item, candidate) => candidate === index ? event.target.value : item,
-                  ))}
-                />
-              </label>
-            )) : <p className="source-empty-block">AnyDoc 未生成标题块。</p>}
-          </div>
-
-          <div className="source-field-group">
-            <span className="source-field-label">正文</span>
+          {snapshot?.source_confirmation && !textDirty && pending && !textEditingEnabled ? (
+            <div className="source-confirmed-edit-boundary">
+              <p>当前文字已确认。需要修订时，请先进入新的文字核对。</p>
+              <button type="button" disabled={busy} onClick={enableTextEditing}>修改文字</button>
+            </div>
+          ) : textEditingEnabled && snapshot?.source_confirmation ? (
+            <p className="source-review-invalidated">
+              重新保存会使此前文字确认及来源审核失效。
+            </p>
+          ) : null}
+          <div className="source-manuscript" role="region" aria-label="标题与正文核对稿">
+            {original.titles.length
+              ? original.titles.map((value, index) => renderTextBlock("title", index, value))
+              : <p className="source-empty-block">AnyDoc 未生成标题块。</p>}
             {original.body.length ? original.body.map((value, index) => {
               const noiseSource = noiseSources.find((item) => item.source_index === index);
               const activeNoise = noiseMetadata.find(
@@ -1071,26 +1213,7 @@ export function SourceReviewLog({
               const latestNoiseHistory = noiseHistory.find(
                 (item) => item.source_ref === noiseSource?.source_ref,
               );
-              return (
-              <article
-                className={`source-edit-block ${activeNoise ? "has-noise-exclusion" : ""}`}
-                key={`body-${index}`}
-              >
-                <span>正文来源 {index + 1}</span>
-                <small>原始提取</small>
-                <p>{value || "空正文"}</p>
-                <small>当前编辑值</small>
-                <textarea
-                  ref={original.titles.length === 0 && index === 0 ? firstFieldRef : undefined}
-                  aria-label={`正文来源 ${index + 1} 当前编辑值`}
-                  rows={4}
-                  value={body[index] ?? ""}
-                  disabled={!pending}
-                  onChange={(event) => setBody((current) => current.map(
-                    (item, candidate) => candidate === index ? event.target.value : item,
-                  ))}
-                />
-                {activeNoise ? (
+              return renderTextBlock("body", index, value, activeNoise ? (
                   <div className="footer-noise-source-state">
                     <div>
                       <strong>已从 Chunk 正文排除</strong>
@@ -1144,9 +1267,7 @@ export function SourceReviewLog({
                       {operation === "noise-preview" ? "正在检查跨页重复" : "检查跨页重复"}
                     </button>
                   </>
-                ) : null}
-              </article>
-            );
+                ) : null);
             }) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
           </div>
 

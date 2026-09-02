@@ -144,8 +144,8 @@ try {
     }
   });
   await page.getByRole("button", { name: "文字一致，确认" }).waitFor();
-  const body = page.getByRole("textbox", { name: "正文来源 1 当前编辑值" });
-  await body.waitFor();
+  await page.getByRole("button", { name: "编辑正文 01" }).click();
+  const body = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
   await body.fill(`${await body.inputValue()}（浏览器人工核对）`);
   await page.getByText("有本地修改").waitFor();
   await page.getByRole("button", { name: "保存并确认修改" }).waitFor();

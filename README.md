@@ -36,7 +36,7 @@ uv run uvicorn pptextract.api:app --host 127.0.0.1 --port 8000
 uv run pytest
 uv run mypy src/pptextract
 uv run ruff check src tests
-cd web && npm test && npm run typecheck && npm run build
+cd web && npm test && npm run test:browser && npm run typecheck && npm run build
 ```
 
 产品级门禁把部署后的服务视为黑盒，使用公开合成 PPTX、真实 SQLite、本地持久对象目录、单 worker、锁定文档工具链和 Chrome，贯通上传、页对应、审核继承、四类策展路径、发布、Range 下载与下游 generation 原子切换。事务、文件发布和租约恢复使用独立故障标记：

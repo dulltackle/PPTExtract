@@ -48,6 +48,7 @@ jobs:
         working-directory: web
         run: |
           npm test
+          npm run test:browser
           npm run typecheck
           npm run build
       - name: 执行完整测试（含产品黑盒、故障注入与真实工具链契约）
