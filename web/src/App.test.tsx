@@ -88,6 +88,32 @@ describe("默认文档入口", () => {
     expect(screen.queryByText("区域经营分析")).not.toBeInTheDocument();
   });
 
+  it("默认收起键盘提示并允许按需查看", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(bootstrap), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(<App />);
+    await screen.findByText("操作者 operator-zhang");
+
+    const trigger = screen.getByRole("button", { name: "快捷键" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "键盘操作" })).not.toBeInTheDocument();
+
+    await userEvent.click(trigger);
+    expect(screen.getByRole("region", { name: "键盘操作" })).toHaveTextContent("刷新入口");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "键盘操作" })).not.toBeInTheDocument();
+
+    await userEvent.keyboard("?");
+    expect(screen.getByRole("region", { name: "键盘操作" })).toBeInTheDocument();
+  });
+
   it("在文档行持续显示渲染风险汇总并只提供策展入口", async () => {
     const withWarnings = {
       ...bootstrap,

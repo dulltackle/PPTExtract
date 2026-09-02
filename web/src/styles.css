@@ -82,7 +82,7 @@ textarea:focus-visible {
   height: 100vh;
   min-height: 0;
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr) minmax(48px, auto);
+  grid-template-rows: 58px minmax(0, 1fr) 34px;
   overflow: hidden;
   color: var(--slate-paper);
   background: #101519;
@@ -495,27 +495,120 @@ textarea:focus-visible {
 }
 
 .command-strip {
+  position: relative;
+  z-index: 20;
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 12px;
   min-width: 0;
-  padding: 0 18px;
+  padding: 0 12px;
   border-top: 1px solid var(--dark-hairline);
   color: #a7b0b5;
   background: #181e23;
   font-size: 11px;
-  overflow-x: auto;
-  overflow-y: hidden;
 }
 
-.command-strip > span {
+.command-help {
+  position: relative;
+  min-width: 0;
+}
+
+.command-help-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #b9c2c7;
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.command-help-trigger:hover,
+.command-help-trigger[aria-expanded="true"] {
+  border-color: #45515a;
+  color: #f1f4f5;
+  background: #252c32;
+}
+
+.command-help-trigger .icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.command-help-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 9px);
+  width: min(560px, calc(100vw - 24px));
+  padding: 12px;
+  border: 1px solid #4a555e;
+  border-radius: 7px;
+  color: #d8dee1;
+  background: #20272d;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 42%);
+  animation: command-help-enter 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.command-help-panel::after {
+  content: "";
+  position: absolute;
+  left: 18px;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid #4a555e;
+  border-bottom: 1px solid #4a555e;
+  background: #20272d;
+  transform: rotate(45deg);
+}
+
+.command-help-panel header,
+.command-help-items {
+  display: flex;
+  align-items: center;
+}
+
+.command-help-panel header {
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #39434b;
+}
+
+.command-help-panel header strong {
+  color: #f1f4f5;
+  font-size: 12px;
+}
+
+.command-help-panel header span {
+  color: #8f9aa0;
+  font-size: 10px;
+}
+
+.command-help-items {
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  padding-top: 11px;
+}
+
+.command-help-items > span {
   white-space: nowrap;
 }
 
-.command-strip-label {
-  color: #7e8990;
-  font: 10px/1 var(--data-font);
-  letter-spacing: 0.04em;
+@keyframes command-help-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
 }
 
 kbd {
@@ -538,6 +631,7 @@ kbd {
   margin-left: auto;
   color: #8fbf9f;
   font: 10px/1 var(--data-font);
+  white-space: nowrap;
 }
 
 .workspace-support-note {
@@ -605,6 +699,10 @@ kbd {
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer {
+    animation: none;
+  }
+
+  .command-help-panel {
     animation: none;
   }
 
@@ -5319,20 +5417,13 @@ details[open] .scope-chevron {
     scrollbar-width: thin;
   }
 
-  .command-strip {
-    overflow-x: auto;
-    scrollbar-color: #53606a #171b20;
-    scrollbar-width: thin;
-  }
-
   .command-status {
-    margin-left: 0;
+    margin-left: auto;
   }
 }
 
 @media (max-width: 900px) {
-  .actor-context span,
-  .command-strip-label {
+  .actor-context span {
     display: none;
   }
 

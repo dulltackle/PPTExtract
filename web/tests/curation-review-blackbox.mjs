@@ -120,7 +120,7 @@ try {
   if (!exclusionBox || exclusionBox.x >= 1280 || exclusionBox.x + exclusionBox.width <= 0) {
     throw new Error("200% 文字缩放下无法到达整页审核动作");
   }
-  const textCommandStrip = textZoomed.getByRole("contentinfo", { name: "键盘操作" });
+  const textCommandStrip = textZoomed.getByRole("contentinfo", { name: "工作位状态" });
   const textZoomStatus = textCommandStrip.locator(".command-status");
   await textZoomStatus.waitFor();
   if (!(await textZoomStatus.textContent())?.trim()) {
@@ -193,12 +193,13 @@ try {
   await approvedRow.click();
   await page.getByText("批准结论已冻结").waitFor();
   await page.getByRole("button", { name: "重新打开此页" }).focus();
+  await page.getByRole("button", { name: "快捷键" }).click();
   await page.keyboard.press("r");
   const reopenDialog = page.getByRole("dialog", { name: "重新打开第 1 页？" });
   await reopenDialog.waitFor();
-  const commandStrip = page.getByRole("contentinfo", { name: "键盘操作" });
-  await commandStrip.getByText(/取消/).waitFor();
-  if (await commandStrip.getByText(/重新打开/).count()) {
+  const commandPanel = page.locator(".command-help-panel");
+  await commandPanel.getByText(/取消/).waitFor();
+  if (await commandPanel.getByText(/重新打开/).count()) {
     throw new Error("重开确认弹窗打开时命令条仍显示 R 重新打开");
   }
   await page.keyboard.press("Escape");

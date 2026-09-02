@@ -92,6 +92,15 @@ function UploadIcon() {
   );
 }
 
+function KeyboardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="icon">
+      <rect x="3.25" y="6.25" width="17.5" height="11.5" rx="2" />
+      <path d="M6.5 9.5h1m2.5 0h1m2.5 0h1m2.5 0h1M6.5 12.5h1m2.5 0h1m2.5 0h1m2.5 0h1M8 15.25h8" />
+    </svg>
+  );
+}
+
 function EmptyDocumentIcon() {
   return (
     <svg viewBox="0 0 32 38" aria-hidden="true" className="empty-document-icon">
@@ -210,10 +219,12 @@ export function App() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [uploadState, setUploadState] = useState<UploadState>({ kind: "idle" });
   const [curationCommands, setCurationCommands] = useState<CurationCommandState | null>(null);
+  const [isKeyboardHelpOpen, setIsKeyboardHelpOpen] = useState(false);
   const activeRequest = useRef<{ controller: AbortController; requestId: number } | null>(null);
   const uploadInput = useRef<HTMLInputElement | null>(null);
   const uploadRequest = useRef<AbortController | null>(null);
   const uploadAttempt = useRef<UploadAttempt | null>(null);
+  const keyboardHelp = useRef<HTMLDivElement | null>(null);
   const nextRequestId = useRef(0);
 
   const refresh = useCallback(() => {
@@ -326,6 +337,16 @@ export function App() {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
       if (document.querySelector("[aria-modal='true']")) return;
+      if (event.key === "Escape" && isKeyboardHelpOpen) {
+        event.preventDefault();
+        setIsKeyboardHelpOpen(false);
+        return;
+      }
+      if (event.key === "?") {
+        event.preventDefault();
+        setIsKeyboardHelpOpen((open) => !open);
+        return;
+      }
       if (!isMapping && !isCuration && event.key.toLowerCase() === "r") {
         event.preventDefault();
         refresh();
@@ -333,7 +354,18 @@ export function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isCuration, isMapping, refresh]);
+  }, [isCuration, isKeyboardHelpOpen, isMapping, refresh]);
+
+  useEffect(() => {
+    if (!isKeyboardHelpOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!keyboardHelp.current?.contains(event.target as Node)) {
+        setIsKeyboardHelpOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, [isKeyboardHelpOpen]);
 
   const actor = state.kind === "ready" ? state.data.actor : null;
 
@@ -455,31 +487,56 @@ export function App() {
         </main>
       ) : null}
 
-      <footer className="command-strip" aria-label="键盘操作">
-        <span className="command-strip-label">键盘操作</span>
-        {isCuration ? (
-          <>
-            {curationCommands?.navigation ? (
-              <span><kbd>←</kbd><kbd>→</kbd> 上一页 / 下一页</span>
-            ) : null}
-            {curationCommands?.approve ? <span><kbd>A</kbd> 批准</span> : null}
-            {curationCommands?.exclude ? <span><kbd>X</kbd> 排除原因</span> : null}
-            {curationCommands?.reopen ? <span><kbd>R</kbd> 重新打开</span> : null}
-            {curationCommands?.cancel ? <span><kbd>Esc</kbd> 取消</span> : null}
-            <span className="workspace-support-note">完整三栏适配 1280px 及以上</span>
-          </>
-        ) : (
-          <>
-            <span>
-              <kbd>Tab</kbd>
-              <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
-            </span>
-            <span>
-              <kbd>R</kbd>{" "}
-              {isMapping ? "刷新证据" : isPublication ? "刷新发布状态" : "刷新入口"}
-            </span>
-          </>
-        )}
+      <footer className="command-strip" aria-label="工作位状态">
+        <div className="command-help" ref={keyboardHelp}>
+          <button
+            type="button"
+            className="command-help-trigger"
+            aria-expanded={isKeyboardHelpOpen}
+            aria-controls="keyboard-command-panel"
+            onClick={() => setIsKeyboardHelpOpen((open) => !open)}
+          >
+            <KeyboardIcon />
+            快捷键
+          </button>
+          {isKeyboardHelpOpen ? (
+            <section
+              id="keyboard-command-panel"
+              className="command-help-panel"
+              aria-label="键盘操作"
+            >
+              <header>
+                <strong>键盘操作</strong>
+                <span><kbd>Esc</kbd> 关闭</span>
+              </header>
+              <div className="command-help-items">
+                {isCuration ? (
+                  <>
+                    {curationCommands?.navigation ? (
+                      <span><kbd>←</kbd><kbd>→</kbd> 上一页 / 下一页</span>
+                    ) : null}
+                    {curationCommands?.approve ? <span><kbd>A</kbd> 批准</span> : null}
+                    {curationCommands?.exclude ? <span><kbd>X</kbd> 排除原因</span> : null}
+                    {curationCommands?.reopen ? <span><kbd>R</kbd> 重新打开</span> : null}
+                    {curationCommands?.cancel ? <span><kbd>Esc</kbd> 取消</span> : null}
+                    <span className="workspace-support-note">完整三栏适配 1280px 及以上</span>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      <kbd>Tab</kbd>
+                      <kbd>Shift</kbd> + <kbd>Tab</kbd> 移动焦点
+                    </span>
+                    <span>
+                      <kbd>R</kbd>{" "}
+                      {isMapping ? "刷新证据" : isPublication ? "刷新发布状态" : "刷新入口"}
+                    </span>
+                  </>
+                )}
+              </div>
+            </section>
+          ) : null}
+        </div>
         <span className="command-status">
           {state.kind === "ready"
             ? isMapping
