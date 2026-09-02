@@ -21,13 +21,43 @@ const captureRoot = process.env.PPTEXTRACT_CAPTURE_DIR
   : null;
 if (captureRoot) await mkdir(captureRoot, { recursive: true });
 
-async function saveAndConfirmText(page) {
+async function saveAndConfirmText(page, scenario) {
   const reviewText = page.getByRole("button", {
     name: /^(文字一致，确认|保存并确认修改|确认无标题\/正文来源)$/,
   });
-  if (await reviewText.isEnabled()) await reviewText.click();
+  const summary = page.getByRole("status", { name: "文字核对摘要" });
+  await reviewText.or(summary).first().waitFor();
+  const submitted = (await reviewText.count()) > 0 && await reviewText.isEnabled();
+  if (submitted) await reviewText.click();
   await page.getByRole("heading", { name: "图片来源" }).waitFor();
-  await page.getByRole("radio", { name: "保留原始图片" }).waitFor();
+  const firstImageDecision = page.getByRole("radio", { name: "保留原始图片" });
+  await firstImageDecision.waitFor().catch((error) => {
+    throw new Error(`${scenario}：${error.message}`);
+  });
+  if (submitted) {
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "保留原始图片",
+    );
+  }
+  const summaryCopy = (await summary.textContent())?.replace(/\s+/g, "") ?? "";
+  for (const expected of ["文字已确认", "标题1", "正文1", "表格0"]) {
+    if (!summaryCopy.includes(expected)) {
+      throw new Error(`图片来源页的文字核对摘要缺少 ${expected}：${summaryCopy}`);
+    }
+  }
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  if (!(await page.getByRole("button", { name: "修改文字" }).isVisible())) {
+    throw new Error("待处理图片页展开确认稿后没有明确的修改入口");
+  }
+  if (
+    await page.getByRole("button", { name: /^(编辑标题|编辑正文)/ }).count() ||
+    await page.getByRole("textbox", { name: /当前编辑值/ }).count() ||
+    await page.getByRole("button", { name: "文字一致，确认" }).count()
+  ) {
+    throw new Error("待处理图片页展开确认稿后仍暴露可编辑或重复确认动作");
+  }
+  await page.getByRole("button", { name: "折叠文字核对" }).click();
+  return submitted;
 }
 
 try {
@@ -43,17 +73,20 @@ try {
       throw new Error(`1280px 缺少三栏区域：${selector}`);
     }
   }
-  await saveAndConfirmText(compact);
+  if (!(await saveAndConfirmText(compact, "1280 未处置图片"))) {
+    throw new Error("未处置图片页面没有执行文字确认动作");
+  }
   if (captureRoot) {
     await compact.screenshot({ path: resolve(captureRoot, "user-1280.png"), fullPage: true });
   }
   checks.push("image-viewport-1280-three-columns");
+  checks.push("unresolved-image-focus-after-text-review");
   await compact.close();
 
   const keep = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
   keep.setDefaultTimeout(30_000);
   await keep.goto(routeFor(1), { waitUntil: "domcontentloaded", timeout: 10_000 });
-  await saveAndConfirmText(keep);
+  await saveAndConfirmText(keep, "单项保留图片");
   await keep.getByRole("radio", { name: "保留原始图片" }).check();
   await keep.getByRole("textbox", { name: "图片来源 01 summary" }).fill(
     "公开蓝色来源图用于验证单项保留的原始资产路径。",
@@ -62,14 +95,48 @@ try {
   const keepReview = keep.getByRole("button", { name: "完成来源审核" });
   await keepReview.waitFor();
   await keepReview.click();
-  await keep.getByRole("button", { name: "来源完整，直接审核" }).waitFor();
+  const keepNextGate = keep.getByRole("button", { name: "来源完整，直接审核" });
+  await keepNextGate.waitFor();
+  await keep.getByRole("button", { name: "展开文字核对" }).click();
+  await keep.getByRole("button", { name: "修改文字" }).click();
+  await keep.getByRole("button", { name: "编辑正文 01" }).click();
+  const revisedBody = keep.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  await revisedBody.fill(`${await revisedBody.inputValue()}（复核已处置图片）`);
+  await keep.getByRole("button", { name: "保存并确认修改" }).click();
+  const revisedSummary = keep.getByRole("status", { name: "文字核对摘要" });
+  await revisedSummary.waitFor();
+  const revisedSummaryCopy = (await revisedSummary.textContent())?.replace(/\s+/g, "") ?? "";
+  for (const expected of ["文字已确认", "标题1", "正文1", "表格0"]) {
+    if (!revisedSummaryCopy.includes(expected)) {
+      throw new Error(`已处置图片页的文字核对摘要缺少 ${expected}：${revisedSummaryCopy}`);
+    }
+  }
+  await keep.waitForFunction(
+    () => document.activeElement?.textContent?.trim() === "来源完整，直接审核",
+  );
+  await keep.getByRole("button", { name: "展开文字核对" }).click();
+  if (
+    await keep.getByRole("button", { name: /^(编辑标题|编辑正文)/ }).count() ||
+    await keep.getByRole("textbox", { name: /当前编辑值/ }).count() ||
+    await keep.getByRole("button", { name: /文字一致，确认|完成来源审核/ }).count()
+  ) {
+    throw new Error("已处置图片页的新确认稿未保持只读，或重复暴露确认动作");
+  }
+  await keep.getByRole("button", { name: "折叠文字核对" }).click();
+  if (await keep.getByRole("button", { name: "批准并转到下一待处理页" }).isEnabled()) {
+    throw new Error("文字确认续接提前批准了已处置图片页面");
+  }
+  if ((await keep.locator(".capture-range").count()) !== 0) {
+    throw new Error("文字确认续接为已处置图片页面创建了截图视觉对象");
+  }
   checks.push("single-image-included");
+  checks.push("resolved-image-next-gate-focus");
   await keep.close();
 
   const ignore = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
   ignore.setDefaultTimeout(30_000);
   await ignore.goto(routeFor(2), { waitUntil: "domcontentloaded", timeout: 10_000 });
-  await saveAndConfirmText(ignore);
+  await saveAndConfirmText(ignore, "单项忽略图片");
   await ignore.getByRole("radio", { name: "忽略此来源" }).check();
   await ignore.getByRole("combobox", { name: "图片来源 01 忽略原因" }).selectOption(
     "decorative",
@@ -105,7 +172,7 @@ try {
     await route.continue();
   });
   await mixed.goto(routeFor(3), { waitUntil: "domcontentloaded", timeout: 10_000 });
-  await saveAndConfirmText(mixed);
+  await saveAndConfirmText(mixed, "混合重复图片");
   await mixed.getByText("原始预览加载失败").waitFor();
   await mixed.getByRole("button", { name: "重试原始预览" }).click();
   await mixed.getByRole("img", { name: /图片来源 01 原始预览/ }).waitFor();
@@ -156,7 +223,8 @@ try {
   await mixed.getByRole("textbox", { name: "图片来源 01 summary" }).fill(
     "修改后的公开 summary 会撤销来源审核确认。",
   );
-  await mixed.getByText("来源审核确认已失效").waitFor();
+  await mixed.getByText("当前图片修改仅保存在本地；保存后来源审核确认将失效。").waitFor();
+  await mixed.getByText("此前来源审核仍保留至新快照保存").waitFor();
   let leavePrompted = false;
   mixed.once("dialog", async (dialog) => {
     leavePrompted = true;

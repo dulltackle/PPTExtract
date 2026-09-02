@@ -438,12 +438,15 @@ def test_review_queue_supports_single_and_batch_conclusions_in_browser(
             "text-zoom-200%-reachable",
             "text-review-action-labels",
             "single-text-review-command",
+            "collapsed-text-review-summary",
             "plain-text-zero-capture-approved",
             "keyboard-a-approved",
             "wcag22aa-1440",
+            "approved-manuscript-readonly",
             "keyboard-r-reopen-and-x-exclude",
             "pending-only-batch-exclusion",
             "forbidden-batch-actions-absent",
+            "excluded-manuscript-readonly",
         ],
     }
 
@@ -519,8 +522,10 @@ def test_first_capture_visual_is_created_and_verified_in_real_browser(
     assert report["ok"] is True
     assert report["checks"] == [
         "capture-viewport-1280",
+        "capture-next-gate-1280",
         "keyboard-flow-1280",
         "capture-viewport-1440",
+        "capture-next-gate-1440",
         "keyboard-flow-1440",
     ]
     assert len(report["savedBounds"]) == 2
@@ -628,7 +633,9 @@ def test_anydoc_image_sources_are_disposed_in_a_real_browser(
         "ok": True,
         "checks": [
             "image-viewport-1280-three-columns",
+            "unresolved-image-focus-after-text-review",
             "single-image-included",
+            "resolved-image-next-gate-focus",
             "single-image-ignored",
             "mixed-duplicate-dispositions",
             "preview-and-save-recovery",

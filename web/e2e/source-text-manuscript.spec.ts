@@ -50,7 +50,11 @@ function curation(snapshot: null | Record<string, unknown>) {
   };
 }
 
-async function mockCurationApi(page: Page, onSubmit?: (payload: unknown) => void) {
+async function mockCurationApi(
+  page: Page,
+  onSubmit?: (payload: unknown) => void,
+  sourceContent = source,
+) {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "sendBeacon", {
       configurable: true,
@@ -74,7 +78,9 @@ async function mockCurationApi(page: Page, onSubmit?: (payload: unknown) => void
       return;
     }
     if (path === "/api/v1/curation/pages") {
-      await route.fulfill({ json: { pages: [pageSummary] } });
+      await route.fulfill({
+        json: { pages: [{ ...pageSummary, title: sourceContent.titles[0] ?? null }] },
+      });
       return;
     }
     if (path === "/api/v1/pages/page-browser" && request.method() === "GET") {
@@ -83,7 +89,7 @@ async function mockCurationApi(page: Page, onSubmit?: (payload: unknown) => void
           page_id: "page-browser",
           page_number: 1,
           review_status: "pending",
-          source_content: source,
+          source_content: sourceContent,
           curation: curation(null),
         },
       });
@@ -95,7 +101,7 @@ async function mockCurationApi(page: Page, onSubmit?: (payload: unknown) => void
       const snapshot = {
         snapshot_id: "snapshot-browser",
         source_snapshot_id: null,
-        source_content: { ...source, ...payload },
+        source_content: { ...sourceContent, ...payload },
         created_by: "operator-browser",
         created_at: "2026-09-02T08:00:00+00:00",
         source_confirmation: {
@@ -215,4 +221,35 @@ test("1280 屏幕的 200% 缩放下转为单列且无页面级横向溢出", asy
   await expect(page.getByRole("button", { name: "文字一致，确认" })).toBeFocused();
   await page.getByRole("button", { name: "编辑正文 11" }).click();
   await expect(page.getByRole("textbox", { name: "正文 11 当前编辑值" })).toBeFocused();
+});
+
+test("空标题与正文需要显式确认，并在成功后留下零计数摘要", async ({ page }) => {
+  const emptySource = {
+    titles: [],
+    body: [],
+    tables: [],
+    images: [],
+    speaker_notes: [],
+  };
+  let submitted: unknown = null;
+  await mockCurationApi(page, (payload) => { submitted = payload; }, emptySource);
+  await page.goto("/curation");
+
+  const emptyState = page.getByRole("status", { name: "标题和正文来源为空" });
+  await expect(emptyState).toContainText("未发现标题或正文来源");
+  await expect(emptyState).toContainText("对照标准页渲染");
+  await expect(page.getByRole("button", { name: "确认无标题/正文来源" })).toBeEnabled();
+
+  await page.getByRole("button", { name: "确认无标题/正文来源" }).click();
+  await expect.poll(() => submitted).toMatchObject({ titles: [], body: [] });
+  const summary = page.getByRole("status", { name: "文字核对摘要" });
+  await expect(summary).toContainText("文字已确认");
+  await expect(summary).toContainText("标题0正文0表格0");
+  await expect(page.getByRole("button", { name: "来源完整，直接审核" })).toBeFocused();
+
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  await expect(page.getByRole("button", { name: "修改文字" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^(编辑标题|编辑正文)/ })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: /当前编辑值/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /文字一致，确认|完成来源审核/ })).toHaveCount(0);
 });

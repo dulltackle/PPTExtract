@@ -1193,11 +1193,66 @@ kbd {
 }
 
 .source-text-collapsed {
-  margin: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   color: #526068;
   font-size: 11px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.source-text-collapsed > div {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.source-text-collapsed strong {
+  color: #244b35;
+  font-size: 11px;
+}
+
+.source-text-collapsed span {
+  color: #59666d;
+  font-size: 10px;
+}
+
+.source-text-collapsed dl {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 5px;
+  margin: 0;
+}
+
+.source-text-collapsed dl > div {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 4px 6px;
+  border: 1px solid #b8c2c5;
+  border-radius: 5px;
+  background: #f1f3f3;
+}
+
+.source-text-collapsed dt,
+.source-text-collapsed dd {
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.source-text-collapsed dt {
+  color: #657078;
+}
+
+.source-text-collapsed dd {
+  color: #263239;
+  font-family: var(--data-font);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 .source-manuscript {
@@ -1389,6 +1444,15 @@ kbd {
     align-items: stretch;
     flex-direction: column;
   }
+
+  .source-text-collapsed {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .source-text-collapsed dl {
+    align-self: flex-start;
+  }
 }
 
 .footer-noise-check {
@@ -1497,6 +1561,25 @@ kbd {
   border-radius: 6px;
   color: #657078;
   font-size: 11px;
+}
+
+.source-text-empty-state {
+  display: grid;
+  gap: 4px;
+  padding: 13px 0 14px;
+}
+
+.source-text-empty-state strong {
+  color: #263239;
+  font-size: 12px;
+}
+
+.source-text-empty-state p {
+  margin: 0;
+  color: #59666d;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .readonly-source-entry {
@@ -1925,6 +2008,14 @@ kbd {
 .source-audit-record {
   color: #356348;
   font: 10px/1.5 var(--data-font);
+}
+
+.source-persisted-boundary {
+  margin: 4px 0 0;
+  color: #52675b;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
 }
 
 .review-gate {

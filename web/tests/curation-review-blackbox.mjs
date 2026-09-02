@@ -168,6 +168,14 @@ try {
   await page.getByRole("button", { name: "保存并确认修改" }).click();
   await page.getByText("文字及来源审核均已完成。").waitFor();
   await page.getByRole("button", { name: "展开文字核对" }).waitFor();
+  const textSummary = page.getByRole("status", { name: "文字核对摘要" });
+  await textSummary.waitFor();
+  const textSummaryCopy = (await textSummary.textContent())?.replace(/\s+/g, "") ?? "";
+  for (const expected of ["文字已确认", "标题1", "正文1", "表格0"]) {
+    if (!textSummaryCopy.includes(expected)) {
+      throw new Error(`文字核对摘要缺少 ${expected}：${textSummaryCopy}`);
+    }
+  }
   if (textReviewRequests.length !== 1 || !textReviewRequests[0].endsWith("/curation/text-review")) {
     throw new Error(`文字核对未通过单一公开命令提交：${textReviewRequests.join(", ")}`);
   }
@@ -176,9 +184,19 @@ try {
   }
   checks.push("text-review-action-labels");
   checks.push("single-text-review-command");
+  checks.push("collapsed-text-review-summary");
   await page.waitForFunction(
     () => document.activeElement?.textContent?.trim() === "来源完整，直接审核",
   );
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  if (
+    await page.getByRole("button", { name: /^(编辑标题|编辑正文)/ }).count() ||
+    await page.getByRole("textbox", { name: /当前编辑值/ }).count() ||
+    await page.getByRole("button", { name: /文字一致，确认|完成来源审核/ }).count()
+  ) {
+    throw new Error("待处理页面展开已确认核对稿后仍暴露编辑或重复确认动作");
+  }
+  await page.getByRole("button", { name: "折叠文字核对" }).click();
   await page.getByRole("button", { name: "有缺口，在页面上框选" }).waitFor();
   if ((await page.locator(".capture-range").count()) !== 0) {
     throw new Error("来源审核完成后自动显示了候选框");
@@ -200,13 +218,27 @@ try {
   checks.push("keyboard-a-approved");
   checks.push("wcag22aa-1440");
 
-  await page.getByRole("button", { name: "全部" }).click();
+  await page.getByRole("button", { name: "全部", exact: true }).click();
   const approvedRow = page.getByRole("button", {
     name: /公开浏览器策展页，已批准/,
   });
   await approvedRow.waitFor();
   await approvedRow.click();
   await page.getByText("批准结论已冻结").waitFor();
+  const approvedSummary = page.getByRole("status", { name: "文字核对摘要" });
+  if (!((await approvedSummary.textContent())?.replace(/\s+/g, "").includes("标题1正文1表格0"))) {
+    throw new Error("已批准页面没有沿用紧凑的文字核对摘要");
+  }
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  await page.getByRole("region", { name: "标题与正文核对稿" }).waitFor();
+  if (
+    await page.getByRole("button", { name: /^编辑标题|^编辑正文|修改文字$/ }).count() ||
+    await page.getByRole("textbox", { name: /当前编辑值/ }).count() ||
+    await page.getByRole("button", { name: /文字一致，确认|完成来源审核/ }).count()
+  ) {
+    throw new Error("已批准页面的核对稿未保持只读");
+  }
+  checks.push("approved-manuscript-readonly");
   await page.getByRole("button", { name: "重新打开此页" }).focus();
   await page.getByRole("button", { name: "快捷键" }).click();
   await page.keyboard.press("r");
@@ -244,8 +276,27 @@ try {
   for (const title of ["公开批量策展页二", "公开批量策展页三"]) {
     await page.getByRole("checkbox", { name: new RegExp(`选择第 1 页，${title}`) }).waitFor({ state: "hidden" });
   }
+  await page.getByRole("button", { name: "全部", exact: true }).click();
+  const excludedRow = page.getByRole("button", { name: /公开浏览器策展页，已排除/ });
+  await excludedRow.waitFor();
+  await excludedRow.click();
+  await page.getByText("排除结论已冻结").waitFor();
+  const excludedSummary = page.getByRole("status", { name: "文字核对摘要" });
+  if (!((await excludedSummary.textContent())?.replace(/\s+/g, "").includes("标题1正文1表格0"))) {
+    throw new Error("已排除页面没有沿用紧凑的文字核对摘要");
+  }
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  await page.getByRole("region", { name: "标题与正文核对稿" }).waitFor();
+  if (
+    await page.getByRole("button", { name: /^编辑标题|^编辑正文|修改文字$/ }).count() ||
+    await page.getByRole("textbox", { name: /当前编辑值/ }).count() ||
+    await page.getByRole("button", { name: /文字一致，确认|完成来源审核/ }).count()
+  ) {
+    throw new Error("已排除页面的核对稿未保持只读");
+  }
   checks.push("pending-only-batch-exclusion");
   checks.push("forbidden-batch-actions-absent");
+  checks.push("excluded-manuscript-readonly");
   await page.close();
 
   process.stdout.write(JSON.stringify({ ok: true, checks }));

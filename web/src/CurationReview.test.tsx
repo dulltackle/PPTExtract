@@ -137,6 +137,45 @@ describe("来源文字审核工作台", () => {
     expect(screen.queryByRole("textbox", { name: /当前编辑值/ })).not.toBeInTheDocument();
   });
 
+  it("标题和正文均缺失时要求策展人员显式确认空来源", async () => {
+    const emptySource = {
+      ...originalSource,
+      titles: [],
+      body: [],
+      speaker_notes: [],
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }),
+        );
+      }
+      if (url === "/api/v1/pages/page-1") {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: emptySource,
+          curation: curationState(null),
+        }), { status: 200 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+
+    const emptyState = await screen.findByRole("status", { name: "标题和正文来源为空" });
+    expect(emptyState).toHaveTextContent("未发现标题或正文来源");
+    expect(emptyState).toHaveTextContent("对照标准页渲染");
+    expect(screen.getByRole("button", { name: "确认无标题/正文来源" })).toBeEnabled();
+    expect(screen.queryByText("AnyDoc 未生成标题块。")).not.toBeInTheDocument();
+    expect(screen.queryByText("AnyDoc 未生成正文块。")).not.toBeInTheDocument();
+  });
+
   it("原位累计多块草稿、仅撤销活动编辑器并一次组合提交", async () => {
     const source = {
       ...originalSource,
@@ -226,6 +265,16 @@ describe("来源文字审核工作台", () => {
       titles: ["修订标题"],
       body: ["第一行\n第二行", "第二段原始正文"],
     });
+    const summary = await screen.findByRole("status", { name: "文字核对摘要" });
+    expect(summary).toHaveTextContent("文字已确认");
+    expect(summary).toHaveTextContent(/标题\s*1/);
+    expect(summary).toHaveTextContent(/正文\s*2/);
+    expect(summary).toHaveTextContent(/表格\s*0/);
+    expect(screen.getByRole("button", { name: "展开文字核对" })).toBeInTheDocument();
+    const nextGate = screen.getByRole("button", { name: "来源完整，直接审核" });
+    await waitFor(() => expect(nextGate).toHaveFocus());
+    expect(screen.getByRole("button", { name: "批准并转到下一待处理页" })).toBeDisabled();
+    expect(document.querySelectorAll(".capture-range")).toHaveLength(0);
   });
 
   it("已确认文字默认只读，并通过明确动作进入新一轮修订", async () => {
@@ -245,8 +294,10 @@ describe("来源文字审核工作台", () => {
         completed_at: "2026-08-24T18:01:00+00:00",
       },
     };
-    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    let persistedWrites = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
+      if (init?.method && init.method !== "GET") persistedWrites += 1;
       if (url === "/api/v1/app/bootstrap") {
         return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
       }
@@ -269,17 +320,34 @@ describe("来源文字审核工作台", () => {
 
     render(<App />);
 
+    expect(await screen.findByRole("status", { name: "文字核对摘要" }))
+      .toHaveTextContent("文字已确认");
+    await userEvent.click(screen.getByRole("button", { name: "展开文字核对" }));
     expect(await screen.findByText("人工确认后的标题")).toBeInTheDocument();
     expect(screen.getByText("已修改")).toBeInTheDocument();
     expect(screen.getByText("查看标题 1的原始提取")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "编辑标题 1" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /当前编辑值/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "文字一致，确认" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "完成来源审核" })).not.toBeInTheDocument();
+    expect(screen.getByText(
+      "进入本地修订不会立即改变持久状态；保存新快照后，此前文字确认及来源审核将失效。",
+    )).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "修改文字" }));
-    expect(screen.getByText("重新保存会使此前文字确认及来源审核失效。")).toBeInTheDocument();
+    expect(screen.getByText(
+      "当前仅打开本地草稿，持久状态未改变；保存新快照后，此前文字确认及来源审核将失效。",
+    )).toBeInTheDocument();
+    expect(persistedWrites).toBe(0);
+    expect(screen.queryByRole("button", { name: "文字一致，确认" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "编辑标题 1" }));
-    expect(screen.getByRole("textbox", { name: "标题 1 当前编辑值" }))
-      .toHaveValue("人工确认后的标题");
+    const titleEditor = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
+    expect(titleEditor).toHaveValue("人工确认后的标题");
+    await userEvent.type(titleEditor, "（再次修订）");
+    expect(screen.getByText("此前文字确认仍保留至新快照保存")).toBeInTheDocument();
+    expect(screen.getByText("此前来源审核仍保留至新快照保存")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存并确认修改" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "完成来源审核" })).not.toBeInTheDocument();
   });
 
   it("保护未保存草稿，并在详情刷新失败时如实报告重复页脚确认与撤销结果", async () => {
@@ -458,6 +526,7 @@ describe("来源文字审核工作台", () => {
 
     render(<App />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
     const checkRepeated = await screen.findByRole("button", {
       name: "检查正文来源 2 的跨页重复",
     });
@@ -491,6 +560,7 @@ describe("来源文字审核工作台", () => {
 
     cleanup();
     render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
     expect(await screen.findByText("已从 Chunk 正文排除")).toBeInTheDocument();
     expect(screen.getAllByText(/operator-zhang ·/).length).toBeGreaterThan(0);
     expect(screen.getByText("规则 manual-exact-text-v1")).toBeInTheDocument();
@@ -509,6 +579,7 @@ describe("来源文字审核工作台", () => {
 
     cleanup();
     render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
     expect(await screen.findByText("最近一次排除已撤销")).toBeInTheDocument();
     expect(screen.getByText("从策展工作台撤销并恢复正文。")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "检查正文来源 2 的跨页重复" }))
@@ -1555,6 +1626,9 @@ describe("来源文字审核工作台", () => {
       screen.getByRole("textbox", { name: "图片来源 01 summary" }),
       "（修订）",
     );
-    expect(screen.getByText("来源审核确认已失效")).toBeInTheDocument();
+    expect(screen.getByText(
+      "当前图片修改仅保存在本地；保存后来源审核确认将失效。",
+    )).toBeInTheDocument();
+    expect(screen.getByText("此前来源审核仍保留至新快照保存")).toBeInTheDocument();
   });
 });

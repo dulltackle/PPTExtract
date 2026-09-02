@@ -368,7 +368,7 @@ export function SourceReviewLog({
         setImageDimensions({});
         setPreviewFailures({});
         setPreviewRevisions({});
-        setTextExpanded(true);
+        setTextExpanded(!curation.current_snapshot?.source_confirmation);
         setTextEditingEnabled(!curation.current_snapshot?.source_confirmation);
         setActiveTextEditor(null);
         setExclusionReason("");
@@ -494,7 +494,7 @@ export function SourceReviewLog({
     if (!pending || busy) return;
     setTextEditingEnabled(true);
     setAnnouncement(
-      "已进入文字修订；重新保存会使此前文字确认及来源审核失效。",
+      "已进入文字修订；当前仅为本地草稿，持久状态未改变。",
     );
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       firstFieldRef.current?.focus();
@@ -1172,12 +1172,10 @@ export function SourceReviewLog({
               <p>保留 AnyDoc 块的角色、顺序与段落边界</p>
             </div>
             <div className="source-text-heading-actions">
-              <PhaseStatus complete={Boolean(snapshot?.source_confirmation) && !textDirty}>
-                {textDirty
-                  ? "有本地修改"
-                  : snapshot?.source_confirmation
-                    ? "已确认"
-                    : "待确认"}
+              <PhaseStatus complete={Boolean(snapshot?.source_confirmation)}>
+                {snapshot?.source_confirmation
+                  ? (textDirty ? "已确认 · 草稿待存" : "已确认")
+                  : (textDirty ? "有本地修改" : "待确认")}
               </PhaseStatus>
               <button
                 type="button"
@@ -1193,19 +1191,32 @@ export function SourceReviewLog({
           <div className="source-text-work" id="source-text-work">
           {snapshot?.source_confirmation && !textDirty && pending && !textEditingEnabled ? (
             <div className="source-confirmed-edit-boundary">
-              <p>当前文字已确认。需要修订时，请先进入新的文字核对。</p>
+              <p>
+                进入本地修订不会立即改变持久状态；保存新快照后，此前文字确认及来源审核将失效。
+              </p>
               <button type="button" disabled={busy} onClick={enableTextEditing}>修改文字</button>
             </div>
           ) : textEditingEnabled && snapshot?.source_confirmation ? (
             <p className="source-review-invalidated">
-              重新保存会使此前文字确认及来源审核失效。
+              当前仅打开本地草稿，持久状态未改变；保存新快照后，此前文字确认及来源审核将失效。
             </p>
           ) : null}
           <div className="source-manuscript" role="region" aria-label="标题与正文核对稿">
-            {original.titles.length
-              ? original.titles.map((value, index) => renderTextBlock("title", index, value))
-              : <p className="source-empty-block">AnyDoc 未生成标题块。</p>}
-            {original.body.length ? original.body.map((value, index) => {
+            {original.titles.length === 0 && original.body.length === 0 ? (
+              <div
+                className="source-text-empty-state"
+                role="status"
+                aria-label="标题和正文来源为空"
+              >
+                <strong>未发现标题或正文来源</strong>
+                <p>请对照标准页渲染，确认 AnyDoc 确实没有遗漏可用文字。</p>
+              </div>
+            ) : (
+              <>
+              {original.titles.length
+                ? original.titles.map((value, index) => renderTextBlock("title", index, value))
+                : <p className="source-empty-block">AnyDoc 未生成标题块。</p>}
+              {original.body.length ? original.body.map((value, index) => {
               const noiseSource = noiseSources.find((item) => item.source_index === index);
               const activeNoise = noiseMetadata.find(
                 (item) => item.source_ref === noiseSource?.source_ref,
@@ -1268,7 +1279,9 @@ export function SourceReviewLog({
                     </button>
                   </>
                 ) : null);
-            }) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
+              }) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
+              </>
+            )}
           </div>
 
           {original.speaker_notes.length ? (
@@ -1293,15 +1306,21 @@ export function SourceReviewLog({
             </div>
           ) : null}
 
-          {snapshot?.source_confirmation && !textDirty ? (
-            <p className="source-audit-record">
-              {snapshot.source_confirmation.actor_id} · {formatTime(snapshot.source_confirmation.confirmed_at)}
-            </p>
+          {snapshot?.source_confirmation ? (
+            <>
+              <p className="source-audit-record">
+                {snapshot.source_confirmation.actor_id} · {formatTime(snapshot.source_confirmation.confirmed_at)}
+              </p>
+              {textDirty ? (
+                <p className="source-persisted-boundary">此前文字确认仍保留至新快照保存</p>
+              ) : null}
+            </>
           ) : (
             <p className="source-phase-copy">
               此动作会一次提交完整标题、正文和当前基准，并明确记录人工文字确认。
             </p>
           )}
+          {pending && (!snapshot?.source_confirmation || textDirty) ? (
           <button
             type="button"
             ref={textReviewRef}
@@ -1319,13 +1338,28 @@ export function SourceReviewLog({
                   ? "保存并确认修改"
                   : "文字一致，确认"}
           </button>
+          ) : null}
           </div>
           ) : (
-            <p className="source-text-collapsed">
-              {snapshot?.source_confirmation
-                ? `已由 ${snapshot.source_confirmation.actor_id} 完成文字核对。`
-                : "文字核对已折叠；展开后可继续检查。"}
-            </p>
+            <div
+              className="source-text-collapsed"
+              role="status"
+              aria-label="文字核对摘要"
+            >
+              <div>
+                <strong>{snapshot?.source_confirmation ? "文字已确认" : "文字待确认"}</strong>
+                <span>
+                  {snapshot?.source_confirmation
+                    ? `由 ${snapshot.source_confirmation.actor_id} 完成`
+                    : "展开后继续核对"}
+                </span>
+              </div>
+              <dl>
+                <div><dt>标题</dt><dd>{titles.length}</dd></div>
+                <div><dt>正文</dt><dd>{body.length}</dd></div>
+                <div><dt>表格</dt><dd>{original.tables.length}</dd></div>
+              </dl>
+            </div>
           )}
         </section>
 
@@ -1588,7 +1622,7 @@ export function SourceReviewLog({
           )}
           {imageDirty && snapshot?.source_review ? (
             <p className="source-review-invalidated" role="status">
-              来源审核确认已失效
+              当前图片修改仅保存在本地；保存后来源审核确认将失效。
             </p>
           ) : null}
         </section>
@@ -1599,14 +1633,19 @@ export function SourceReviewLog({
               <h3 id="source-review-heading">来源复核</h3>
               <p>关闭文字与图片来源的完整审核阶段</p>
             </div>
-            <PhaseStatus complete={Boolean(snapshot?.source_review) && !dirty}>
-              {dirty || !snapshot?.source_review ? "未完成" : "已完成"}
+            <PhaseStatus complete={Boolean(snapshot?.source_review)}>
+              {snapshot?.source_review ? (dirty ? "已完成 · 草稿待存" : "已完成") : "未完成"}
             </PhaseStatus>
           </header>
-          {snapshot?.source_review && !dirty ? (
-            <p className="source-audit-record">
-              {snapshot.source_review.actor_id} · {formatTime(snapshot.source_review.completed_at)}
-            </p>
+          {snapshot?.source_review ? (
+            <>
+              <p className="source-audit-record">
+                {snapshot.source_review.actor_id} · {formatTime(snapshot.source_review.completed_at)}
+              </p>
+              {dirty ? (
+                <p className="source-persisted-boundary">此前来源审核仍保留至新快照保存</p>
+              ) : null}
+            </>
           ) : (
             <p className="source-phase-copy">
               {displayedImageBlockers.length
@@ -1614,6 +1653,7 @@ export function SourceReviewLog({
                 : "文字确认后，可显式完成来源审核。"}
             </p>
           )}
+          {pending && !snapshot?.source_review ? (
           <button
             type="button"
             ref={reviewRef}
@@ -1626,6 +1666,7 @@ export function SourceReviewLog({
           >
             {operation === "review" ? "正在完成审核" : "完成来源审核"}
           </button>
+          ) : null}
         </section>
 
         {captureVisuals.length > 0 || blockers.some((blocker) => blocker.code === "capture_required") ? (

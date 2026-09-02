@@ -424,10 +424,38 @@ async function exercise(route, viewport) {
     throw new Error(`${viewport.width}px 删除目标错误或排序后的对象身份未保持`);
   }
 
-  const approve = page.getByRole("button", { name: "批准并转到下一待处理页" });
+  stage = "从已有人工截图的确认摘要续接审批门禁";
+  const textSummary = page.getByRole("status", { name: "文字核对摘要" });
+  const textSummaryCopy = (await textSummary.textContent())?.replace(/\s+/g, "") ?? "";
+  for (const expected of ["文字已确认", "标题1", "正文1", "表格0"]) {
+    if (!textSummaryCopy.includes(expected)) {
+      throw new Error(`${viewport.width}px 文字核对摘要缺少 ${expected}：${textSummaryCopy}`);
+    }
+  }
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  await page.getByRole("button", { name: "修改文字" }).click();
+  await page.getByRole("button", { name: "编辑正文 01" }).click();
+  const revisedBody = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  await revisedBody.fill(`${await revisedBody.inputValue()}（保留既有人工截图）`);
+  await page.getByRole("button", { name: "保存并确认修改" }).click();
+  await page.getByRole("status", { name: "文字核对摘要" }).waitFor();
+  if ((await page.locator(".capture-range").count()) !== 1) {
+    throw new Error(`${viewport.width}px 新文字快照没有保留既有人工截图`);
+  }
   await page.waitForFunction(() => (
     document.activeElement?.textContent?.trim() === "批准并转到下一待处理页"
   ));
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  if (
+    await page.getByRole("button", { name: /^(编辑标题|编辑正文)/ }).count() ||
+    await page.getByRole("textbox", { name: /当前编辑值/ }).count() ||
+    await page.getByRole("button", { name: /文字一致，确认|完成来源审核/ }).count()
+  ) {
+    throw new Error(`${viewport.width}px 新确认稿未保持只读，或重复暴露确认动作`);
+  }
+  await page.getByRole("button", { name: "折叠文字核对" }).click();
+
+  const approve = page.getByRole("button", { name: "批准并转到下一待处理页" });
   if (!(await approve.isEnabled())) throw new Error(`${viewport.width}px 保存后批准动作未开放`);
   if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
     throw new Error(`${viewport.width}px 存在页面级横向溢出`);
@@ -497,6 +525,7 @@ async function exercise(route, viewport) {
   await page.getByRole("button", { name: "排除并转到下一待处理页" }).click();
   await page.getByText(/上一页已排除|待处理队列已清空/).waitFor();
   checks.push(`capture-viewport-${viewport.width}`);
+  checks.push(`capture-next-gate-${viewport.width}`);
   checks.push(`keyboard-flow-${viewport.width}`);
   await page.close();
   } catch (error) {
