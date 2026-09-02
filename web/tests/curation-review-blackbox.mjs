@@ -73,7 +73,9 @@ try {
     if (!inspectorBox || inspectorBox.x >= viewport.width || inspectorBox.x + inspectorBox.width <= 0) {
       throw new Error(`${viewport.label} 缩放下无法滚动到来源与审核动作`);
     }
-    await zoomed.getByText("完整三栏适配 1280px 及以上").waitFor();
+    await zoomed
+      .getByRole("button", { name: /文字一致，确认|保存并确认修改|确认无标题\/正文来源/ })
+      .waitFor();
     checks.push(`zoom-${viewport.label}-reachable`);
     await zoomed.close();
   }
@@ -132,10 +134,21 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
   page.setDefaultTimeout(30_000);
   await page.goto(`${baseUrl}${route}`, { waitUntil: "domcontentloaded", timeout: 10_000 });
+  const textReviewRequests = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/curation/text-review")
+    ) {
+      textReviewRequests.push(new URL(request.url()).pathname);
+    }
+  });
+  await page.getByRole("button", { name: "文字一致，确认" }).waitFor();
   const body = page.getByRole("textbox", { name: "正文来源 1 当前编辑值" });
   await body.waitFor();
   await body.fill(`${await body.inputValue()}（浏览器人工核对）`);
-  await page.getByText("已修改，原确认失效").waitFor();
+  await page.getByText("有本地修改").waitFor();
+  await page.getByRole("button", { name: "保存并确认修改" }).waitFor();
 
   const bodyText = await page.locator("body").innerText();
   for (const forbidden of [
@@ -152,18 +165,20 @@ try {
     if (bodyText.includes(forbidden)) throw new Error(`工作台出现范围外入口：${forbidden}`);
   }
 
-  await page.getByRole("button", { name: "保存修改" }).click();
-  const confirm = page.getByRole("button", { name: "确认文字来源" });
-  await confirm.waitFor();
+  await page.getByRole("button", { name: "保存并确认修改" }).click();
+  await page.getByText("文字及来源审核均已完成。").waitFor();
+  await page.getByRole("button", { name: "展开文字核对" }).waitFor();
+  if (textReviewRequests.length !== 1 || !textReviewRequests[0].endsWith("/curation/text-review")) {
+    throw new Error(`文字核对未通过单一公开命令提交：${textReviewRequests.join(", ")}`);
+  }
+  if (await page.getByRole("button", { name: "确认文字来源" }).count()) {
+    throw new Error("文字核对仍暴露旧确认动作");
+  }
+  checks.push("text-review-action-labels");
+  checks.push("single-text-review-command");
   await page.waitForFunction(
-    () => document.activeElement?.textContent?.trim() === "确认文字来源",
+    () => document.activeElement?.textContent?.trim() === "来源完整，直接审核",
   );
-  await confirm.click();
-  const review = page.getByRole("button", { name: "完成来源审核" });
-  await page.waitForFunction(
-    () => document.activeElement?.textContent?.trim() === "完成来源审核",
-  );
-  await review.click();
   await page.getByRole("button", { name: "有缺口，在页面上框选" }).waitFor();
   if ((await page.locator(".capture-range").count()) !== 0) {
     throw new Error("来源审核完成后自动显示了候选框");

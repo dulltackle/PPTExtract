@@ -26,12 +26,7 @@ const mutationSnapshots = [];
 
 async function prepareReviewedPage(page) {
   await page.getByRole("heading", { name: "来源日志" }).waitFor();
-  const save = page.getByRole("button", { name: "保存修改" });
-  if (await save.isEnabled()) await save.click();
-  const confirm = page.getByRole("button", { name: "确认文字来源" });
-  await confirm.click();
-  const review = page.getByRole("button", { name: "完成来源审核" });
-  await review.click();
+  await page.getByRole("button", { name: "文字一致，确认" }).click();
   await page.getByRole("button", { name: "有缺口，在页面上框选" }).waitFor();
   if ((await page.locator(".capture-range").count()) !== 0) {
     throw new Error("来源审核完成后自动显示了候选框");

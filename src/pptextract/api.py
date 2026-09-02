@@ -27,6 +27,7 @@ from pptextract.curation import (
     read_page_curation,
     read_source_image,
     reopen_page,
+    review_source_text,
     save_capture_visual,
     save_image_source_disposition,
     save_source_snapshot,
@@ -357,7 +358,7 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(
-        _request: Request, exception: RequestValidationError
+        request: Request, exception: RequestValidationError
     ) -> JSONResponse:
         details = [
             {
@@ -368,7 +369,10 @@ def create_app(
             }
             for error in exception.errors()
         ]
-        return error_response(422, "invalid_request", "请求参数无效。", details)
+        message = "请求参数无效。"
+        if request.url.path.endswith("/curation/text-review"):
+            message = "请求参数无效；持久状态未改变。"
+        return error_response(422, "invalid_request", message, details)
 
     @app.exception_handler(RecoveryGateClosedError)
     async def handle_recovery_gate_closed(
@@ -1428,6 +1432,35 @@ def create_app(
         except CurationRequestError as error:
             return error_response(error.status_code, error.code, error.message)
         return JSONResponse(status_code=201, content={"curation": curation})
+
+    @app.post("/api/v1/pages/{page_id}/curation/text-review")
+    async def review_page_source_text(
+        page_id: str, command: SaveSourceSnapshot, request: Request
+    ) -> JSONResponse:
+        actor = actors.resolve(request)
+        try:
+            result = review_source_text(
+                resolved,
+                page_id=page_id,
+                actor_id=actor.actor_id,
+                base_snapshot_id=command.base_snapshot_id,
+                titles=command.titles,
+                body=command.body,
+            )
+        except CurationRequestError as error:
+            return error_response(
+                error.status_code,
+                error.code,
+                f"{error.message} 持久状态未改变。",
+            )
+        except sqlite3.Error:
+            return error_response(
+                503,
+                "curation_text_review_failed",
+                "文字核对未能提交；持久状态未改变。",
+            )
+        status_code = 201 if result["transition"]["snapshot"] == "created" else 200
+        return JSONResponse(status_code=status_code, content=result)
 
     @app.get("/api/v1/pages/{page_id}/repeated-footer-noise/candidates/{source_ref}")
     async def get_repeated_footer_noise_candidate(page_id: str, source_ref: str) -> JSONResponse:

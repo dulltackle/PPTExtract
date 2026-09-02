@@ -225,6 +225,21 @@ export interface CurationSnapshot {
   image_source_decisions?: CurationImageSource[];
 }
 
+export interface CurationTextReviewResult {
+  curation: CurationState;
+  transition: {
+    snapshot: "created" | "reused";
+    source_saved: boolean;
+    source_confirmed: boolean;
+    source_review_completed: boolean;
+  };
+  next_unresolved_image: {
+    source_ref: string;
+    position: number;
+    blocker_code: CurationBlocker["code"];
+  } | null;
+}
+
 export interface CurationBlocker {
   code:
     | "source_unsaved"
@@ -897,6 +912,23 @@ export async function saveCurationSnapshot(
       "来源修改未能保存；本地修改仍保留。",
     )
   ).curation;
+}
+
+export async function reviewCurationText(
+  pageId: string,
+  baseSnapshotId: string | null,
+  titles: string[],
+  body: string[],
+): Promise<CurationTextReviewResult> {
+  const response = await fetch(`/api/v1/pages/${pageId}/curation/text-review`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ base_snapshot_id: baseSnapshotId, titles, body }),
+  });
+  return readJson<CurationTextReviewResult>(
+    response,
+    "文字核对未能提交；持久状态未改变，本地文字修改仍保留。",
+  );
 }
 
 export async function saveCurationImageSource(

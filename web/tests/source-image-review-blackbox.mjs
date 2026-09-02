@@ -22,14 +22,10 @@ const captureRoot = process.env.PPTEXTRACT_CAPTURE_DIR
 if (captureRoot) await mkdir(captureRoot, { recursive: true });
 
 async function saveAndConfirmText(page) {
-  const save = page.getByRole("button", { name: "保存修改" });
-  const confirm = page.getByRole("button", { name: "确认文字来源" });
-  if (await save.isEnabled()) {
-    await save.click();
-    await confirm.click();
-  } else if (await confirm.isEnabled()) {
-    await confirm.click();
-  }
+  const reviewText = page.getByRole("button", {
+    name: /^(文字一致，确认|保存并确认修改|确认无标题\/正文来源)$/,
+  });
+  if (await reviewText.isEnabled()) await reviewText.click();
   await page.getByRole("heading", { name: "图片来源" }).waitFor();
   await page.getByRole("radio", { name: "保留原始图片" }).waitFor();
 }

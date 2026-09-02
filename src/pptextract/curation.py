@@ -647,6 +647,177 @@ def save_source_snapshot(
         return read_curation_state(connection, refreshed)
 
 
+def review_source_text(
+    settings: Settings,
+    *,
+    page_id: str,
+    actor_id: str,
+    base_snapshot_id: str | None,
+    titles: list[str],
+    body: list[str],
+) -> dict[str, Any]:
+    with transaction(settings) as connection:
+        page = _read_current_page(connection, page_id)
+        if page["review_status"] != "pending":
+            raise CurationRequestError(409, "page_not_pending", "只有待处理页可以核对来源。")
+        if page["current_snapshot_id"] != base_snapshot_id:
+            raise CurationRequestError(
+                409,
+                "curation_snapshot_stale",
+                "此页已被其他会话更新，请重新加载后比较修改。",
+            )
+
+        original = json.loads(str(page["source_content_json"]))
+        content = _validate_editable_source(original, titles, body)
+        current = _read_snapshot(connection, base_snapshot_id)
+        snapshot_reused = bool(
+            current is not None
+            and current["source_content"]["titles"] == titles
+            and current["source_content"]["body"] == body
+        )
+        source_saved = not snapshot_reused
+        now = timestamp()
+
+        if snapshot_reused:
+            snapshot_id = str(base_snapshot_id)
+        else:
+            capture_required = 0
+            if base_snapshot_id is not None:
+                capture_required = int(
+                    connection.execute(
+                        "SELECT capture_required FROM curation_snapshots WHERE snapshot_id = ?",
+                        (base_snapshot_id,),
+                    ).fetchone()[0]
+                )
+            snapshot_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO curation_snapshots (
+                    snapshot_id, page_version_id, snapshot_kind, source_snapshot_id,
+                    overview, source_content_json, capture_required, created_by, created_at
+                ) VALUES (?, ?, 'formal', ?, NULL, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    page["page_version_id"],
+                    base_snapshot_id,
+                    json.dumps(
+                        content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    capture_required,
+                    actor_id,
+                    now,
+                ),
+            )
+            if base_snapshot_id is not None:
+                _copy_image_source_records(
+                    connection,
+                    source_snapshot_id=base_snapshot_id,
+                    target_snapshot_id=snapshot_id,
+                )
+            updated = connection.execute(
+                """
+                UPDATE page_versions SET current_snapshot_id = ?
+                WHERE page_version_id = ? AND current_snapshot_id IS ?
+                """,
+                (snapshot_id, page["page_version_id"], base_snapshot_id),
+            )
+            if updated.rowcount != 1:
+                raise CurationRequestError(
+                    409,
+                    "curation_snapshot_stale",
+                    "此页已被其他会话更新，请重新加载后比较修改。",
+                )
+            record_action(
+                connection,
+                page_version_id=str(page["page_version_id"]),
+                actor_id=actor_id,
+                action_type="source_saved",
+                occurred_at=now,
+            )
+            page = _read_current_page(connection, page_id)
+
+        source_confirmed = _read_confirmation(connection, snapshot_id) is None
+        if source_confirmed:
+            connection.execute(
+                """
+                INSERT INTO curation_source_confirmations (
+                    confirmation_id, snapshot_id, actor_id, confirmed_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, snapshot_id, actor_id, now),
+            )
+            record_action(
+                connection,
+                page_version_id=str(page["page_version_id"]),
+                actor_id=actor_id,
+                action_type="source_confirmed",
+                occurred_at=now,
+            )
+
+        interim = read_curation_state(connection, page)
+        unresolved_images = [
+            blocker
+            for blocker in interim["blockers"]
+            if str(blocker["code"]).startswith("image_")
+        ]
+        source_review_completed = (
+            not unresolved_images and _read_review(connection, snapshot_id) is None
+        )
+        if source_review_completed:
+            connection.execute(
+                """
+                INSERT INTO curation_source_reviews (
+                    review_id, snapshot_id, actor_id, completed_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, snapshot_id, actor_id, now),
+            )
+            record_action(
+                connection,
+                page_version_id=str(page["page_version_id"]),
+                actor_id=actor_id,
+                action_type="source_review_completed",
+                occurred_at=now,
+            )
+
+        state = read_curation_state(connection, page)
+        next_blocker = next(
+            (
+                blocker
+                for blocker in state["blockers"]
+                if str(blocker["code"]).startswith("image_")
+                and blocker.get("source_ref")
+            ),
+            None,
+        )
+        next_image = None
+        if next_blocker is not None:
+            item = next(
+                candidate
+                for candidate in state["image_sources"]["items"]
+                if candidate["source_ref"] == next_blocker["source_ref"]
+            )
+            next_image = {
+                "source_ref": next_blocker["source_ref"],
+                "position": item["position"],
+                "blocker_code": next_blocker["code"],
+            }
+        return {
+            "curation": state,
+            "transition": {
+                "snapshot": "reused" if snapshot_reused else "created",
+                "source_saved": source_saved,
+                "source_confirmed": source_confirmed,
+                "source_review_completed": source_review_completed,
+            },
+            "next_unresolved_image": next_image,
+        }
+
+
 def confirm_source_snapshot(
     settings: Settings, *, page_id: str, actor_id: str, snapshot_id: str
 ) -> dict[str, Any]:

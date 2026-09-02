@@ -436,6 +436,8 @@ def test_review_queue_supports_single_and_batch_conclusions_in_browser(
             "zoom-125%-reachable",
             "zoom-200%-reachable",
             "text-zoom-200%-reachable",
+            "text-review-action-labels",
+            "single-text-review-command",
             "plain-text-zero-capture-approved",
             "keyboard-a-approved",
             "wcag22aa-1440",

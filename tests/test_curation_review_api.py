@@ -277,6 +277,296 @@ def _review_plain_text_page(
     return page_id, state
 
 
+def test_text_review_command_creates_then_reuses_one_confirmed_snapshot_atomically(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(client, settings, monkeypatch)
+    page_id = str(page["page_id"])
+    command = {
+        "base_snapshot_id": None,
+        "titles": ["公开来源标题"],
+        "body": ["公开来源正文。"],
+    }
+
+    created = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        headers={"X-Actor-ID": "curator-zhang"},
+        json=command,
+    )
+
+    assert created.status_code == 201
+    payload = created.json()
+    snapshot = payload["curation"]["current_snapshot"]
+    assert snapshot["source_content"]["titles"] == command["titles"]
+    assert snapshot["source_content"]["body"] == command["body"]
+    assert snapshot["source_confirmation"]["actor_id"] == "curator-zhang"
+    assert snapshot["source_review"]["actor_id"] == "curator-zhang"
+    assert payload["transition"] == {
+        "snapshot": "created",
+        "source_saved": True,
+        "source_confirmed": True,
+        "source_review_completed": True,
+    }
+    assert payload["next_unresolved_image"] is None
+
+    reused = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        headers={"X-Actor-ID": "curator-li"},
+        json={**command, "base_snapshot_id": snapshot["snapshot_id"]},
+    )
+
+    assert reused.status_code == 200
+    assert reused.json()["curation"]["current_snapshot"]["snapshot_id"] == snapshot[
+        "snapshot_id"
+    ]
+    assert reused.json()["transition"] == {
+        "snapshot": "reused",
+        "source_saved": False,
+        "source_confirmed": False,
+        "source_review_completed": False,
+    }
+    facts = client.get("/api/v1/curation/runtime-facts").json()["pages"][0]
+    assert facts["actions"] == {
+        "source_confirmed": 1,
+        "source_review_completed": 1,
+        "source_saved": 1,
+    }
+
+
+def test_text_review_command_returns_first_unresolved_image_and_inherits_disposed_sources(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(
+        client,
+        settings,
+        monkeypatch,
+        content=NormalizedPageContent(
+            titles=("含图片来源",),
+            body=("文字来源已完整。",),
+            tables=(),
+            images=(
+                NormalizedImage(
+                    reference_index=0,
+                    alt_text="公开图片",
+                    media_type="image/png",
+                    origin_part="ppt/media/image1.png",
+                    data=b"public-image",
+                ),
+            ),
+            speaker_notes=(),
+        ),
+    )
+    page_id = str(page["page_id"])
+
+    blocked = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["含图片来源"],
+            "body": ["文字来源已完整。"],
+        },
+    )
+
+    assert blocked.status_code == 201
+    blocked_payload = blocked.json()
+    first_item = blocked_payload["curation"]["image_sources"]["items"][0]
+    assert blocked_payload["transition"]["source_review_completed"] is False
+    assert blocked_payload["next_unresolved_image"] == {
+        "source_ref": first_item["source_ref"],
+        "position": 0,
+        "blocker_code": "image_disposition_required",
+    }
+
+    disposed = client.post(
+        f"/api/v1/pages/{page_id}/curation/image-sources/{first_item['source_ref']}",
+        json={
+            "base_snapshot_id": blocked_payload["curation"]["current_snapshot"][
+                "snapshot_id"
+            ],
+            "disposition": "included",
+            "summary": "公开图片展示完整流程。",
+            "ignore_reason": None,
+            "ignore_note": None,
+        },
+    ).json()["curation"]
+    disposed_snapshot = disposed["current_snapshot"]
+    disposed_item = disposed["image_sources"]["items"][0]
+
+    changed = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        headers={"X-Actor-ID": "curator-li"},
+        json={
+            "base_snapshot_id": disposed_snapshot["snapshot_id"],
+            "titles": ["人工修订后的图片页"],
+            "body": ["文字来源已完整。"],
+        },
+    )
+
+    assert changed.status_code == 201
+    changed_payload = changed.json()
+    changed_snapshot = changed_payload["curation"]["current_snapshot"]
+    changed_item = changed_payload["curation"]["image_sources"]["items"][0]
+    assert changed_snapshot["snapshot_id"] != disposed_snapshot["snapshot_id"]
+    assert changed_snapshot["source_snapshot_id"] == disposed_snapshot["snapshot_id"]
+    assert changed_snapshot["source_content"]["titles"] == ["人工修订后的图片页"]
+    assert changed_item["disposition"] == "included"
+    assert changed_item["summary"] == "公开图片展示完整流程。"
+    assert changed_item["visual_ref"] == disposed_item["visual_ref"]
+    assert changed_payload["transition"] == {
+        "snapshot": "created",
+        "source_saved": True,
+        "source_confirmed": True,
+        "source_review_completed": True,
+    }
+    assert changed_payload["next_unresolved_image"] is None
+
+
+def test_text_review_command_explicitly_confirms_an_empty_text_source(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(
+        client,
+        settings,
+        monkeypatch,
+        content=NormalizedPageContent(
+            titles=(), body=(), tables=(), images=(), speaker_notes=()
+        ),
+    )
+    page_id = str(page["page_id"])
+
+    response = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        headers={"X-Actor-ID": "curator-empty"},
+        json={"base_snapshot_id": None, "titles": [], "body": []},
+    )
+
+    assert response.status_code == 201
+    state = response.json()["curation"]
+    assert state["current_snapshot"]["source_content"]["titles"] == []
+    assert state["current_snapshot"]["source_content"]["body"] == []
+    assert state["current_snapshot"]["source_confirmation"]["actor_id"] == "curator-empty"
+    assert state["current_snapshot"]["source_review"]["actor_id"] == "curator-empty"
+    assert [blocker["code"] for blocker in state["blockers"]] == ["chunk_body_empty"]
+
+
+def test_text_review_command_explains_that_invalid_input_does_not_persist(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(client, settings, monkeypatch)
+    page_id = str(page["page_id"])
+
+    response = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        json={"base_snapshot_id": None, "titles": ["缺少正文字段"]},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert "持久状态未改变" in response.json()["error"]["message"]
+    state = client.get(f"/api/v1/pages/{page_id}").json()["curation"]
+    assert state["current_snapshot"] is None
+
+
+def test_text_review_command_rejects_stale_or_restructured_text_without_partial_changes(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(client, settings, monkeypatch)
+    page_id = str(page["page_id"])
+    first = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["公开来源标题"],
+            "body": ["公开来源正文。"],
+        },
+    ).json()["curation"]["current_snapshot"]
+
+    stale = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["不应写入的标题"],
+            "body": ["不应写入的正文"],
+        },
+    )
+    invalid = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        json={
+            "base_snapshot_id": first["snapshot_id"],
+            "titles": ["公开来源标题", "新增块"],
+            "body": ["公开来源正文。"],
+        },
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "curation_snapshot_stale"
+    assert "持久状态未改变" in stale.json()["error"]["message"]
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "source_structure_changed"
+    detail = client.get(f"/api/v1/pages/{page_id}").json()["curation"]
+    assert detail["current_snapshot"]["snapshot_id"] == first["snapshot_id"]
+    assert detail["current_snapshot"]["source_content"]["titles"] == ["公开来源标题"]
+
+
+@pytest.mark.parametrize("failure_kind", ["persistence", "audit"])
+def test_text_review_command_rolls_back_every_fact_when_a_write_fails(
+    system: tuple[TestClient, Settings],
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    client, settings = system
+    page = _ingest_plain_text_page(
+        client,
+        settings,
+        monkeypatch,
+        idempotency_key=f"text-review-rollback-{failure_kind}",
+    )
+    page_id = str(page["page_id"])
+    with connect(settings) as connection:
+        if failure_kind == "persistence":
+            connection.execute(
+                """
+                CREATE TRIGGER fail_text_review_persistence
+                BEFORE INSERT ON curation_snapshots
+                BEGIN SELECT RAISE(ABORT, 'injected persistence failure'); END
+                """
+            )
+        else:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_text_review_audit
+                BEFORE INSERT ON curation_action_events
+                WHEN NEW.action_type = 'source_confirmed'
+                BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END
+                """
+            )
+
+    failed = client.post(
+        f"/api/v1/pages/{page_id}/curation/text-review",
+        json={
+            "base_snapshot_id": None,
+            "titles": ["回滚标题"],
+            "body": ["回滚正文"],
+        },
+    )
+
+    assert failed.status_code == 503
+    assert failed.json()["error"] == {
+        "code": "curation_text_review_failed",
+        "message": "文字核对未能提交；持久状态未改变。",
+    }
+    detail = client.get(f"/api/v1/pages/{page_id}").json()["curation"]
+    assert detail["current_snapshot"] is None
+    facts = client.get("/api/v1/curation/runtime-facts").json()["pages"]
+    page_facts = next(item for item in facts if item["page_id"] == page_id)
+    assert page_facts["actions"] == {}
+
+
 def test_plain_text_source_can_be_saved_confirmed_reviewed_and_approved_without_annotations(
     system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch
 ) -> None:

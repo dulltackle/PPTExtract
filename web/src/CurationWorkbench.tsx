@@ -105,7 +105,9 @@ function timingStage(curation: CurationState | null): CurationTimingStage | null
 
 function focusAfterLiveAnnouncement(target: HTMLElement | null) {
   window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => target?.focus());
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => target?.focus());
+    });
   });
 }
 
@@ -358,6 +360,7 @@ function EvidencePanel({
   captureVisuals,
   editorCommand,
   focusCapturePathNonce,
+  focusSourceCompletenessNonce,
   onCurationChange,
   onCaptureVisualsChange,
   onEditorCommandHandled,
@@ -369,6 +372,7 @@ function EvidencePanel({
   captureVisuals: CurationVisual[];
   editorCommand: VisualEditorCommand | null;
   focusCapturePathNonce: number;
+  focusSourceCompletenessNonce: number;
   onCurationChange: (curation: CurationState) => void;
   onCaptureVisualsChange: (visuals: CurationVisual[]) => void;
   onEditorCommandHandled: () => void;
@@ -391,6 +395,7 @@ function EvidencePanel({
   const activeRangeRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLElement>(null);
   const summaryRef = useRef<HTMLTextAreaElement>(null);
+  const sourceCompleteButtonRef = useRef<HTMLButtonElement>(null);
   const capturePathButtonRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const dragOperation = useRef<{
@@ -649,6 +654,18 @@ function EvidencePanel({
       window.cancelAnimationFrame(focusFrame);
     };
   }, [canChoosePath, focusCapturePathNonce, mode]);
+
+  useEffect(() => {
+    if (!focusSourceCompletenessNonce || !canChoosePath || mode !== "decision") return;
+    let focusFrame = 0;
+    const renderFrame = window.requestAnimationFrame(() => {
+      focusFrame = window.requestAnimationFrame(() => sourceCompleteButtonRef.current?.focus());
+    });
+    return () => {
+      window.cancelAnimationFrame(renderFrame);
+      window.cancelAnimationFrame(focusFrame);
+    };
+  }, [canChoosePath, focusSourceCompletenessNonce, mode]);
 
   useEffect(() => {
     if (mode !== "selecting") return;
@@ -957,7 +974,11 @@ function EvidencePanel({
                   <span>标准页仍有未被文字与图片来源完整表达的内容吗？</span>
                 </div>
                 <div>
-                  <button type="button" onClick={onFocusApproval}>
+                  <button
+                    ref={sourceCompleteButtonRef}
+                    type="button"
+                    onClick={onFocusApproval}
+                  >
                     来源完整，直接审核
                   </button>
                   <button
@@ -1512,6 +1533,7 @@ function InspectorPanel({
   onMoveCapture,
   onDeleteCapture,
   onMarkSourceComplete,
+  onSourceReviewCompleted,
   onModalStateChange,
   onSourceDirtyChange,
   onApproved,
@@ -1548,6 +1570,7 @@ function InspectorPanel({
   ) => void;
   onDeleteCapture: (visualRef: string, number: number, trigger: HTMLElement) => void;
   onMarkSourceComplete: (trigger: HTMLElement) => void;
+  onSourceReviewCompleted: () => void;
   onModalStateChange: (open: boolean) => void;
   onSourceDirtyChange: (dirty: boolean) => void;
   onApproved: () => Promise<void>;
@@ -1600,6 +1623,7 @@ function InspectorPanel({
           onMoveCapture={onMoveCapture}
           onDeleteCapture={onDeleteCapture}
           onMarkSourceComplete={onMarkSourceComplete}
+          onSourceReviewCompleted={onSourceReviewCompleted}
           onModalStateChange={onModalStateChange}
         />
       )}
@@ -1644,6 +1668,7 @@ export function CurationWorkbench({
   } | null>(null);
   const [focusApprovalNonce, setFocusApprovalNonce] = useState(0);
   const [focusCapturePathNonce, setFocusCapturePathNonce] = useState(0);
+  const [focusSourceCompletenessNonce, setFocusSourceCompletenessNonce] = useState(0);
   const [approvalPathReady, setApprovalPathReady] = useState(false);
   const [selectedForBatch, setSelectedForBatch] = useState<Set<string>>(new Set());
   const [batchReason, setBatchReason] = useState<ExclusionReason | "">("");
@@ -2374,6 +2399,7 @@ export function CurationWorkbench({
         captureVisuals={captureVisuals}
         editorCommand={editorCommand}
         focusCapturePathNonce={focusCapturePathNonce}
+        focusSourceCompletenessNonce={focusSourceCompletenessNonce}
         onCurationChange={setSelectedCuration}
         onCaptureVisualsChange={setCaptureVisuals}
         onEditorCommandHandled={() => setEditorCommand(null)}
@@ -2408,6 +2434,14 @@ export function CurationWorkbench({
         }}
         onDeleteCapture={requestDeleteCapture}
         onMarkSourceComplete={(trigger) => void handleMarkSourceComplete(trigger)}
+        onSourceReviewCompleted={() => {
+          if (captureVisuals.length > 0) {
+            setApprovalPathReady(true);
+            setFocusApprovalNonce((value) => value + 1);
+          } else {
+            setFocusSourceCompletenessNonce((value) => value + 1);
+          }
+        }}
         onModalStateChange={setSourceModalOpen}
         onSourceDirtyChange={setSourceDirty}
         onApproved={handleApproved}

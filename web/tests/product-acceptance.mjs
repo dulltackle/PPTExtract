@@ -28,10 +28,10 @@ async function openPage(route, pageNumber, viewport = { width: 1440, height: 102
 }
 
 async function confirmText(page) {
-  const save = page.getByRole("button", { name: "保存修改" });
-  if (await save.isEnabled()) await save.click();
-  const confirm = page.getByRole("button", { name: "确认文字来源" });
-  await confirm.click();
+  const reviewText = page.getByRole("button", {
+    name: /^(文字一致，确认|保存并确认修改|确认无标题\/正文来源)$/,
+  });
+  if (await reviewText.isEnabled()) await reviewText.click();
 }
 
 async function finishSourceReview(page) {
@@ -61,7 +61,7 @@ async function curate(route) {
     throw new Error("1280px 产品快乐路径存在页面级横向溢出");
   }
   await confirmText(zeroCapture);
-  await finishSourceReview(zeroCapture);
+  await zeroCapture.getByRole("button", { name: "来源完整，直接审核" }).waitFor();
   const bodyText = await zeroCapture.locator("body").innerText();
   for (const forbidden of [
     "VLM",
@@ -95,7 +95,7 @@ async function curate(route) {
 
   const capture = await openPage(route, 3);
   await confirmText(capture);
-  await finishSourceReview(capture);
+  await capture.getByRole("button", { name: "有缺口，在页面上框选" }).waitFor();
   await capture.getByRole("button", { name: "有缺口，在页面上框选" }).click();
   const render = capture.getByRole("img", { name: /标准页渲染结果/ });
   const renderBox = await render.boundingBox();

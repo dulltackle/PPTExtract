@@ -8,7 +8,6 @@ import {
   type CurationState,
   type CurationVisual,
   completeCurationSourceReview,
-  confirmCurationSource,
   type CurationPage,
   excludeCurationPage,
   type ExclusionReason,
@@ -21,7 +20,7 @@ import {
   reopenCurationPage,
   type RepeatedFooterNoiseCandidate,
   revokeRepeatedFooterNoise,
-  saveCurationSnapshot,
+  reviewCurationText,
   saveCurationImageSource,
   type SourceContent,
 } from "./api";
@@ -255,6 +254,7 @@ export function SourceReviewLog({
   onMoveCapture,
   onDeleteCapture,
   onMarkSourceComplete,
+  onSourceReviewCompleted,
   onModalStateChange,
 }: {
   page: CurationPage;
@@ -281,6 +281,7 @@ export function SourceReviewLog({
   ) => void;
   onDeleteCapture: (visualRef: string, number: number, trigger: HTMLElement) => void;
   onMarkSourceComplete: (trigger: HTMLElement) => void;
+  onSourceReviewCompleted: () => void;
   onModalStateChange: (open: boolean) => void;
 }) {
   const [detail, setDetail] = useState<PageDetail | null>(null);
@@ -295,11 +296,12 @@ export function SourceReviewLog({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryRevision, setRetryRevision] = useState(0);
+  const [textExpanded, setTextExpanded] = useState(true);
   const [operation, setOperation] = useState<
-    "save" | "image" | "confirm" | "review" | "approve" | "exclude" | "reopen" |
+    "text-review" | "image" | "review" | "approve" | "exclude" | "reopen" |
     "noise-preview" | "noise-confirm" | "noise-revoke" | null
   >(null);
-  const [focusTarget, setFocusTarget] = useState<"confirm" | "review" | "approve" | null>(null);
+  const [focusTarget, setFocusTarget] = useState<"review" | "approve" | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(arrivalAnnouncement);
   const [exclusionReason, setExclusionReason] = useState<ExclusionReason | "">("");
   const [exclusionNote, setExclusionNote] = useState("");
@@ -308,7 +310,7 @@ export function SourceReviewLog({
   const [noiseAcknowledged, setNoiseAcknowledged] = useState(false);
   const [noiseNote, setNoiseNote] = useState("");
   const firstFieldRef = useRef<HTMLTextAreaElement>(null);
-  const confirmRef = useRef<HTMLButtonElement>(null);
+  const textReviewRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
   const exclusionReasonRef = useRef<HTMLSelectElement>(null);
@@ -354,6 +356,7 @@ export function SourceReviewLog({
         setImageDimensions({});
         setPreviewFailures({});
         setPreviewRevisions({});
+        setTextExpanded(true);
         setExclusionReason("");
         setExclusionNote("");
         setShowReopen(false);
@@ -443,9 +446,7 @@ export function SourceReviewLog({
 
   useEffect(() => {
     if (busy || !focusTarget) return;
-    const target = focusTarget === "confirm"
-      ? confirmRef.current
-      : focusTarget === "review"
+    const target = focusTarget === "review"
         ? reviewRef.current
         : approveRef.current;
     if (!target || target.disabled) return;
@@ -600,55 +601,37 @@ export function SourceReviewLog({
     window.requestAnimationFrame(() => approveRef.current?.focus());
   }, [busy, focusApprovalNonce]);
 
-  const handleSave = async () => {
-    if (!page.page_id || busy || (!textDirty && snapshot)) return;
-    setOperation("save");
-    setAnnouncement("正在保存来源修改…");
+  const handleTextReview = async () => {
+    if (
+      !page.page_id || busy || !pending ||
+      (!textDirty && Boolean(snapshot?.source_confirmation))
+    ) return;
+    setOperation("text-review");
+    setAnnouncement("正在原子提交整页文字核对…");
     try {
-      const next = await saveCurationSnapshot(
+      const result = await reviewCurationText(
         page.page_id,
         snapshot?.snapshot_id ?? null,
         titles,
         body,
       );
-      applyCuration(next, { preserveImageDrafts: imageDirty });
-      setAnnouncement(
-        imageDirty
-          ? "文字修改已保存；本地图片草稿仍保留。请重新确认文字来源后继续。"
-          : "修改已保存为新的不可变策展快照。请继续确认文字来源。",
-      );
-      setFocusTarget("confirm");
-    } catch (cause) {
-      setAnnouncement(
-        cause instanceof OperatorError
-          ? `${cause.message} 本地修改仍保留。`
-          : "来源修改未能保存；本地修改仍保留。",
-      );
-    } finally {
-      setOperation(null);
-    }
-  };
-
-  const handleConfirm = async () => {
-    if (!page.page_id || !snapshot || textDirty || busy) return;
-    setOperation("confirm");
-    setAnnouncement("正在记录文字来源确认…");
-    try {
-      const next = await confirmCurationSource(page.page_id, snapshot.snapshot_id);
-      applyCuration(next, { preserveImageDrafts: imageDirty });
-      setAnnouncement("文字来源已由人确认；字段完成与人工核对已分别记录。");
-      const firstImage = next.image_sources.items.find((item) => item.disposition === null) ??
-        next.image_sources.items[0];
-      if (firstImage) {
-        setExpandedSourceRef(firstImage.source_ref);
-        setFocusSourceRef(firstImage.source_ref);
+      applyCuration(result.curation, { preserveImageDrafts: imageDirty });
+      setTextExpanded(false);
+      if (result.next_unresolved_image) {
+        setExpandedSourceRef(result.next_unresolved_image.source_ref);
+        setFocusSourceRef(result.next_unresolved_image.source_ref);
+        setAnnouncement("文字已确认，继续处理图片。");
       } else {
-        setFocusTarget("review");
+        setAnnouncement("文字及来源审核均已完成。");
+        onSourceReviewCompleted();
       }
     } catch (cause) {
       setAnnouncement(
-        cause instanceof OperatorError ? cause.message : "文字来源确认失败；当前状态未改变。",
+        cause instanceof OperatorError
+          ? `${cause.message} 本地文字修改仍保留。`
+          : "文字核对未能提交；持久状态未改变，本地文字修改仍保留。",
       );
+      window.requestAnimationFrame(() => textReviewRef.current?.focus());
     } finally {
       setOperation(null);
     }
@@ -753,14 +736,18 @@ export function SourceReviewLog({
       }));
       return;
     }
-    const target = blocker.code === "source_unsaved"
-      ? firstFieldRef.current
-      : blocker.code === "source_unconfirmed"
-        ? confirmRef.current
-        : blocker.code === "source_review_incomplete"
-          ? reviewRef.current
-          : null;
-    target?.focus();
+    if (blocker.code === "source_unsaved" || blocker.code === "source_unconfirmed") {
+      setTextExpanded(true);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        const target = blocker.code === "source_unsaved"
+          ? firstFieldRef.current
+          : textReviewRef.current;
+        target?.focus();
+      }));
+    } else {
+      const target = blocker.code === "source_review_incomplete" ? reviewRef.current : null;
+      target?.focus();
+    }
   };
 
   const handleReview = async () => {
@@ -1032,11 +1019,26 @@ export function SourceReviewLog({
               <h3 id="source-text-heading">文字来源</h3>
               <p>保留 AnyDoc 块的角色、顺序与段落边界</p>
             </div>
-            <PhaseStatus complete={Boolean(snapshot) && !textDirty}>
-              {textDirty ? "已修改，原确认失效" : snapshot ? "修改已保存" : "待保存"}
-            </PhaseStatus>
+            <div className="source-text-heading-actions">
+              <PhaseStatus complete={Boolean(snapshot?.source_confirmation) && !textDirty}>
+                {textDirty
+                  ? "有本地修改"
+                  : snapshot?.source_confirmation
+                    ? "已确认"
+                    : "待确认"}
+              </PhaseStatus>
+              <button
+                type="button"
+                className="source-text-toggle"
+                aria-expanded={textExpanded}
+                aria-controls="source-text-work"
+                onClick={() => setTextExpanded((current) => !current)}
+              >{textExpanded ? "折叠文字核对" : "展开文字核对"}</button>
+            </div>
           </header>
 
+          {textExpanded ? (
+          <div className="source-text-work" id="source-text-work">
           <div className="source-field-group">
             <span className="source-field-label">标题</span>
             {original.titles.length ? original.titles.map((value, index) => (
@@ -1170,44 +1172,40 @@ export function SourceReviewLog({
             </div>
           ) : null}
 
-          <button
-            type="button"
-            className="source-action-button"
-            disabled={!pending || busy || (!textDirty && Boolean(snapshot))}
-            onClick={() => void handleSave()}
-          >
-            {operation === "save" ? "正在保存" : "保存修改"}
-          </button>
-        </section>
-
-        <section className="source-phase" aria-labelledby="source-confirm-heading">
-          <header>
-            <div>
-              <h3 id="source-confirm-heading">文字确认</h3>
-              <p>字段已填不等于人已核对</p>
-            </div>
-            <PhaseStatus complete={Boolean(snapshot?.source_confirmation) && !textDirty}>
-              {textDirty || !snapshot?.source_confirmation ? "待确认" : "已确认"}
-            </PhaseStatus>
-          </header>
           {snapshot?.source_confirmation && !textDirty ? (
             <p className="source-audit-record">
               {snapshot.source_confirmation.actor_id} · {formatTime(snapshot.source_confirmation.confirmed_at)}
             </p>
           ) : (
-            <p className="source-phase-copy">保存当前修改后，再明确确认已逐块对照标准页渲染结果。</p>
+            <p className="source-phase-copy">
+              此动作会一次提交完整标题、正文和当前基准，并明确记录人工文字确认。
+            </p>
           )}
           <button
             type="button"
-            ref={confirmRef}
+            ref={textReviewRef}
             className="source-action-button"
             disabled={
-              !pending || busy || textDirty || !snapshot || Boolean(snapshot.source_confirmation)
+              !pending || busy || (!textDirty && Boolean(snapshot?.source_confirmation))
             }
-            onClick={() => void handleConfirm()}
+            onClick={() => void handleTextReview()}
           >
-            {operation === "confirm" ? "正在确认" : "确认文字来源"}
+            {operation === "text-review"
+              ? "正在提交文字核对"
+              : original.titles.length === 0 && original.body.length === 0
+                ? "确认无标题/正文来源"
+                : textDirty
+                  ? "保存并确认修改"
+                  : "文字一致，确认"}
           </button>
+          </div>
+          ) : (
+            <p className="source-text-collapsed">
+              {snapshot?.source_confirmation
+                ? `已由 ${snapshot.source_confirmation.actor_id} 完成文字核对。`
+                : "文字核对已折叠；展开后可继续检查。"}
+            </p>
+          )}
         </section>
 
         <section className="source-phase source-image-phase" aria-labelledby="source-image-heading">
@@ -1223,7 +1221,7 @@ export function SourceReviewLog({
 
           {!snapshot?.source_confirmation || textDirty ? (
             <p className="source-image-locked">
-              先保存并确认文字来源，再逐项处置图片来源。
+              先提交整页文字核对，再逐项处置图片来源。
             </p>
           ) : curation.image_sources.total === 0 ? (
             <div className="source-image-empty">

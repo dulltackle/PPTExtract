@@ -321,9 +321,10 @@ describe("来源文字审核工作台", () => {
       .toBeInTheDocument();
   });
 
-  it("以显式保存、确认和来源审核完成无 overview、零框选批准路径", async () => {
+  it("以单一文字核对命令保存修改、确认并自动完成零图片来源审核", async () => {
     let queueApproved = false;
     let snapshot: ReturnType<typeof curationState>["current_snapshot"] = null;
+    let textReviewRequests = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url === "/api/v1/app/bootstrap") {
@@ -365,40 +366,32 @@ describe("来源文字审核工作台", () => {
           ),
         );
       }
-      if (url.endsWith("/curation/snapshots") && init?.method === "POST") {
+      if (url.endsWith("/curation/text-review") && init?.method === "POST") {
+        textReviewRequests += 1;
         const body = JSON.parse(String(init.body));
         snapshot = {
           snapshot_id: "snapshot-1",
           source_content: { ...originalSource, titles: body.titles, body: body.body },
-          source_confirmation: null,
-          source_review: null,
-        };
-        return Promise.resolve(
-          new Response(JSON.stringify({ curation: curationState(snapshot) }), { status: 201 }),
-        );
-      }
-      if (url.endsWith("/curation/source-confirmation") && init?.method === "POST") {
-        snapshot = {
-          ...snapshot!,
           source_confirmation: {
             actor_id: "operator-zhang",
             confirmed_at: "2026-08-24T18:00:00+00:00",
           },
-        };
-        return Promise.resolve(
-          new Response(JSON.stringify({ curation: curationState(snapshot) }), { status: 200 }),
-        );
-      }
-      if (url.endsWith("/curation/source-review") && init?.method === "POST") {
-        snapshot = {
-          ...snapshot!,
           source_review: {
             actor_id: "operator-zhang",
             completed_at: "2026-08-24T18:01:00+00:00",
           },
         };
         return Promise.resolve(
-          new Response(JSON.stringify({ curation: curationState(snapshot) }), { status: 200 }),
+          new Response(JSON.stringify({
+            curation: curationState(snapshot),
+            transition: {
+              snapshot: "created",
+              source_saved: true,
+              source_confirmed: true,
+              source_review_completed: true,
+            },
+            next_unresolved_image: null,
+          }), { status: 201 }),
         );
       }
       if (url.endsWith("/api/v1/pages/page-1/approve") && init?.method === "POST") {
@@ -433,6 +426,7 @@ describe("来源文字审核工作台", () => {
     })).toBeInTheDocument();
     expect(screen.getByText("只读演讲者备注。")).toBeInTheDocument();
     expect(screen.getByText("文字修改尚未保存。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "文字一致，确认" })).toBeEnabled();
 
     const title = screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" });
     const body = screen.getByRole("textbox", { name: "正文来源 1 当前编辑值" });
@@ -440,19 +434,14 @@ describe("来源文字审核工作台", () => {
     await userEvent.type(title, "人工修订标题");
     await userEvent.clear(body);
     await userEvent.type(body, "人工修订正文。");
-    expect(screen.getByText("已修改，原确认失效")).toBeInTheDocument();
+    expect(screen.getByText("有本地修改")).toBeInTheDocument();
 
-    const saveEdit = screen.getAllByRole("button", { name: "保存修改" })
-      .find((button) => !(button as HTMLButtonElement).disabled);
-    expect(saveEdit).toBeDefined();
-    await userEvent.click(saveEdit!);
-    const confirm = await screen.findByRole("button", { name: "确认文字来源" });
-    await waitFor(() => expect(confirm).toHaveFocus());
-    await userEvent.click(confirm);
-    const review = await screen.findByRole("button", { name: "完成来源审核" });
-    await waitFor(() => expect(review).toHaveFocus());
-    await userEvent.click(review);
+    await userEvent.click(screen.getByRole("button", { name: "保存并确认修改" }));
     expect(await screen.findByText("等待来源完整性选择")).toBeInTheDocument();
+    expect(textReviewRequests).toBe(1);
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "来源完整，直接审核" }),
+    ).toHaveFocus());
 
     expect(screen.queryByText(/overview/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/VLM/i)).not.toBeInTheDocument();
@@ -472,6 +461,89 @@ describe("来源文字审核工作台", () => {
     expect(await screen.findByText("上一页已批准。已转到下一待处理页。")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" }))
       .toHaveValue("第二页来源标题");
+  });
+
+  it("已有人工截图时文字核对完成后把焦点交给批准闸门", async () => {
+    const initialSnapshot = {
+      snapshot_id: "snapshot-with-capture",
+      source_content: originalSource,
+      source_confirmation: null,
+      source_review: null,
+    };
+    const capture = {
+      visual_ref: "capture-existing",
+      position: 0,
+      source_kind: "capture",
+      disposition: "included",
+      summary: "人工框选的公开趋势图。",
+      visual_type: "chart",
+      bounds: { left: 0.1, top: 0.2, width: 0.4, height: 0.4 },
+      source_visual_ref: null,
+      confirmed: true,
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }));
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: originalSource,
+          curation: curationState(initialSnapshot),
+          annotation: { snapshot_id: initialSnapshot.snapshot_id, visuals: [capture] },
+          standard_render: {
+            sha256: "c".repeat(64),
+            media_type: "image/png",
+            dpi: 144,
+            width_px: 1600,
+            height_px: 900,
+            url: "/api/v1/pages/page-1/render",
+          },
+        }), { status: 200 }));
+      }
+      if (url.endsWith("/curation/text-review") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        const reviewedSnapshot = {
+          snapshot_id: "snapshot-with-edited-text",
+          source_content: { ...originalSource, titles: body.titles, body: body.body },
+          source_confirmation: {
+            actor_id: "operator-zhang",
+            confirmed_at: "2026-08-24T18:00:00+00:00",
+          },
+          source_review: {
+            actor_id: "operator-zhang",
+            completed_at: "2026-08-24T18:01:00+00:00",
+          },
+        };
+        return Promise.resolve(new Response(JSON.stringify({
+          curation: curationState(reviewedSnapshot),
+          transition: {
+            snapshot: "created",
+            source_saved: true,
+            source_confirmed: true,
+            source_review_completed: true,
+          },
+          next_unresolved_image: null,
+        }), { status: 201 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    const body = await screen.findByRole("textbox", { name: "正文来源 1 当前编辑值" });
+    await userEvent.type(body, "（保留人工截图后的文字修改）");
+    await userEvent.click(screen.getByRole("button", { name: "保存并确认修改" }));
+
+    expect(await screen.findByText("文字及来源审核均已完成。")).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "批准并转到下一待处理页" }),
+    ).toHaveFocus());
   });
 
   it("来源有缺口时框选首个视觉对象、校验 summary 并返回批准动作", async () => {
@@ -1015,6 +1087,53 @@ describe("来源文字审核工作台", () => {
     ).toHaveValue("第二页来源标题"));
   });
 
+  it("文字核对失败时保留全部本地草稿并把焦点送回恢复动作", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }));
+      }
+      if (url === "/api/v1/pages/page-1" && !init?.method) {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: originalSource,
+          curation: curationState(null),
+        }), { status: 200 }));
+      }
+      if (url.endsWith("/curation/text-review") && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({
+          error: {
+            code: "curation_text_review_failed",
+            message: "文字核对未能提交；持久状态未改变。",
+          },
+        }), { status: 503 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    const title = await screen.findByRole("textbox", { name: "标题来源 1 当前编辑值" });
+    const body = screen.getByRole("textbox", { name: "正文来源 1 当前编辑值" });
+    await userEvent.clear(title);
+    await userEvent.type(title, "失败后保留的标题");
+    await userEvent.clear(body);
+    await userEvent.type(body, "失败后保留的正文");
+    const submit = screen.getByRole("button", { name: "保存并确认修改" });
+    await userEvent.click(submit);
+
+    expect(await screen.findByText(
+      "文字核对未能提交；持久状态未改变。 本地文字修改仍保留。",
+    )).toBeInTheDocument();
+    expect(title).toHaveValue("失败后保留的标题");
+    expect(body).toHaveValue("失败后保留的正文");
+    await waitFor(() => expect(submit).toHaveFocus());
+  });
+
   it("按 AnyDoc 顺序逐项保留或忽略图片来源并显式完成来源审核", async () => {
     const source = {
       ...originalSource,
@@ -1136,18 +1255,28 @@ describe("来源文字审核工作台", () => {
           curation: state(),
         }), { status: 200 }));
       }
-      if (url.endsWith("/curation/snapshots") && init?.method === "POST") {
+      if (url.endsWith("/curation/text-review") && init?.method === "POST") {
         const request = JSON.parse(String(init.body));
         source.titles = request.titles;
         source.body = request.body;
-        snapshotId = "snapshot-text";
-        confirmed = false;
-        reviewed = false;
-        return Promise.resolve(new Response(JSON.stringify({ curation: state() }), { status: 201 }));
-      }
-      if (url.endsWith("/curation/source-confirmation") && init?.method === "POST") {
+        snapshotId = snapshotId === null ? "snapshot-text" : "snapshot-text-revised";
         confirmed = true;
-        return Promise.resolve(new Response(JSON.stringify({ curation: state() }), { status: 200 }));
+        reviewed = false;
+        const firstBlocker = state().blockers.find((blocker) => "source_ref" in blocker);
+        return Promise.resolve(new Response(JSON.stringify({
+          curation: state(),
+          transition: {
+            snapshot: "created",
+            source_saved: true,
+            source_confirmed: true,
+            source_review_completed: false,
+          },
+          next_unresolved_image: firstBlocker && "source_ref" in firstBlocker ? {
+            source_ref: firstBlocker.source_ref,
+            position: firstBlocker.source_ref === "source-1" ? 0 : 1,
+            blocker_code: firstBlocker.code,
+          } : null,
+        }), { status: 201 }));
       }
       if (url.includes("/curation/image-sources/") && init?.method === "POST") {
         const index = url.endsWith("source-1") ? 0 : 1;
@@ -1168,11 +1297,14 @@ describe("来源文字审核工作台", () => {
     });
 
     render(<App />);
-    await userEvent.click(await screen.findByRole("button", { name: "保存修改" }));
-    await userEvent.click(await screen.findByRole("button", { name: "确认文字来源" }));
+    await userEvent.click(await screen.findByRole("button", { name: "文字一致，确认" }));
 
     expect(await screen.findByRole("heading", { name: "图片来源" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开文字核对" })).toBeInTheDocument();
     expect(screen.getByText("0 / 2 已处置")).toBeInTheDocument();
+    await waitFor(() => expect(
+      screen.getByRole("radio", { name: "保留原始图片" }),
+    ).toHaveFocus());
     expect(screen.getAllByText("重复对象")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: /上移|下移|排序/ })).not.toBeInTheDocument();
 
@@ -1183,17 +1315,17 @@ describe("来源文字审核工作台", () => {
       screen.getByRole("textbox", { name: "图片来源 01 summary" }),
       "公开流程图展示录入、核验和发布三个连续阶段。",
     );
+    await userEvent.click(screen.getByRole("button", { name: "展开文字核对" }));
     await userEvent.type(
       screen.getByRole("textbox", { name: "标题来源 1 当前编辑值" }),
       "（文字修订）",
     );
     expect(screen.queryByRole("button", { name: "保存并处理下一项" })).not.toBeInTheDocument();
-    const saveText = screen.getByRole("button", { name: "保存修改" });
-    expect(saveText).toBeEnabled();
-    await userEvent.click(saveText);
-    const confirmText = screen.getByRole("button", { name: "确认文字来源" });
-    expect(confirmText).toBeEnabled();
-    await userEvent.click(confirmText);
+    const reviewText = screen.getByRole("button", { name: "保存并确认修改" });
+    expect(reviewText).toBeEnabled();
+    await userEvent.click(reviewText);
+    expect(screen.queryByRole("button", { name: "保存修改" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认文字来源" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "图片来源 01 summary" })).toHaveValue(
       "公开流程图展示录入、核验和发布三个连续阶段。",
     );
