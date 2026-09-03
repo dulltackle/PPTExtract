@@ -218,6 +218,147 @@ async function mockNavigationGuardApi(page: Page) {
   return { batchRequestCount: () => batchRequestCount };
 }
 
+async function mockRepeatedFooterNoiseApi(page: Page) {
+  const footerSourceRef = "footer-source-browser";
+  let state: "idle" | "active" | "revoked" = "idle";
+  let candidateRequests = 0;
+  let mutationRequests = 0;
+  let confirmationPayload: unknown = null;
+
+  const footerCuration = () => {
+    const active = state === "active";
+    const history = state === "idle" ? [] : [{
+      confirmation_id: "confirmation-browser",
+      source_ref: footerSourceRef,
+      source_text: source.body[1],
+      rule_version: "manual-exact-text-v1",
+      confirmation_note: "浏览器逐页核对完成。",
+      confirmed_by: "operator-browser",
+      confirmed_at: "2026-09-02T08:03:00+00:00",
+      status: active ? "active" : "revoked",
+      revoked_by: state === "revoked" ? "operator-browser" : null,
+      revoked_at: state === "revoked" ? "2026-09-02T08:04:00+00:00" : null,
+      revoke_note: state === "revoked" ? "从策展工作台撤销并恢复正文。" : null,
+    }];
+    const excluded = active ? [{
+      confirmation_id: "confirmation-browser",
+      source_ref: footerSourceRef,
+      source_text: source.body[1],
+      rule_version: "manual-exact-text-v1",
+      confirmed_by: "operator-browser",
+      confirmed_at: "2026-09-02T08:03:00+00:00",
+    }] : [];
+    return {
+      ...curation(null),
+      repeated_footer_noise: {
+        sources: source.body.map((text, index) => ({
+          source_ref: index === 1 ? footerSourceRef : `body-source-browser-${index}`,
+          source_kind: "body",
+          source_index: index,
+          text,
+          active_confirmation_id: active && index === 1 ? "confirmation-browser" : null,
+        })),
+        active_count: active ? 1 : 0,
+        history,
+      },
+      chunk_body: {
+        nonempty: true,
+        preview: active ? source.body.filter((_, index) => index !== 1).join("\n\n") : source.body.join("\n\n"),
+      },
+      chunk_metadata: { excluded_repeated_footer_noise: excluded },
+    };
+  };
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v1/app/bootstrap") {
+      await route.fulfill({
+        json: {
+          actor: { actor_id: "operator-browser", display_name: "操作者 operator-browser" },
+          runways: [
+            { id: "pending", label: "待处理", documents: [] },
+            { id: "processing", label: "处理中", documents: [] },
+            { id: "curatable", label: "可策展", documents: [] },
+          ],
+        },
+      });
+      return;
+    }
+    if (path === "/api/v1/curation/pages") {
+      await route.fulfill({ json: { pages: [pageSummary] } });
+      return;
+    }
+    if (path === "/api/v1/pages/page-browser" && request.method() === "GET") {
+      await route.fulfill({
+        json: {
+          page_id: "page-browser",
+          page_number: 1,
+          review_status: "pending",
+          source_content: source,
+          curation: footerCuration(),
+        },
+      });
+      return;
+    }
+    if (
+      path === `/api/v1/pages/page-browser/repeated-footer-noise/candidates/${footerSourceRef}` &&
+      request.method() === "GET"
+    ) {
+      candidateRequests += 1;
+      await route.fulfill({
+        json: {
+          candidate: {
+            candidate_id: "a".repeat(64),
+            document_id: "document-browser",
+            version_id: "version-browser",
+            source_text: source.body[1],
+            normalized_text: source.body[1],
+            rule_version: "manual-exact-text-v1",
+            affected_pages: [1, 2, 3].map((pageNumber) => ({
+              page_id: pageNumber === 1 ? "page-browser" : `page-browser-${pageNumber}`,
+              page_version_id: `page-version-browser-${pageNumber}`,
+              page_number: pageNumber,
+              source_ref: pageNumber === 1 ? footerSourceRef : `footer-source-browser-${pageNumber}`,
+              source_kind: "body",
+              source_index: 1,
+              source_text: source.body[1],
+              standard_render: { url: `/api/v1/pages/page-browser-${pageNumber}/render` },
+            })),
+          },
+        },
+      });
+      return;
+    }
+    if (
+      path === "/api/v1/pages/page-browser/repeated-footer-noise/confirmations" &&
+      request.method() === "POST"
+    ) {
+      mutationRequests += 1;
+      confirmationPayload = request.postDataJSON();
+      state = "active";
+      await route.fulfill({ status: 201, json: { confirmation_id: "confirmation-browser" } });
+      return;
+    }
+    if (
+      path === "/api/v1/repeated-footer-noise/confirmations/confirmation-browser/revoke" &&
+      request.method() === "POST"
+    ) {
+      mutationRequests += 1;
+      state = "revoked";
+      await route.fulfill({ json: { confirmation_id: "confirmation-browser", status: "revoked" } });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { error: { message: `未覆盖的请求：${path}` } } });
+  });
+
+  return {
+    candidateRequests: () => candidateRequests,
+    mutationRequests: () => mutationRequests,
+    confirmationPayload: () => confirmationPayload,
+  };
+}
+
 test("长页核对稿支持完整阅读、原位多块草稿与组合提交", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   let submitted: unknown = null;
@@ -280,6 +421,99 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
     titles: ["修订后的公开长标题"],
     body: ["第一行\n第二行", ...body.slice(1)],
   });
+});
+
+test("重复页脚检查收纳为正文次级动作并保留确认与撤销证据", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const api = await mockRepeatedFooterNoiseApi(page);
+  await page.goto("/curation");
+
+  const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
+  const footerBlock = manuscript.locator('[data-source-text-block="body-1"]');
+  await expect(manuscript.getByRole("button", { name: /正文来源 \d+ 次级动作/ }))
+    .toHaveCount(source.body.length);
+  await expect(page.getByRole("button", { name: "检查是否为重复页脚噪声" }))
+    .toHaveCount(0);
+  await expect(page.getByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
+    .toHaveCount(0);
+
+  const secondaryActions = footerBlock.getByRole("button", { name: "正文来源 2 次级动作" });
+  await secondaryActions.focus();
+  await page.keyboard.press("Enter");
+  let checkRepeated = footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" });
+  await expect(checkRepeated).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("footer-noise-secondary-action-1280.png") });
+  await page.keyboard.press("Escape");
+  await expect(checkRepeated).toHaveCount(0);
+  await expect(secondaryActions).toBeFocused();
+
+  await page.keyboard.press("Enter");
+  checkRepeated = footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" });
+  await page.keyboard.press("Tab");
+  await expect(checkRepeated).toBeFocused();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "确认排除重复页脚噪声" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("checkbox", { name: "我已核对全部受影响页" }))
+    .toBeFocused();
+  await expect.poll(api.candidateRequests).toBe(1);
+  expect(api.mutationRequests()).toBe(0);
+  await expect(footerBlock.locator(".source-manuscript-text")).toHaveText(source.body[1]);
+  await expect(dialog.getByRole("link", { name: "查看第 2 页标准页渲染" }))
+    .toHaveAttribute("href", "/api/v1/pages/page-browser-2/render");
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(secondaryActions).toBeFocused();
+
+  await page.keyboard.press("Enter");
+  await footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }).click();
+  const reopenedDialog = page.getByRole("dialog", { name: "确认排除重复页脚噪声" });
+  await reopenedDialog.getByRole("checkbox", { name: "我已核对全部受影响页" }).check();
+  await reopenedDialog.getByRole("textbox", { name: "确认说明（可选）" })
+    .fill("浏览器逐页核对完成。");
+  await reopenedDialog.getByRole("button", { name: "确认排除 3 页中的此来源" }).click();
+  await expect.poll(api.mutationRequests).toBe(1);
+  expect(api.confirmationPayload()).toMatchObject({
+    candidate_id: "a".repeat(64),
+    source_ref: "footer-source-browser",
+    note: "浏览器逐页核对完成。",
+  });
+
+  const activeState = footerBlock.locator(".footer-noise-source-state");
+  await expect(activeState).toContainText("已从 Chunk 正文排除");
+  await expect(activeState).toContainText("operator-browser");
+  await expect(activeState).toContainText("规则 manual-exact-text-v1");
+  await expect(footerBlock.getByRole("button", { name: "正文来源 2 次级动作" }))
+    .toHaveCount(0);
+  const revoke = footerBlock.getByRole("button", { name: "撤销正文来源 2 的重复页脚排除" });
+  await expect(revoke).toBeFocused();
+
+  await page.setViewportSize({ width: 640, height: 900 });
+  await revoke.scrollIntoViewIfNeeded();
+  await expect(revoke).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("footer-noise-active-200-percent.png") });
+  const overflow = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+  await revoke.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(api.mutationRequests).toBe(2);
+
+  const revokedAudit = footerBlock.locator(".footer-noise-revoked-audit");
+  await expect(revokedAudit).toContainText("最近一次排除已撤销");
+  await expect(revokedAudit).toContainText("operator-browser");
+  await expect(revokedAudit).toContainText("规则 manual-exact-text-v1");
+  await expect(revokedAudit).toContainText("从策展工作台撤销并恢复正文。");
+  const restoredSecondaryActions = footerBlock.getByRole("button", {
+    name: "正文来源 2 次级动作",
+  });
+  await expect(restoredSecondaryActions).toBeVisible();
+  await expect(restoredSecondaryActions).toBeFocused();
+  await expect(footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }))
+    .toHaveCount(0);
 });
 
 test("页点击、方向键、筛选与批量排除共用键盘可达的文字导航保护", async ({ page }) => {

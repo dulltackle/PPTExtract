@@ -356,6 +356,7 @@ describe("来源文字审核工作台", () => {
     let active = false;
     let revoked = false;
     let failNextDetailRefresh = false;
+    let mutationRequests = 0;
     const confirmedSnapshot = {
       snapshot_id: "snapshot-footer",
       source_content: {
@@ -465,6 +466,7 @@ describe("来源文字审核工作台", () => {
     });
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
+      if (init?.method && init.method !== "GET") mutationRequests += 1;
       if (url === "/api/v1/app/bootstrap") {
         return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
       }
@@ -527,9 +529,22 @@ describe("来源文字审核工作台", () => {
     render(<App />);
 
     await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
-    const checkRepeated = await screen.findByRole("button", {
-      name: "检查正文来源 2 的跨页重复",
+    expect(screen.queryByRole("button", { name: "检查是否为重复页脚噪声" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
+      .not.toBeInTheDocument();
+    const secondaryActions = screen.getByRole("button", { name: "正文来源 2 次级动作" });
+    secondaryActions.focus();
+    await userEvent.keyboard("{Enter}");
+    let checkRepeated = screen.getByRole("button", {
+      name: "检查是否为重复页脚噪声",
     });
+    expect(checkRepeated).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    expect(checkRepeated).not.toBeVisible();
+    expect(secondaryActions).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    checkRepeated = screen.getByRole("button", { name: "检查是否为重复页脚噪声" });
     const imageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
     await userEvent.type(imageSummary, "（本地修改）");
     expect(checkRepeated).toBeDisabled();
@@ -537,6 +552,7 @@ describe("来源文字审核工作台", () => {
     await userEvent.type(imageSummary, savedImageSummary);
     await waitFor(() => expect(checkRepeated).toBeEnabled());
     await userEvent.click(checkRepeated);
+    expect(mutationRequests).toBe(0);
     expect(await screen.findByRole("heading", { name: "确认排除重复页脚噪声" }))
       .toBeInTheDocument();
     expect(screen.getByText("共影响 3 页")).toBeInTheDocument();
@@ -550,6 +566,7 @@ describe("来源文字审核工作台", () => {
       "已核对三页。",
     );
     await userEvent.click(submit);
+    expect(mutationRequests).toBe(1);
 
     expect(await screen.findByText("重复页脚噪声确认已保存；详情暂未刷新，请重新加载当前页。"))
       .toBeInTheDocument();
@@ -571,7 +588,9 @@ describe("来源文字审核工作台", () => {
     await userEvent.clear(activeImageSummary);
     await userEvent.type(activeImageSummary, savedImageSummary);
     await waitFor(() => expect(revoke).toBeEnabled());
+    const mutationCountBeforeRevoke = mutationRequests;
     await userEvent.click(revoke);
+    expect(mutationRequests).toBe(mutationCountBeforeRevoke + 1);
     expect(await screen.findByText("重复页脚排除撤销已保存；详情暂未刷新，请重新加载当前页。"))
       .toBeInTheDocument();
     expect(screen.queryByText("重复页脚排除未能撤销；正文状态未改变。"))
@@ -582,7 +601,9 @@ describe("来源文字审核工作台", () => {
     await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
     expect(await screen.findByText("最近一次排除已撤销")).toBeInTheDocument();
     expect(screen.getByText("从策展工作台撤销并恢复正文。")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "检查正文来源 2 的跨页重复" }))
+    expect(screen.queryByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "正文来源 2 次级动作" }))
       .toBeInTheDocument();
   });
 

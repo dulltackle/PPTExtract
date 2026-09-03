@@ -1455,10 +1455,46 @@ kbd {
   }
 }
 
+.source-secondary-actions {
+  width: fit-content;
+  max-width: 100%;
+  margin: 7px 0 0 auto;
+  color: #526068;
+  font-size: 10px;
+}
+
+.source-secondary-action-trigger {
+  width: fit-content;
+  margin-left: auto;
+  padding: 3px 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: #9ba6aa;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.source-secondary-action-trigger:hover {
+  color: #18595a;
+  text-decoration-color: #4c8584;
+}
+
+.source-secondary-actions > div {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
 .footer-noise-check {
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-height: 32px;
-  margin-top: 9px;
+  padding: 4px 8px;
   border: 1px solid #7c898f;
   border-radius: 6px;
   color: #344149;
