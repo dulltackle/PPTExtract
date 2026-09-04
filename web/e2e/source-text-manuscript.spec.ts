@@ -226,7 +226,7 @@ async function mockNavigationGuardApi(page: Page) {
   return { batchRequestCount: () => batchRequestCount };
 }
 
-async function mockRepeatedFooterNoiseApi(page: Page) {
+async function mockRepeatedFooterNoiseApi(page: Page, candidateGate?: Promise<void>) {
   const footerSourceRef = "footer-source-browser";
   let state: "idle" | "active" | "revoked" = "idle";
   let candidateRequests = 0;
@@ -314,6 +314,7 @@ async function mockRepeatedFooterNoiseApi(page: Page) {
       request.method() === "GET"
     ) {
       candidateRequests += 1;
+      await candidateGate;
       await route.fulfill({
         json: {
           candidate: {
@@ -472,6 +473,92 @@ test("正文整稿预览从来源日志侧展开、保留草稿并恢复触发�
     page.getByRole("textbox", { name: "正文 03 当前编辑值" }),
     "只保存在本地的正文草稿",
   );
+});
+
+test("来源段号以键盘打开受约束审计面板并保留未保存整稿草稿", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  let mutationRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "GET") mutationRequests += 1;
+  });
+  await mockCurationApi(page);
+  await page.goto("/curation");
+
+  const preview = page.getByRole("region", { name: "正文整稿预览" });
+  const previewNumbers = preview.getByRole("button", { name: /正文 \d+，.*，打开来源审计/ });
+  await expect(previewNumbers).toHaveCount(11);
+  const thirdPreviewNumber = preview.getByRole("button", {
+    name: "正文 03，未修改，打开来源审计",
+  });
+  await thirdPreviewNumber.focus();
+  await page.keyboard.press("Enter");
+
+  let audit = page.getByRole("dialog", { name: "正文 03 · 来源审计" });
+  await expect(audit.getByRole("button", { name: "关闭正文 03 来源审计" })).toBeFocused();
+  await expect(audit.getByRole("status", { name: "正文 03 修改状态" }))
+    .toContainText("当前值与 AnyDoc 原文一致");
+  await expect(audit.getByRole("region", { name: "正文 03 当前值" }))
+    .toContainText(source.body[2]);
+  await expect(audit.getByRole("region", { name: "正文 03 AnyDoc 原文" }))
+    .toContainText(source.body[2]);
+  await expect(page.getByRole("heading", { name: "标准页渲染" })).toBeVisible();
+  await expect(page.locator(".source-review-log")).toHaveAttribute("inert", "");
+  const currentPage = page.getByRole("button", {
+    name: /第 1 页，公开长标题：用于核对整页来源文字的稳定身份与阅读顺序，待处理/,
+  });
+  await expect(currentPage).toBeDisabled();
+  const comparisonColumns = await audit.locator(".source-body-audit-compare").evaluate(
+    (element) => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/),
+  );
+  expect(comparisonColumns).toHaveLength(1);
+  await page.screenshot({ path: testInfo.outputPath("source-audit-panel-1280.png") });
+
+  const returnButton = audit.getByRole("button", { name: "返回正文" });
+  await page.keyboard.press("Shift+Tab");
+  await expect(returnButton).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(audit.getByRole("button", { name: "关闭正文 03 来源审计" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(audit).toHaveCount(0);
+  await expect(thirdPreviewNumber).toBeFocused();
+  await expect(currentPage).toBeEnabled();
+  expect(mutationRequests).toBe(0);
+
+  await preview.getByRole("button", { name: "从正文 03 打开放大视图" }).click();
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  const editor = expanded.getByRole("textbox", { name: "正文 03 当前编辑值" });
+  await editor.fill("只存在于内存中的审计草稿");
+  const expandedNumber = expanded.getByRole("button", {
+    name: "正文 03，已修改，打开来源审计",
+  });
+  await expandedNumber.press("Space");
+  audit = page.getByRole("dialog", { name: "正文 03 · 来源审计" });
+  const expandedComparisonColumns = await audit.locator(".source-body-audit-compare").evaluate(
+    (element) => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/),
+  );
+  expect(expandedComparisonColumns).toHaveLength(2);
+  await expect(audit.getByRole("status", { name: "正文 03 修改状态" }))
+    .toContainText("当前值有未保存修改");
+  await expect(audit.getByRole("region", { name: "正文 03 当前值" }))
+    .toContainText("只存在于内存中的审计草稿");
+  await expect(audit.getByRole("region", { name: "正文 03 AnyDoc 原文" }))
+    .toContainText(source.body[2]);
+  await page.keyboard.press("Escape");
+  await expect(expandedNumber).toBeFocused();
+  await expectBodyText(editor, "只存在于内存中的审计草稿");
+  expect(mutationRequests).toBe(0);
+
+  await editor.fill("");
+  const emptyNumber = expanded.getByRole("button", {
+    name: "正文 03，当前值为空，已修改，打开来源审计",
+  });
+  await emptyNumber.click();
+  audit = page.getByRole("dialog", { name: "正文 03 · 来源审计" });
+  await expect(audit.getByRole("status", { name: "正文 03 修改状态" }))
+    .toContainText("当前值为空");
+  await page.keyboard.press("Escape");
+  await expect(emptyNumber).toBeFocused();
+  expect(mutationRequests).toBe(0);
 });
 
 test("单段短正文保留固定预览与键盘放大入口", async ({ page }) => {
@@ -752,36 +839,36 @@ test("连续正文编辑面允许段内换行与粘贴并拒绝跨来源段落�
   expect(submitted?.titles).toEqual(boundarySource.titles);
 });
 
-test("重复页脚检查收纳为正文次级动作并保留确认与撤销证据", async ({ page }, testInfo) => {
+test("重复页脚检查迁入来源审计面板并保留确认与撤销证据", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const api = await mockRepeatedFooterNoiseApi(page);
   await page.goto("/curation");
 
   const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
   const footerBlock = manuscript.locator('[data-source-text-block="body-1"]');
-  await expect(manuscript.getByRole("button", { name: /正文来源 \d+ 次级动作/ }))
+  await expect(manuscript.getByRole("button", { name: /次级动作/ }))
     .toHaveCount(0);
   await expect(page.getByRole("button", { name: "检查是否为重复页脚噪声" }))
     .toHaveCount(0);
   await expect(page.getByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
     .toHaveCount(0);
 
-  await footerBlock.getByRole("button", { name: "正文 02 来源与审计" }).click();
-  const secondaryActions = footerBlock.getByRole("button", { name: "正文来源 2 次级动作" });
-  await secondaryActions.focus();
-  await page.keyboard.press("Enter");
-  let checkRepeated = footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" });
+  const auditTrigger = footerBlock.getByRole("button", {
+    name: "正文 02，未修改，打开来源审计",
+  });
+  await auditTrigger.click();
+  let audit = page.getByRole("dialog", { name: "正文 02 · 来源审计" });
+  let checkRepeated = audit.getByRole("button", { name: "检查是否为重复页脚噪声" });
   await expect(checkRepeated).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath("footer-noise-secondary-action-1280.png") });
+  await page.screenshot({ path: testInfo.outputPath("footer-noise-audit-action-1280.png") });
   await page.keyboard.press("Escape");
-  await expect(checkRepeated).toHaveCount(0);
-  await expect(secondaryActions).toBeFocused();
+  await expect(audit).toHaveCount(0);
+  await expect(auditTrigger).toBeFocused();
 
   await page.keyboard.press("Enter");
-  checkRepeated = footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" });
-  await page.keyboard.press("Tab");
-  await expect(checkRepeated).toBeFocused();
-  await page.keyboard.press("Enter");
+  audit = page.getByRole("dialog", { name: "正文 02 · 来源审计" });
+  checkRepeated = audit.getByRole("button", { name: "检查是否为重复页脚噪声" });
+  await checkRepeated.click();
   const dialog = page.getByRole("dialog", { name: "确认排除重复页脚噪声" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("checkbox", { name: "我已核对全部受影响页" }))
@@ -794,10 +881,10 @@ test("重复页脚检查收纳为正文次级动作并保留确认与撤销证�
 
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(secondaryActions).toBeFocused();
+  await expect(checkRepeated).toBeFocused();
+  await expect(audit).toBeVisible();
 
-  await page.keyboard.press("Enter");
-  await footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }).click();
+  await checkRepeated.click();
   const reopenedDialog = page.getByRole("dialog", { name: "确认排除重复页脚噪声" });
   await reopenedDialog.getByRole("checkbox", { name: "我已核对全部受影响页" }).check();
   await reopenedDialog.getByRole("textbox", { name: "确认说明（可选）" })
@@ -810,13 +897,12 @@ test("重复页脚检查收纳为正文次级动作并保留确认与撤销证�
     note: "浏览器逐页核对完成。",
   });
 
-  const activeState = footerBlock.locator(".footer-noise-source-state");
+  const activeState = audit.locator(".footer-noise-source-state");
   await expect(activeState).toContainText("已从 Chunk 正文排除");
   await expect(activeState).toContainText("operator-browser");
   await expect(activeState).toContainText("规则 manual-exact-text-v1");
-  await expect(footerBlock.getByRole("button", { name: "正文来源 2 次级动作" }))
-    .toHaveCount(0);
-  const revoke = footerBlock.getByRole("button", { name: "撤销正文来源 2 的重复页脚排除" });
+  await expect(audit.getByRole("button", { name: /次级动作/ })).toHaveCount(0);
+  const revoke = audit.getByRole("button", { name: "撤销正文来源 2 的重复页脚排除" });
   await expect(revoke).toBeFocused();
 
   await page.setViewportSize({ width: 640, height: 900 });
@@ -832,18 +918,55 @@ test("重复页脚检查收纳为正文次级动作并保留确认与撤销证�
   await page.keyboard.press("Enter");
   await expect.poll(api.mutationRequests).toBe(2);
 
-  const revokedAudit = footerBlock.locator(".footer-noise-revoked-audit");
+  const revokedAudit = audit.locator(".footer-noise-revoked-audit");
   await expect(revokedAudit).toContainText("最近一次排除已撤销");
   await expect(revokedAudit).toContainText("operator-browser");
   await expect(revokedAudit).toContainText("规则 manual-exact-text-v1");
   await expect(revokedAudit).toContainText("从策展工作台撤销并恢复正文。");
-  const restoredSecondaryActions = footerBlock.getByRole("button", {
-    name: "正文来源 2 次级动作",
+  const restoredCheck = audit.getByRole("button", {
+    name: "再次检查是否为重复页脚噪声",
   });
-  await expect(restoredSecondaryActions).toBeVisible();
-  await expect(restoredSecondaryActions).toBeFocused();
-  await expect(footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }))
-    .toHaveCount(0);
+  await expect(restoredCheck).toBeVisible();
+  await expect(restoredCheck).toBeFocused();
+  await expect(audit.getByRole("button", { name: /次级动作/ })).toHaveCount(0);
+});
+
+test("关闭来源审计会取消尚未返回的重复页脚候选请求", async ({ page }) => {
+  let releaseCandidate!: () => void;
+  const candidateGate = new Promise<void>((resolve) => {
+    releaseCandidate = resolve;
+  });
+  const api = await mockRepeatedFooterNoiseApi(page, candidateGate);
+  await page.goto("/curation");
+
+  const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
+  const auditTrigger = manuscript.getByRole("button", {
+    name: "正文 02，未修改，打开来源审计",
+  });
+  await auditTrigger.click();
+  const audit = page.getByRole("dialog", { name: "正文 02 · 来源审计" });
+  const candidateSettled = Promise.race([
+    page.waitForEvent("requestfinished", {
+      predicate: (request) => request.url().includes("repeated-footer-noise/candidates"),
+    }),
+    page.waitForEvent("requestfailed", {
+      predicate: (request) => request.url().includes("repeated-footer-noise/candidates"),
+    }),
+  ]);
+  await audit.getByRole("button", { name: "检查是否为重复页脚噪声" }).click();
+  await expect.poll(api.candidateRequests).toBe(1);
+
+  await page.keyboard.press("Escape");
+  await expect(audit).toHaveCount(0);
+  await expect(auditTrigger).toBeFocused();
+  releaseCandidate();
+  await candidateSettled;
+  await page.waitForTimeout(50);
+
+  await expect(page.getByRole("dialog", { name: "确认排除重复页脚噪声" })).toHaveCount(0);
+  await expect(page.getByText("已关闭来源审计；重复页脚检查已取消，整稿草稿保持不变。"))
+    .toBeVisible();
+  expect(api.mutationRequests()).toBe(0);
 });
 
 test("正文放大视图让顶层重复页脚对话框优先处理 Escape", async ({ page }) => {
@@ -853,14 +976,20 @@ test("正文放大视图让顶层重复页脚对话框优先处理 Escape", asyn
   await page.getByRole("button", { name: "从正文 02 打开放大视图" }).click();
   const expanded = page.getByRole("dialog", { name: "正文放大视图" });
   const footerBlock = expanded.locator('[data-source-text-block="body-1"]');
-  await footerBlock.getByRole("button", { name: "正文 02 来源与审计" }).click();
-  await footerBlock.getByRole("button", { name: "正文来源 2 次级动作" }).click();
-  await footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }).click();
+  await footerBlock.getByRole("button", {
+    name: "正文 02，未修改，打开来源审计",
+  }).click();
+  const audit = page.getByRole("dialog", { name: "正文 02 · 来源审计" });
+  await audit.getByRole("button", { name: "检查是否为重复页脚噪声" }).click();
   const dialog = page.getByRole("dialog", { name: "确认排除重复页脚噪声" });
   await expect(dialog).toBeVisible();
 
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
+  await expect(audit).toBeVisible();
+  await expect(expanded).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(audit).toHaveCount(0);
   await expect(expanded).toBeVisible();
 });
 

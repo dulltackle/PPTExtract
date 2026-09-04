@@ -49,6 +49,11 @@ interface ActiveTextEditor {
   baseline: string;
 }
 
+interface BodyAuditLocation {
+  index: number;
+  mode: "preview" | "expanded";
+}
+
 export interface SourceDraftActions {
   discardText: () => void;
   discardImages: () => void;
@@ -433,7 +438,7 @@ export function SourceReviewLog({
   const [activeTextEditor, setActiveTextEditor] = useState<ActiveTextEditor | null>(null);
   const [bodyManuscriptExpanded, setBodyManuscriptExpanded] = useState(false);
   const [bodyPreviewOverflow, setBodyPreviewOverflow] = useState(false);
-  const [bodyAuditIndex, setBodyAuditIndex] = useState<number | null>(null);
+  const [bodyAuditLocation, setBodyAuditLocation] = useState<BodyAuditLocation | null>(null);
   const [bodyBoundaryNotice, setBodyBoundaryNotice] = useState<string | null>(null);
   const [narrowBodyManuscript, setNarrowBodyManuscript] = useState(false);
   const [operation, setOperation] = useState<
@@ -446,9 +451,8 @@ export function SourceReviewLog({
   const [exclusionNote, setExclusionNote] = useState("");
   const [exclusionExpanded, setExclusionExpanded] = useState(false);
   const [showReopen, setShowReopen] = useState(false);
-  const [openNoiseActionRef, setOpenNoiseActionRef] = useState<string | null>(null);
   const [noiseFocusTarget, setNoiseFocusTarget] = useState<{
-    kind: "secondary" | "revoke";
+    kind: "check" | "revoke";
     sourceRef: string;
   } | null>(null);
   const [noiseCandidate, setNoiseCandidate] = useState<RepeatedFooterNoiseCandidate | null>(null);
@@ -464,6 +468,10 @@ export function SourceReviewLog({
   const bodyExpandButtonRef = useRef<HTMLButtonElement>(null);
   const bodyTextReviewRef = useRef<HTMLButtonElement>(null);
   const bodyReturnFocusKeyRef = useRef<string | null>(null);
+  const bodyAuditPanelRef = useRef<HTMLElement>(null);
+  const bodyAuditCloseRef = useRef<HTMLButtonElement>(null);
+  const bodyAuditTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const bodyAuditReturnFocusRef = useRef<string | null>(null);
   const lastBodyIndexRef = useRef<number | null>(null);
   const textReviewRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
@@ -477,7 +485,8 @@ export function SourceReviewLog({
   const noiseSubmitRef = useRef<HTMLButtonElement>(null);
   const noiseAcknowledgeRef = useRef<HTMLInputElement>(null);
   const noiseTriggerRef = useRef<HTMLElement | null>(null);
-  const noiseActionTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const noiseCandidateRequestRef = useRef<AbortController | null>(null);
+  const noiseCheckButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const noiseRevokeButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const imageChoiceRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const imageFieldRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -504,16 +513,18 @@ export function SourceReviewLog({
     if (!noiseFocusTarget) return;
     const target = noiseFocusTarget.kind === "revoke"
       ? noiseRevokeButtonRefs.current[noiseFocusTarget.sourceRef]
-      : noiseActionTriggerRefs.current[noiseFocusTarget.sourceRef];
+      : noiseCheckButtonRefs.current[noiseFocusTarget.sourceRef];
     if (target) target.focus();
     else statusRef.current?.focus();
     setNoiseFocusTarget(null);
   }, [noiseFocusTarget, statusRef]);
 
   useEffect(() => {
-    onModalStateChange(showReopen || noiseCandidate !== null);
+    onModalStateChange(showReopen || noiseCandidate !== null || bodyAuditLocation !== null);
     return () => onModalStateChange(false);
-  }, [noiseCandidate, onModalStateChange, showReopen]);
+  }, [bodyAuditLocation, noiseCandidate, onModalStateChange, showReopen]);
+
+  useEffect(() => () => noiseCandidateRequestRef.current?.abort(), []);
 
   const load = useCallback(() => {
     if (!page.page_id) return () => undefined;
@@ -546,7 +557,7 @@ export function SourceReviewLog({
         setTextEditingEnabled(!curation.current_snapshot?.source_confirmation);
         setActiveTextEditor(null);
         setBodyManuscriptExpanded(false);
-        setBodyAuditIndex(null);
+        setBodyAuditLocation(null);
         setBodyBoundaryNotice(null);
         lastModifiedTextKeyRef.current = null;
         lastBodyIndexRef.current = null;
@@ -554,7 +565,6 @@ export function SourceReviewLog({
         setExclusionNote("");
         setExclusionExpanded(false);
         setShowReopen(false);
-        setOpenNoiseActionRef(null);
         window.requestAnimationFrame(() => firstFieldRef.current?.focus());
       })
       .catch((cause) => {
@@ -878,6 +888,7 @@ export function SourceReviewLog({
 
   const closeBodyManuscript = useCallback(() => {
     setBodyManuscriptExpanded(false);
+    setBodyAuditLocation(null);
     setBodyBoundaryNotice(null);
     setActiveTextEditor((current) => current?.kind === "body" ? null : current);
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
@@ -893,7 +904,7 @@ export function SourceReviewLog({
     const preferredIndex = index ?? lastBodyIndexRef.current ?? 0;
     bodyReturnFocusKeyRef.current = index === null ? null : textBlockKey("body", index);
     setBodyManuscriptExpanded(true);
-    setBodyAuditIndex(null);
+    setBodyAuditLocation(null);
     setBodyBoundaryNotice(null);
     if (pending && textEditingEnabled) {
       const key = textBlockKey("body", preferredIndex);
@@ -911,6 +922,29 @@ export function SourceReviewLog({
         bodyCloseRef.current?.focus();
       }));
     }
+  };
+
+  const closeBodyAudit = useCallback(() => {
+    const candidateRequestPending = noiseCandidateRequestRef.current !== null;
+    noiseCandidateRequestRef.current?.abort();
+    noiseCandidateRequestRef.current = null;
+    setOperation((current) => current === "noise-preview" ? null : current);
+    if (candidateRequestPending) {
+      setAnnouncement("已关闭来源审计；重复页脚检查已取消，整稿草稿保持不变。");
+    }
+    setBodyAuditLocation(null);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const triggerKey = bodyAuditReturnFocusRef.current;
+      bodyAuditTriggerRefs.current[triggerKey ?? ""]?.focus();
+      bodyAuditReturnFocusRef.current = null;
+    }));
+  }, []);
+
+  const openBodyAudit = (index: number, mode: BodyAuditLocation["mode"]) => {
+    if (busy) return;
+    const triggerKey = `${mode}-${index}`;
+    bodyAuditReturnFocusRef.current = triggerKey;
+    setBodyAuditLocation({ index, mode });
   };
 
   const cancelTextEditor = () => {
@@ -1004,16 +1038,26 @@ export function SourceReviewLog({
     setNoiseCandidate(null);
     setNoiseAcknowledged(false);
     setNoiseNote("");
-    window.requestAnimationFrame(() => noiseTriggerRef.current?.focus());
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      noiseTriggerRef.current?.focus();
+    }));
   }, []);
 
   const handleNoisePreview = async (sourceRef: string, trigger: HTMLElement) => {
     if (!page.page_id || busy || dirty) return;
+    noiseCandidateRequestRef.current?.abort();
+    const controller = new AbortController();
+    noiseCandidateRequestRef.current = controller;
     noiseTriggerRef.current = trigger;
     setOperation("noise-preview");
     setAnnouncement("正在核对跨页重复来源…");
     try {
-      const candidate = await loadRepeatedFooterNoiseCandidate(page.page_id, sourceRef);
+      const candidate = await loadRepeatedFooterNoiseCandidate(
+        page.page_id,
+        sourceRef,
+        controller.signal,
+      );
+      if (controller.signal.aborted || noiseCandidateRequestRef.current !== controller) return;
       setNoiseCandidate(candidate);
       setNoiseAcknowledged(false);
       setNoiseNote("");
@@ -1021,6 +1065,7 @@ export function SourceReviewLog({
         `已找到 ${candidate.affected_pages.length} 页相同来源；确认前请逐页查看标准页渲染。`,
       );
     } catch (cause) {
+      if (controller.signal.aborted) return;
       setAnnouncement(
         cause instanceof OperatorError
           ? cause.message
@@ -1028,7 +1073,10 @@ export function SourceReviewLog({
       );
       window.requestAnimationFrame(() => noiseTriggerRef.current?.focus());
     } finally {
-      setOperation(null);
+      if (noiseCandidateRequestRef.current === controller) {
+        noiseCandidateRequestRef.current = null;
+        setOperation((current) => current === "noise-preview" ? null : current);
+      }
     }
   };
 
@@ -1088,7 +1136,7 @@ export function SourceReviewLog({
         return;
       }
       setAnnouncement("重复页脚排除已撤销；后续 Chunk 正文已恢复，撤销审计已追加。 ");
-      setNoiseFocusTarget({ kind: "secondary", sourceRef });
+      setNoiseFocusTarget({ kind: "check", sourceRef });
     } catch (cause) {
       setAnnouncement(
         cause instanceof OperatorError
@@ -1445,6 +1493,41 @@ export function SourceReviewLog({
   }, [busy, closeNoiseDialog, noiseCandidate]);
 
   useEffect(() => {
+    if (!bodyAuditLocation) return;
+    const frame = window.requestAnimationFrame(() => bodyAuditCloseRef.current?.focus());
+    const handleAuditKey = (event: KeyboardEvent) => {
+      if (noiseCandidate || showReopen) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeBodyAudit();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(
+        bodyAuditPanelRef.current?.querySelectorAll<HTMLElement>(
+          "a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled])",
+        ) ?? [],
+      );
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleAuditKey);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleAuditKey);
+    };
+  }, [bodyAuditLocation, closeBodyAudit, noiseCandidate, showReopen]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
@@ -1630,58 +1713,25 @@ export function SourceReviewLog({
             {latestNoiseHistory.revoke_note ? <p>{latestNoiseHistory.revoke_note}</p> : null}
           </div>
         ) : null}
-        <div
-          className="source-secondary-actions"
-          onKeyDown={(event) => {
-            if (
-              event.key !== "Escape" ||
-              openNoiseActionRef !== noiseSource.source_ref
-            ) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const trigger = event.currentTarget.querySelector<HTMLButtonElement>(
-              ".source-secondary-action-trigger",
-            );
-            setOpenNoiseActionRef(null);
-            window.requestAnimationFrame(() => trigger?.focus());
+        <button
+          type="button"
+          ref={(element) => {
+            noiseCheckButtonRefs.current[noiseSource.source_ref] = element;
           }}
+          className="footer-noise-check"
+          disabled={busy || dirty}
+          title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
+          onClick={(event) => void handleNoisePreview(
+            noiseSource.source_ref,
+            event.currentTarget,
+          )}
         >
-          <button
-            type="button"
-            ref={(element) => {
-              noiseActionTriggerRefs.current[noiseSource.source_ref] = element;
-            }}
-            className="source-secondary-action-trigger"
-            aria-label={`正文来源 ${index + 1} 次级动作`}
-            aria-expanded={openNoiseActionRef === noiseSource.source_ref}
-            aria-controls={`noise-actions-body-${index}`}
-            onClick={() => setOpenNoiseActionRef((current) => (
-              current === noiseSource.source_ref ? null : noiseSource.source_ref
-            ))}
-          >次级动作</button>
-          {openNoiseActionRef === noiseSource.source_ref ? (
-            <div id={`noise-actions-body-${index}`}>
-              <button
-                type="button"
-                className="footer-noise-check"
-                disabled={busy || dirty}
-                title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
-                onClick={(event) => {
-                  const actions = event.currentTarget.closest(".source-secondary-actions");
-                  const trigger = actions?.querySelector<HTMLElement>(
-                    ".source-secondary-action-trigger",
-                  ) ?? event.currentTarget;
-                  setOpenNoiseActionRef(null);
-                  void handleNoisePreview(noiseSource.source_ref, trigger);
-                }}
-              >
-                {operation === "noise-preview"
-                  ? "正在检查是否为重复页脚噪声"
-                  : "检查是否为重复页脚噪声"}
-              </button>
-            </div>
-          ) : null}
-        </div>
+          {operation === "noise-preview"
+            ? "正在检查是否为重复页脚噪声"
+            : latestNoiseHistory?.status === "revoked"
+              ? "再次检查是否为重复页脚噪声"
+              : "检查是否为重复页脚噪声"}
+        </button>
       </>
     );
   };
@@ -1783,13 +1833,16 @@ export function SourceReviewLog({
     index: number,
     originalValue: string,
     mode: "preview" | "expanded",
-    attachedState?: React.ReactNode,
   ) => {
     const key = textBlockKey("body", index);
     const label = textBlockLabel("body", index);
     const currentValue = textBlockValue("body", index);
     const modified = currentValue !== originalValue;
-    const auditOpen = bodyAuditIndex === index;
+    const auditOpen = bodyAuditLocation?.index === index && bodyAuditLocation.mode === mode;
+    const empty = currentValue.length === 0;
+    const auditStatus = empty
+      ? `当前值为空，${modified ? "已修改" : "未修改"}`
+      : modified ? "已修改" : "未修改";
     const canEdit = pending && textEditingEnabled && !busy;
     return (
       <article
@@ -1799,13 +1852,25 @@ export function SourceReviewLog({
       >
         <button
           type="button"
-          className="source-manuscript-number source-manuscript-number-button"
-          aria-label={`${label} 来源与审计${modified ? "，已修改" : ""}`}
+          ref={(element) => {
+            bodyAuditTriggerRefs.current[`${mode}-${index}`] = element;
+          }}
+          className={`source-manuscript-number source-manuscript-number-button ${
+            empty ? "is-empty" : modified ? "is-modified" : ""
+          }`}
+          aria-label={`${label}，${auditStatus}，打开来源审计`}
           aria-expanded={auditOpen}
-          onClick={() => setBodyAuditIndex((current) => current === index ? null : index)}
+          aria-pressed={auditOpen}
+          aria-controls={`source-body-audit-panel-${index}`}
+          onClick={() => openBodyAudit(index, mode)}
         >
           <span>{label}</span>
-          {modified ? <span className="source-number-modified">已修改</span> : null}
+          {empty || modified ? (
+            <span
+              className={`source-number-state-mark ${empty ? "is-empty" : "is-modified"}`}
+              aria-hidden="true"
+            />
+          ) : null}
         </button>
         <div className="source-body-paragraph-content">
           {mode === "preview" ? (
@@ -1849,26 +1914,29 @@ export function SourceReviewLog({
               />
             </div>
           )}
-          {auditOpen ? (
-            <div className="source-body-audit" role="region" aria-label={`${label} 来源与审计详情`}>
-              <dl>
-                <div><dt>当前值</dt><dd>{currentValue || "空块"}</dd></div>
-                <div><dt>AnyDoc 原文</dt><dd>{originalValue || "空块"}</dd></div>
-              </dl>
-              {attachedState}
-            </div>
-          ) : null}
         </div>
       </article>
     );
   };
 
+  const auditedIndex = bodyAuditLocation?.index ?? null;
+  const auditedLabel = auditedIndex === null ? null : textBlockLabel("body", auditedIndex);
+  const auditedCurrentValue = auditedIndex === null ? "" : body[auditedIndex] ?? "";
+  const auditedOriginalValue = auditedIndex === null ? "" : original.body[auditedIndex] ?? "";
+  const auditedSavedValue = auditedIndex === null ? "" : savedSource?.body[auditedIndex] ?? "";
+  const auditedModified = auditedIndex !== null && auditedCurrentValue !== auditedOriginalValue;
+  const auditedLocalDraft = auditedIndex !== null && auditedCurrentValue !== auditedSavedValue;
+  const auditedSource = auditedIndex === null
+    ? null
+    : noiseSources.find((item) => item.source_index === auditedIndex) ?? null;
+  const auditedAttachedState = auditedIndex === null ? null : renderBodyAttachedState(auditedIndex);
+
   return (
-    <>
+    <div className="source-review-shell">
     <div
       className={`source-review-log ${bodyManuscriptExpanded ? "is-body-expanded" : ""}`}
       aria-busy={busy}
-      inert={showReopen || noiseCandidate ? true : undefined}
+      inert={showReopen || noiseCandidate || bodyAuditLocation ? true : undefined}
     >
       <header className="source-review-header">
         <div>
@@ -1923,7 +1991,6 @@ export function SourceReviewLog({
                 index,
                 value,
                 "expanded",
-                renderBodyAttachedState(index),
               ))}
             </div>
           </div>
@@ -2046,7 +2113,6 @@ export function SourceReviewLog({
                     index,
                     value,
                     "preview",
-                    renderBodyAttachedState(index),
                   ))}
                   </div>
                   <footer className={`source-body-preview-footer ${bodyPreviewOverflow ? "has-overflow" : ""}`}>
@@ -2686,6 +2752,129 @@ export function SourceReviewLog({
         )}
       </section>
     </div>
+    {bodyAuditLocation && auditedIndex !== null && auditedLabel ? (
+      <section
+        ref={bodyAuditPanelRef}
+        id={`source-body-audit-panel-${auditedIndex}`}
+        className="source-body-audit-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="source-body-audit-heading"
+        aria-describedby="source-body-audit-status"
+        inert={showReopen || noiseCandidate ? true : undefined}
+      >
+        <header className="source-body-audit-header">
+          <div>
+            <h2 id="source-body-audit-heading">{auditedLabel} · 来源审计</h2>
+            <p>{`来源文字块 ${String(auditedIndex + 1).padStart(2, "0")} · AnyDoc 正文 · 原始顺序 ${auditedIndex + 1}`}</p>
+          </div>
+          <button
+            ref={bodyAuditCloseRef}
+            type="button"
+            aria-label={`关闭${auditedLabel} 来源审计`}
+            onClick={closeBodyAudit}
+          >
+            关闭 <kbd>Esc</kbd>
+          </button>
+        </header>
+
+        <div className="source-body-audit-scroll">
+          <div
+            id="source-body-audit-status"
+            className={`source-body-audit-status ${
+              auditedCurrentValue.length === 0
+                ? "is-empty"
+                : auditedModified ? "is-modified" : "is-matching"
+            }`}
+            role="status"
+            aria-label={`${auditedLabel} 修改状态`}
+          >
+            <span aria-hidden="true" />
+            <strong>
+              {auditedCurrentValue.length === 0
+                ? "当前值为空"
+                : auditedModified
+                  ? "当前值与 AnyDoc 原文不同"
+                  : "当前值与 AnyDoc 原文一致"}
+            </strong>
+            <small>
+              {auditedLocalDraft
+                ? "当前值有未保存修改"
+                : auditedModified
+                  ? "当前修改已经保存"
+                  : "未修改"}
+            </small>
+          </div>
+
+          <div className="source-body-audit-compare" aria-label={`${auditedLabel} 当前值与 AnyDoc 原文对照`}>
+            <section role="region" aria-label={`${auditedLabel} 当前值`}>
+              <header>
+                <h3>当前值</h3>
+                <span>{auditedLocalDraft ? "本地草稿" : "已保存值"}</span>
+              </header>
+              {auditedCurrentValue.length ? (
+                <p>{auditedCurrentValue}</p>
+              ) : (
+                <p className="source-body-audit-empty">当前值为空</p>
+              )}
+            </section>
+            <section role="region" aria-label={`${auditedLabel} AnyDoc 原文`}>
+              <header>
+                <h3>AnyDoc 原文</h3>
+                <span>只读来源</span>
+              </header>
+              {auditedOriginalValue.length ? (
+                <p>{auditedOriginalValue}</p>
+              ) : (
+                <p className="source-body-audit-empty">AnyDoc 原文为空</p>
+              )}
+            </section>
+          </div>
+
+          <section className="source-body-audit-facts" aria-labelledby="source-body-audit-facts-heading">
+            <h3 id="source-body-audit-facts-heading">来源身份与审计记录</h3>
+            <dl>
+              <div><dt>来源类型</dt><dd>AnyDoc 正文</dd></div>
+              <div><dt>原始顺序</dt><dd>{String(auditedIndex + 1).padStart(2, "0")}</dd></div>
+              <div><dt>来源引用</dt><dd>{auditedSource?.source_ref ?? "当前响应未提供"}</dd></div>
+              <div>
+                <dt>文字确认</dt>
+                <dd>
+                  {snapshot?.source_confirmation
+                    ? `${snapshot.source_confirmation.actor_id} · ${formatTime(snapshot.source_confirmation.confirmed_at)}`
+                    : "尚未确认"}
+                </dd>
+              </div>
+            </dl>
+          </section>
+
+          {auditedAttachedState ? (
+            <section className="source-body-audit-operations" aria-labelledby="source-body-audit-operations-heading">
+              <header>
+                <h3 id="source-body-audit-operations-heading">逐块审计操作</h3>
+                <p>操作只影响该来源的审计处置，不会保存整稿草稿。</p>
+              </header>
+              {auditedAttachedState}
+            </section>
+          ) : (
+            <section className="source-body-audit-operations is-empty" aria-label="逐块审计操作">
+              <h3>逐块审计操作</h3>
+              <p>此来源当前没有待执行的逐块操作。</p>
+            </section>
+          )}
+
+          {announcement ? (
+            <p className="source-body-audit-announcement" role="status" aria-live="polite">
+              {announcement}
+            </p>
+          ) : null}
+        </div>
+        <footer>
+          <span>关闭面板不会保存、还原或丢弃整稿草稿</span>
+          <button type="button" onClick={closeBodyAudit}>返回正文</button>
+        </footer>
+      </section>
+    ) : null}
     {showReopen ? (
       <div
         className="dialog-backdrop reopen-page-backdrop"
@@ -2789,6 +2978,6 @@ export function SourceReviewLog({
         </section>
       </div>
     ) : null}
-    </>
+    </div>
   );
 }

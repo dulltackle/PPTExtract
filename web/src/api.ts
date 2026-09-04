@@ -850,10 +850,11 @@ export async function loadPageDetail(pageId: string, signal?: AbortSignal): Prom
 export async function loadRepeatedFooterNoiseCandidate(
   pageId: string,
   sourceRef: string,
+  signal?: AbortSignal,
 ): Promise<RepeatedFooterNoiseCandidate> {
   const response = await fetch(
     `/api/v1/pages/${pageId}/repeated-footer-noise/candidates/${sourceRef}`,
-    { headers: { Accept: "application/json" } },
+    { headers: { Accept: "application/json" }, signal },
   );
   return (
     await readJson<{ candidate: RepeatedFooterNoiseCandidate }>(

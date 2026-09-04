@@ -261,7 +261,10 @@ describe("来源文字审核工作台", () => {
     expect(screen.queryByRole("textbox", { name: "正文 02 当前编辑值" })).not.toBeInTheDocument();
     expect(screen.getByText("这次修改会由 Escape 保留")).toBeInTheDocument();
     expect(screen.getByText("修订标题")).toBeInTheDocument();
-    expect(screen.getAllByText("已修改")).toHaveLength(2);
+    expect(screen.getAllByText("已修改")).toHaveLength(1);
+    expect(screen.getByRole("button", {
+      name: "正文 02，已修改，打开来源审计",
+    })).toBeInTheDocument();
     expect(screen.getByText("查看标题 1的原始提取")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "从正文 01 打开放大视图" }));
@@ -288,6 +291,75 @@ describe("来源文字审核工作台", () => {
     await waitFor(() => expect(nextGate).toHaveFocus());
     expect(screen.getByRole("button", { name: "批准并转到下一待处理页" })).toBeDisabled();
     expect(document.querySelectorAll(".capture-range")).toHaveLength(0);
+  });
+
+  it("从来源段号打开受约束审计面板并在关闭后恢复焦点与本地草稿", async () => {
+    const source = {
+      ...originalSource,
+      body: ["第一段原始正文", "第二段 AnyDoc 原文", "第三段原始正文"],
+    };
+    let persistedWrites = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (init?.method && init.method !== "GET") persistedWrites += 1;
+      if (url === "/api/v1/app/bootstrap") {
+        return Promise.resolve(new Response(JSON.stringify(bootstrap), { status: 200 }));
+      }
+      if (url.includes("/api/v1/curation/pages")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pages: [pendingPage] }), { status: 200 }),
+        );
+      }
+      if (url === "/api/v1/pages/page-1") {
+        return Promise.resolve(new Response(JSON.stringify({
+          page_id: "page-1",
+          page_number: 1,
+          review_status: "pending",
+          source_content: source,
+          curation: curationState(null),
+        }), { status: 200 }));
+      }
+      throw new Error(`未覆盖的请求：${url}`);
+    });
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", {
+      name: "从正文 02 打开放大视图",
+    }));
+    const secondEditor = screen.getByRole("textbox", { name: "正文 02 当前编辑值" });
+    replaceBodyEditorText(secondEditor, "只存在于内存中的正文草稿");
+
+    const expandedNumber = screen.getByRole("button", {
+      name: "正文 02，已修改，打开来源审计",
+    });
+    await userEvent.click(expandedNumber);
+
+    const audit = screen.getByRole("dialog", { name: "正文 02 · 来源审计" });
+    expect(audit).toHaveTextContent("当前值有未保存修改");
+    expect(within(audit).getByRole("region", { name: "正文 02 当前值" }))
+      .toHaveTextContent("只存在于内存中的正文草稿");
+    expect(within(audit).getByRole("region", { name: "正文 02 AnyDoc 原文" }))
+      .toHaveTextContent("第二段 AnyDoc 原文");
+    await waitFor(() => expect(
+      within(audit).getByRole("button", { name: "关闭正文 02 来源审计" }),
+    ).toHaveFocus());
+    expect(expandedNumber).toHaveAttribute("aria-expanded", "true");
+    expect(expandedNumber).toHaveAttribute("aria-pressed", "true");
+    expect(audit.previousElementSibling).toHaveAttribute("inert");
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "正文 02 · 来源审计" }))
+      .not.toBeInTheDocument();
+    await waitFor(() => expect(expandedNumber).toHaveFocus());
+    expect(screen.getByRole("textbox", { name: "正文 02 当前编辑值" }))
+      .toHaveTextContent("只存在于内存中的正文草稿");
+    expect(persistedWrites).toBe(0);
+
+    replaceBodyEditorText(secondEditor, "");
+    await userEvent.click(expandedNumber);
+    expect(screen.getByRole("dialog", { name: "正文 02 · 来源审计" }))
+      .toHaveTextContent("当前值为空");
+    expect(persistedWrites).toBe(0);
   });
 
   it("已确认文字默认只读，并通过明确动作进入新一轮修订", async () => {
@@ -546,24 +618,20 @@ describe("来源文字审核工作台", () => {
       .not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
       .not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "正文 02 来源与审计" }));
-    const secondaryActions = screen.getByRole("button", { name: "正文来源 2 次级动作" });
-    secondaryActions.focus();
-    await userEvent.keyboard("{Enter}");
-    let checkRepeated = screen.getByRole("button", {
-      name: "检查是否为重复页脚噪声",
-    });
-    expect(checkRepeated).toBeVisible();
-    await userEvent.keyboard("{Escape}");
-    expect(checkRepeated).not.toBeVisible();
-    expect(secondaryActions).toHaveFocus();
-    await userEvent.keyboard("{Enter}");
-    checkRepeated = screen.getByRole("button", { name: "检查是否为重复页脚噪声" });
     const imageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
     await userEvent.type(imageSummary, "（本地修改）");
+    const auditTrigger = screen.getByRole("button", {
+      name: "正文 02，未修改，打开来源审计",
+    });
+    await userEvent.click(auditTrigger);
+    let checkRepeated = screen.getByRole("button", { name: "检查是否为重复页脚噪声" });
     expect(checkRepeated).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(auditTrigger).toHaveFocus());
     await userEvent.clear(imageSummary);
     await userEvent.type(imageSummary, savedImageSummary);
+    await userEvent.click(auditTrigger);
+    checkRepeated = screen.getByRole("button", { name: "检查是否为重复页脚噪声" });
     await waitFor(() => expect(checkRepeated).toBeEnabled());
     await userEvent.click(checkRepeated);
     expect(mutationRequests).toBe(0);
@@ -582,8 +650,9 @@ describe("来源文字审核工作台", () => {
     await userEvent.click(submit);
     expect(mutationRequests).toBe(1);
 
-    expect(await screen.findByText("重复页脚噪声确认已保存；详情暂未刷新，请重新加载当前页。"))
-      .toBeInTheDocument();
+    expect(within(screen.getByRole("dialog", { name: "正文 02 · 来源审计" })).getByText(
+      "重复页脚噪声确认已保存；详情暂未刷新，请重新加载当前页。",
+    )).toBeInTheDocument();
     expect(screen.queryByText("重复页脚噪声确认未能保存；正文保持不变。"))
       .not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "确认排除重复页脚噪声" }))
@@ -592,35 +661,48 @@ describe("来源文字审核工作台", () => {
     cleanup();
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
-    await userEvent.click(screen.getByRole("button", { name: "正文 02 来源与审计" }));
+    const activeImageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
+    await userEvent.type(activeImageSummary, "（本地修改）");
+    const activeAuditTrigger = screen.getByRole("button", {
+      name: "正文 02，未修改，打开来源审计",
+    });
+    await userEvent.click(activeAuditTrigger);
     expect(await screen.findByText("已从 Chunk 正文排除")).toBeInTheDocument();
     expect(screen.getAllByText(/operator-zhang ·/).length).toBeGreaterThan(0);
     expect(screen.getByText("规则 manual-exact-text-v1")).toBeInTheDocument();
     const revoke = screen.getByRole("button", { name: "撤销正文来源 2 的重复页脚排除" });
-    const activeImageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
-    await userEvent.type(activeImageSummary, "（本地修改）");
     expect(revoke).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(activeAuditTrigger).toHaveFocus());
     await userEvent.clear(activeImageSummary);
     await userEvent.type(activeImageSummary, savedImageSummary);
-    await waitFor(() => expect(revoke).toBeEnabled());
+    await userEvent.click(activeAuditTrigger);
+    const enabledRevoke = screen.getByRole("button", {
+      name: "撤销正文来源 2 的重复页脚排除",
+    });
+    await waitFor(() => expect(enabledRevoke).toBeEnabled());
     const mutationCountBeforeRevoke = mutationRequests;
-    await userEvent.click(revoke);
+    await userEvent.click(enabledRevoke);
     expect(mutationRequests).toBe(mutationCountBeforeRevoke + 1);
-    expect(await screen.findByText("重复页脚排除撤销已保存；详情暂未刷新，请重新加载当前页。"))
-      .toBeInTheDocument();
+    expect(within(screen.getByRole("dialog", { name: "正文 02 · 来源审计" })).getByText(
+      "重复页脚排除撤销已保存；详情暂未刷新，请重新加载当前页。",
+    )).toBeInTheDocument();
     expect(screen.queryByText("重复页脚排除未能撤销；正文状态未改变。"))
       .not.toBeInTheDocument();
 
     cleanup();
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
-    await userEvent.click(screen.getByRole("button", { name: "正文 02 来源与审计" }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "正文 02，未修改，打开来源审计",
+    }));
     expect(await screen.findByText("最近一次排除已撤销")).toBeInTheDocument();
     expect(screen.getByText("从策展工作台撤销并恢复正文。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "正文来源 2 次级动作" }))
+    expect(screen.getByRole("button", { name: "再次检查是否为重复页脚噪声" }))
       .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /次级动作/ })).not.toBeInTheDocument();
   });
 
   it("以单一文字核对命令保存修改、确认并自动完成零图片来源审核", async () => {
