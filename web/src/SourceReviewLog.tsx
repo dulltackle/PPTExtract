@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import {
   approveCurationPage,
@@ -119,10 +120,105 @@ function normalizedSource(source: Partial<SourceContent>): SourceContent {
   };
 }
 
-function fitTextareaToContent(element: HTMLTextAreaElement): void {
-  element.style.height = "auto";
-  const borderHeight = element.offsetHeight - element.clientHeight;
-  element.style.height = `${element.scrollHeight + borderHeight}px`;
+const BODY_BOUNDARY_MESSAGE = "已到达来源段落边界。请在当前来源文字块内编辑。";
+
+interface BodySelection {
+  startIndex: number;
+  startOffset: number;
+  endIndex: number;
+  endOffset: number;
+  collapsed: boolean;
+}
+
+function bodyEditableFromNode(node: Node, root: HTMLElement): HTMLElement | null {
+  const element = node instanceof HTMLElement ? node : node.parentElement;
+  const editable = element?.closest<HTMLElement>("[data-body-editable-index]") ?? null;
+  return editable && root.contains(editable) ? editable : null;
+}
+
+function bodyOffsetAt(editable: HTMLElement, node: Node, offset: number): number {
+  const lines = Array.from(editable.querySelectorAll<HTMLElement>(":scope > [data-body-line]"));
+  const element = node instanceof HTMLElement ? node : node.parentElement;
+  const line = element?.closest<HTMLElement>("[data-body-line]") ?? null;
+  if (!line || !editable.contains(line)) {
+    const childOffset = node === editable ? offset : 0;
+    const precedingTextLength = lines.slice(0, childOffset).reduce(
+      (length, candidate) => length + (candidate.textContent ?? "").length,
+      0,
+    );
+    return precedingTextLength + Math.min(childOffset, Math.max(lines.length - 1, 0));
+  }
+  const lineIndex = lines.indexOf(line);
+  const before = lines.slice(0, lineIndex).reduce(
+    (length, candidate) => length + (candidate.textContent ?? "").length + 1,
+    0,
+  );
+  const range = document.createRange();
+  range.selectNodeContents(line);
+  range.setEnd(node, offset);
+  return before + range.toString().length;
+}
+
+function bodyTextFromNode(root: Node): string {
+  if (!(root instanceof HTMLElement)) return root.textContent ?? "";
+  const lines = Array.from(root.querySelectorAll<HTMLElement>(":scope > [data-body-line]"));
+  return lines.length
+    ? lines.map((line) => line.textContent ?? "").join("\n")
+    : root.textContent ?? "";
+}
+
+function currentBodySelection(root: HTMLElement | null): BodySelection | null {
+  if (!root) return null;
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  const start = bodyEditableFromNode(range.startContainer, root);
+  const end = bodyEditableFromNode(range.endContainer, root);
+  if (!start || !end) return null;
+  return {
+    startIndex: Number(start.dataset.bodyEditableIndex),
+    startOffset: bodyOffsetAt(start, range.startContainer, range.startOffset),
+    endIndex: Number(end.dataset.bodyEditableIndex),
+    endOffset: bodyOffsetAt(end, range.endContainer, range.endOffset),
+    collapsed: range.collapsed,
+  };
+}
+
+function placeBodyCaret(editable: HTMLElement | null, offset: number): void {
+  if (!editable) return;
+  editable.focus();
+  const lines = Array.from(editable.querySelectorAll<HTMLElement>(":scope > [data-body-line]"));
+  let remaining = offset;
+  let target = lines[lines.length - 1] ?? editable;
+  for (const [index, line] of lines.entries()) {
+    const length = (line.textContent ?? "").length;
+    if (remaining <= length) {
+      target = line;
+      break;
+    }
+    remaining -= length;
+    if (index < lines.length - 1) remaining -= 1;
+  }
+  const text = Array.from(target.childNodes).find((node) => node.nodeType === Node.TEXT_NODE);
+  const range = document.createRange();
+  if (text) range.setStart(text, Math.min(remaining, text.textContent?.length ?? 0));
+  else range.setStart(target, 0);
+  range.collapse(true);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function bodyEditableHtml(value: string): string {
+  return value.split("\n").map((line) => {
+    const escaped = line
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+    return `<div data-body-line>${escaped || "<br>"}</div>`;
+  }).join("");
 }
 
 function fallbackCuration(source: SourceContent): CurationState {
@@ -338,6 +434,7 @@ export function SourceReviewLog({
   const [bodyManuscriptExpanded, setBodyManuscriptExpanded] = useState(false);
   const [bodyPreviewOverflow, setBodyPreviewOverflow] = useState(false);
   const [bodyAuditIndex, setBodyAuditIndex] = useState<number | null>(null);
+  const [bodyBoundaryNotice, setBodyBoundaryNotice] = useState<string | null>(null);
   const [narrowBodyManuscript, setNarrowBodyManuscript] = useState(false);
   const [operation, setOperation] = useState<
     "text-review" | "image" | "review" | "approve" | "exclude" | "reopen" |
@@ -358,10 +455,11 @@ export function SourceReviewLog({
   const [noiseAcknowledged, setNoiseAcknowledged] = useState(false);
   const [noiseNote, setNoiseNote] = useState("");
   const firstFieldRef = useRef<HTMLButtonElement>(null);
-  const textEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const textEditorRefs = useRef<Record<string, HTMLElement | null>>({});
   const textEditButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const bodyPreviewRef = useRef<HTMLDivElement>(null);
   const bodyExpandedRef = useRef<HTMLElement>(null);
+  const bodyEditingSurfaceRef = useRef<HTMLDivElement>(null);
   const bodyCloseRef = useRef<HTMLButtonElement>(null);
   const bodyExpandButtonRef = useRef<HTMLButtonElement>(null);
   const bodyTextReviewRef = useRef<HTMLButtonElement>(null);
@@ -449,6 +547,7 @@ export function SourceReviewLog({
         setActiveTextEditor(null);
         setBodyManuscriptExpanded(false);
         setBodyAuditIndex(null);
+        setBodyBoundaryNotice(null);
         lastModifiedTextKeyRef.current = null;
         lastBodyIndexRef.current = null;
         setExclusionReason("");
@@ -626,8 +725,160 @@ export function SourceReviewLog({
     ));
   };
 
+  const announceBodyBoundary = () => {
+    setBodyBoundaryNotice(BODY_BOUNDARY_MESSAGE);
+  };
+
+  const replaceBodySelection = (selection: BodySelection, replacement: string) => {
+    if (selection.startIndex !== selection.endIndex) return;
+    const index = selection.startIndex;
+    const current = body[index] ?? "";
+    const next = `${current.slice(0, selection.startOffset)}${replacement}${
+      current.slice(selection.endOffset)
+    }`;
+    flushSync(() => {
+      updateBodyBlock(index, next);
+      setBodyBoundaryNotice(null);
+    });
+    const caretOffset = selection.startOffset + replacement.length;
+    placeBodyCaret(textEditorRefs.current[textBlockKey("body", index)], caretOffset);
+  };
+
+  const bodySelectionIsProtected = (selection: BodySelection | null) => (
+    Boolean(selection && selection.startIndex !== selection.endIndex)
+  );
+
+  const handleBodyKeyDown = (event: React.KeyboardEvent<HTMLElement>, index: number) => {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    const selection = currentBodySelection(bodyEditingSurfaceRef.current);
+    if (!selection) return;
+    const crossesBoundary = bodySelectionIsProtected(selection);
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (crossesBoundary) announceBodyBoundary();
+      else replaceBodySelection(selection, "\n");
+      return;
+    }
+    if (
+      crossesBoundary && event.key.length === 1 &&
+      !event.ctrlKey && !event.metaKey && !event.altKey
+    ) {
+      event.preventDefault();
+      announceBodyBoundary();
+      return;
+    }
+    if (event.key !== "Backspace" && event.key !== "Delete") return;
+    const atProtectedEdge = selection.collapsed && selection.startIndex === index && (
+      (event.key === "Backspace" && selection.startOffset === 0) ||
+      (event.key === "Delete" && selection.endOffset === (body[index]?.length ?? 0))
+    );
+    if (!crossesBoundary && !atProtectedEdge) return;
+    event.preventDefault();
+    event.stopPropagation();
+    announceBodyBoundary();
+  };
+
+  const syncBodyInput = (event: React.FormEvent<HTMLElement>, index: number) => {
+    const selection = currentBodySelection(bodyEditingSurfaceRef.current);
+    const caretOffset = selection?.collapsed && selection.startIndex === index
+      ? selection.startOffset
+      : null;
+    flushSync(() => updateBodyBlock(index, bodyTextFromNode(event.currentTarget)));
+    if (caretOffset === null || (event.nativeEvent as InputEvent).isComposing) return;
+    placeBodyCaret(textEditorRefs.current[textBlockKey("body", index)], caretOffset);
+  };
+
+  const handleBodyPaste = (event: React.ClipboardEvent<HTMLElement>) => {
+    const selection = currentBodySelection(bodyEditingSurfaceRef.current);
+    if (!selection || bodySelectionIsProtected(selection)) {
+      event.preventDefault();
+      announceBodyBoundary();
+      return;
+    }
+    event.preventDefault();
+    replaceBodySelection(
+      selection,
+      event.clipboardData.getData("text/plain").replace(/\r\n?/g, "\n"),
+    );
+  };
+
+  const handleBodyCut = (event: React.ClipboardEvent<HTMLElement>) => {
+    const selection = currentBodySelection(bodyEditingSurfaceRef.current);
+    if (!selection || selection.collapsed) return;
+    if (!bodySelectionIsProtected(selection)) {
+      event.preventDefault();
+      event.clipboardData.setData(
+        "text/plain",
+        (body[selection.startIndex] ?? "").slice(selection.startOffset, selection.endOffset),
+      );
+      replaceBodySelection(selection, "");
+      return;
+    }
+    event.preventDefault();
+    announceBodyBoundary();
+  };
+
+  const handleBodyCopy = (event: React.ClipboardEvent<HTMLElement>) => {
+    const selection = currentBodySelection(bodyEditingSurfaceRef.current);
+    if (!selection || selection.collapsed) return;
+    if (selection.startIndex === selection.endIndex) {
+      event.preventDefault();
+      event.clipboardData.setData(
+        "text/plain",
+        (body[selection.startIndex] ?? "").slice(selection.startOffset, selection.endOffset),
+      );
+      return;
+    }
+    const fragments = body.slice(selection.startIndex, selection.endIndex + 1);
+    fragments[0] = fragments[0].slice(selection.startOffset);
+    fragments[fragments.length - 1] = fragments[fragments.length - 1].slice(
+      0,
+      selection.endOffset,
+    );
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", fragments.join("\n\n"));
+  };
+
+  useEffect(() => {
+    const root = bodyEditingSurfaceRef.current;
+    if (!root || !bodyManuscriptExpanded || !pending || !textEditingEnabled || busy) return;
+    const protectBodyStructure = (event: InputEvent) => {
+      const target = event.target instanceof HTMLElement
+        ? event.target.closest<HTMLElement>("[data-body-editable-index]")
+        : null;
+      if (!target || !root.contains(target)) return;
+      const index = Number(target.dataset.bodyEditableIndex);
+      const selection = currentBodySelection(root);
+      if (!selection) return;
+      const inputType = event.inputType ?? "";
+      if (bodySelectionIsProtected(selection)) {
+        event.preventDefault();
+        announceBodyBoundary();
+        return;
+      }
+      if (inputType === "insertParagraph" || inputType === "insertLineBreak") {
+        event.preventDefault();
+        replaceBodySelection(selection, "\n");
+        return;
+      }
+      const atStart = selection.collapsed && selection.startOffset === 0;
+      const atEnd = selection.collapsed && selection.endOffset === (body[index]?.length ?? 0);
+      if (
+        (inputType.endsWith("Backward") && atStart) ||
+        (inputType.endsWith("Forward") && atEnd)
+      ) {
+        event.preventDefault();
+        announceBodyBoundary();
+      }
+    };
+    root.addEventListener("beforeinput", protectBodyStructure, true);
+    return () => root.removeEventListener("beforeinput", protectBodyStructure, true);
+  }, [body, bodyManuscriptExpanded, busy, pending, textEditingEnabled]);
+
   const closeBodyManuscript = useCallback(() => {
     setBodyManuscriptExpanded(false);
+    setBodyBoundaryNotice(null);
     setActiveTextEditor((current) => current?.kind === "body" ? null : current);
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       const key = bodyReturnFocusKeyRef.current;
@@ -643,6 +894,7 @@ export function SourceReviewLog({
     bodyReturnFocusKeyRef.current = index === null ? null : textBlockKey("body", index);
     setBodyManuscriptExpanded(true);
     setBodyAuditIndex(null);
+    setBodyBoundaryNotice(null);
     if (pending && textEditingEnabled) {
       const key = textBlockKey("body", preferredIndex);
       setActiveTextEditor({
@@ -1238,20 +1490,14 @@ export function SourceReviewLog({
 
   useLayoutEffect(() => {
     if (!bodyManuscriptExpanded) return;
-    const expanded = bodyExpandedRef.current;
-    if (!expanded) return;
-    const fitEditors = () => {
-      expanded.querySelectorAll<HTMLTextAreaElement>(".source-expanded-editor textarea")
-        .forEach(fitTextareaToContent);
-    };
-    fitEditors();
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fitEditors);
-    observer?.observe(expanded);
-    window.addEventListener("resize", fitEditors);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", fitEditors);
-    };
+    body.forEach((value, index) => {
+      const editable = textEditorRefs.current[textBlockKey("body", index)];
+      if (!editable) return;
+      const hasLineStructure = editable.querySelector(":scope > [data-body-line]") !== null;
+      if (!hasLineStructure || bodyTextFromNode(editable) !== value) {
+        editable.innerHTML = bodyEditableHtml(value);
+      }
+    });
   }, [body, bodyManuscriptExpanded]);
 
   useEffect(() => {
@@ -1266,6 +1512,7 @@ export function SourceReviewLog({
   useEffect(() => {
     if (!bodyManuscriptExpanded) return;
     const handleExpandedKeys = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
       const higherModalOpen = Array.from(
         document.querySelectorAll<HTMLElement>("[aria-modal='true']"),
       ).some((element) => element !== bodyExpandedRef.current);
@@ -1572,26 +1819,35 @@ export function SourceReviewLog({
               {currentValue || <span className="source-empty-inline">空块</span>}
             </button>
           ) : (
-            <label className={`source-expanded-editor ${canEdit ? "" : "is-readonly"}`}>
-              <span className="visually-hidden">
-                {canEdit ? `${label} 当前编辑值` : `${label} 当前只读值`}
-              </span>
-              <textarea
+            <div className={`source-expanded-editor ${canEdit ? "" : "is-readonly"}`}>
+              <div
                 ref={(element) => { textEditorRefs.current[key] = element; }}
+                role="textbox"
                 aria-label={canEdit ? `${label} 当前编辑值` : `${label} 当前只读值`}
-                rows={3}
-                value={currentValue}
-                readOnly={!canEdit}
-                disabled={busy}
+                aria-multiline="true"
+                aria-readonly={!canEdit}
+                aria-placeholder={currentValue.length === 0 ? "空来源段落" : undefined}
+                contentEditable={canEdit && !busy}
+                suppressContentEditableWarning
+                data-body-editable-index={index}
+                data-empty={currentValue.length === 0 ? "true" : undefined}
+                tabIndex={0}
                 onFocus={() => {
                   lastBodyIndexRef.current = index;
                   if (canEdit) {
-                    setActiveTextEditor({ kind: "body", index, baseline: currentValue });
+                    flushSync(() => setActiveTextEditor((current) => (
+                      current?.kind === "body" && current.index === index
+                        ? current
+                        : { kind: "body", index, baseline: currentValue }
+                    )));
                   }
                 }}
-                onChange={(event) => updateBodyBlock(index, event.target.value)}
+                onKeyDown={canEdit ? (event) => handleBodyKeyDown(event, index) : undefined}
+                onPaste={canEdit ? handleBodyPaste : undefined}
+                onCut={canEdit ? handleBodyCut : undefined}
+                onInput={canEdit ? (event) => syncBodyInput(event, index) : undefined}
               />
-            </label>
+            </div>
           )}
           {auditOpen ? (
             <div className="source-body-audit" role="region" aria-label={`${label} 来源与审计详情`}>
@@ -1656,13 +1912,31 @@ export function SourceReviewLog({
                 {announcement}
               </div>
             ) : null}
-            {original.body.map((value, index) => renderBodyBlock(
-              index,
-              value,
-              "expanded",
-              renderBodyAttachedState(index),
-            ))}
+            <div
+              ref={bodyEditingSurfaceRef}
+              className="source-body-editing-surface"
+              role="region"
+              aria-label="连续正文编辑面"
+              onCopy={handleBodyCopy}
+            >
+              {original.body.map((value, index) => renderBodyBlock(
+                index,
+                value,
+                "expanded",
+                renderBodyAttachedState(index),
+              ))}
+            </div>
           </div>
+          {bodyBoundaryNotice ? (
+            <div
+              className="source-body-boundary-status"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {bodyBoundaryNotice}
+            </div>
+          ) : null}
           <footer>
             <span>{textDirty ? "本地草稿已保留，尚未保存" : "当前正文与已保存来源一致"}</span>
             <div className="source-body-expanded-actions">

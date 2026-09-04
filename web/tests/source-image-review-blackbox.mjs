@@ -101,7 +101,7 @@ try {
   await keep.getByRole("button", { name: "修改文字" }).click();
   await keep.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
   const revisedBody = keep.getByRole("textbox", { name: "正文 01 当前编辑值" });
-  await revisedBody.fill(`${await revisedBody.inputValue()}（复核已处置图片）`);
+  await revisedBody.fill(`${await revisedBody.innerText()}（复核已处置图片）`);
   await keep.getByRole("button", { name: "保存并确认修改" }).click();
   const revisedSummary = keep.getByRole("status", { name: "文字核对摘要" });
   await revisedSummary.waitFor();

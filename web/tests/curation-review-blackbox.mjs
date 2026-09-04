@@ -147,7 +147,7 @@ try {
   await page.getByRole("button", { name: "文字一致，确认" }).waitFor();
   await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
   const body = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
-  await body.fill(`${await body.inputValue()}（浏览器人工核对）`);
+  await body.fill(`${await body.innerText()}（浏览器人工核对）`);
   await page.getByText("本地草稿已保留，尚未保存").waitFor();
   await page.getByRole("button", { name: "保存并确认修改" }).waitFor();
 

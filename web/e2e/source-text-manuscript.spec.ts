@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Locator, type Page } from "playwright/test";
 
 const body = Array.from({ length: 11 }, (_, index) => (
   index === 5
@@ -55,6 +55,7 @@ async function mockCurationApi(
   onSubmit?: (payload: unknown) => void,
   sourceContent = source,
   initialSnapshot: null | Record<string, unknown> = null,
+  reviewStatus: "pending" | "approved" = "pending",
 ) {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "sendBeacon", {
@@ -80,7 +81,13 @@ async function mockCurationApi(
     }
     if (path === "/api/v1/curation/pages") {
       await route.fulfill({
-        json: { pages: [{ ...pageSummary, title: sourceContent.titles[0] ?? null }] },
+        json: {
+          pages: [{
+            ...pageSummary,
+            review_status: reviewStatus,
+            title: sourceContent.titles[0] ?? null,
+          }],
+        },
       });
       return;
     }
@@ -89,7 +96,7 @@ async function mockCurationApi(
         json: {
           page_id: "page-browser",
           page_number: 1,
-          review_status: "pending",
+          review_status: reviewStatus,
           source_content: sourceContent,
           curation: curation(initialSnapshot),
         },
@@ -360,6 +367,68 @@ async function mockRepeatedFooterNoiseApi(page: Page) {
   };
 }
 
+async function selectBodyText(
+  page: Page,
+  startIndex: number,
+  startOffset: number,
+  endIndex: number,
+  endOffset: number,
+) {
+  await page.evaluate(({ startIndex, startOffset, endIndex, endOffset }) => {
+    const start = document.querySelector<HTMLElement>(
+      `[data-body-editable-index="${startIndex}"]`,
+    );
+    const end = document.querySelector<HTMLElement>(
+      `[data-body-editable-index="${endIndex}"]`,
+    );
+    if (!start || !end) throw new Error("正文连续编辑面尚未呈现来源段落");
+    const pointAt = (root: HTMLElement, logicalOffset: number) => {
+      const lines = Array.from(root.querySelectorAll<HTMLElement>(":scope > [data-body-line]"));
+      let remaining = logicalOffset;
+      let target = lines[lines.length - 1] ?? root;
+      for (const [index, line] of lines.entries()) {
+        const length = line.textContent?.length ?? 0;
+        if (remaining <= length) {
+          target = line;
+          break;
+        }
+        remaining -= length;
+        if (index < lines.length - 1) remaining -= 1;
+      }
+      const text = Array.from(target.childNodes).find((node) => node.nodeType === Node.TEXT_NODE);
+      return text
+        ? { node: text, offset: Math.min(remaining, text.textContent?.length ?? 0) }
+        : { node: target, offset: 0 };
+    };
+    const startPoint = pointAt(start, startOffset);
+    const endPoint = pointAt(end, endOffset);
+    start.focus();
+    const range = document.createRange();
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }, { startIndex, startOffset, endIndex, endOffset });
+}
+
+async function pasteIntoFocusedBody(page: Page, text: string) {
+  await page.evaluate((value) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", value);
+    document.activeElement?.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData,
+    }));
+  }, text);
+}
+
+async function expectBodyText(editor: Locator, expected: string) {
+  await expect.poll(() => editor.evaluate((element) => (element as HTMLElement).innerText))
+    .toBe(expected);
+}
+
 test("正文整稿预览从来源日志侧展开、保留草稿并恢复触发焦点", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   let mutationRequests = 0;
@@ -399,8 +468,10 @@ test("正文整稿预览从来源日志侧展开、保留草稿并恢复触发�
   expect(mutationRequests).toBe(0);
 
   await page.getByRole("button", { name: "放大编辑正文" }).click();
-  await expect(page.getByRole("textbox", { name: "正文 03 当前编辑值" }))
-    .toHaveValue("只保存在本地的正文草稿");
+  await expectBodyText(
+    page.getByRole("textbox", { name: "正文 03 当前编辑值" }),
+    "只保存在本地的正文草稿",
+  );
 });
 
 test("单段短正文保留固定预览与键盘放大入口", async ({ page }) => {
@@ -425,7 +496,7 @@ test("单段短正文保留固定预览与键盘放大入口", async ({ page }) 
   await expect(expand).toBeFocused();
 });
 
-test("已确认正文仍可放大只读核对且不暴露保存动作", async ({ page }) => {
+test("已批准正文保持只读且只能通过既有重新打开流程修改", async ({ page }) => {
   const confirmedSource = {
     ...source,
     body: ["已经确认并冻结的公开正文。"],
@@ -446,17 +517,26 @@ test("已确认正文仍可放大只读核对且不暴露保存动作", async ({
     },
     image_source_decisions: [],
   };
-  await mockCurationApi(page, undefined, confirmedSource, snapshot);
+  await mockCurationApi(page, undefined, confirmedSource, snapshot, "approved");
   await page.goto("/curation");
 
+  await expect(page.getByRole("button", { name: "重新打开此页" })).toBeVisible();
   await page.getByRole("button", { name: "展开文字核对" }).click();
   const expand = page.getByRole("button", { name: "放大查看正文" });
   await expand.click();
   const expanded = page.getByRole("dialog", { name: "正文放大视图" });
   await expect(expanded.getByRole("button", { name: /关闭正文放大视图/ })).toBeFocused();
   const readonlyBody = expanded.getByRole("textbox", { name: "正文 01 当前只读值" });
-  await expect(readonlyBody).toHaveAttribute("readonly", "");
-  await expect(readonlyBody).toHaveValue("已经确认并冻结的公开正文。");
+  await expect(readonlyBody).toHaveAttribute("aria-readonly", "true");
+  await expect(readonlyBody).toHaveAttribute("contenteditable", "false");
+  await expectBodyText(readonlyBody, "已经确认并冻结的公开正文。");
+  await selectBodyText(page, 0, 12, 0, 12);
+  await page.keyboard.press("Enter");
+  await selectBodyText(page, 0, 0, 0, 2);
+  await pasteIntoFocusedBody(page, "不得写入");
+  await selectBodyText(page, 0, 0, 0, 2);
+  await page.keyboard.press("Control+x");
+  await expectBodyText(readonlyBody, "已经确认并冻结的公开正文。");
   await expect(expanded.getByRole("button", { name: /保存|确认修改/ })).toHaveCount(0);
 });
 
@@ -509,12 +589,9 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
   await expect(page.getByRole("dialog", { name: "正文放大视图" })).toBeVisible();
 
   const secondBodyEditor = page.getByRole("textbox", { name: "正文 02 当前编辑值" });
-  await secondBodyEditor.evaluate((element) => {
-    element.setSelectionRange(0, 0);
-  });
+  await selectBodyText(page, 1, 0, 1, 0);
   await secondBodyEditor.press("Backspace");
-  await expect(page.getByRole("textbox", { name: "正文 01 当前编辑值" }))
-    .toHaveValue(body[0]);
+  await expectBodyText(page.getByRole("textbox", { name: "正文 01 当前编辑值" }), body[0]);
   await expect(page.getByRole("textbox", { name: /正文 \d+ 当前编辑值/ })).toHaveCount(11);
   await secondBodyEditor.fill("会由 Escape 保留的值");
   await secondBodyEditor.press("Escape");
@@ -534,6 +611,145 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
     titles: ["修订后的公开长标题"],
     body: ["第一行\n第二行", "会由 Escape 保留的值", ...body.slice(2)],
   });
+});
+
+test("连续正文编辑面允许段内换行与粘贴并拒绝跨来源段落修改", async ({ page }) => {
+  const boundarySource = {
+    ...source,
+    titles: ["来源边界验收标题"],
+    body: ["第一来源段", "第二来源段", "第三\u200B来源段"],
+  };
+  let submitted: { titles: string[]; body: string[] } | null = null;
+  await mockCurationApi(
+    page,
+    (payload) => { submitted = payload as { titles: string[]; body: string[] }; },
+    boundarySource,
+  );
+  await page.goto("/curation");
+
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  const editingSurface = expanded.getByRole("region", { name: "连续正文编辑面" });
+  await expect(editingSurface).toBeVisible();
+  await expect(editingSurface.locator(".source-body-paragraph")).toHaveCount(3);
+
+  const first = expanded.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  const second = expanded.getByRole("textbox", { name: "正文 02 当前编辑值" });
+  await expect(first).toBeFocused();
+  await selectBodyText(page, 0, 5, 0, 5);
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("追加行");
+  await selectBodyText(page, 0, 9, 0, 9);
+  await pasteIntoFocusedBody(page, "\n粘贴甲\n粘贴乙");
+  const editedFirst = "第一来源段\n追加行\n粘贴甲\n粘贴乙";
+  await expectBodyText(first, editedFirst);
+
+  await selectBodyText(page, 0, editedFirst.length, 0, editedFirst.length);
+  const imeEnterPrevented = await first.evaluate((element) => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Enter",
+      isComposing: true,
+      key: "Enter",
+      keyCode: 229,
+    });
+    element.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(imeEnterPrevented).toBe(false);
+  await expectBodyText(first, editedFirst);
+
+  const imeEscapePrevented = await first.evaluate((element) => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Escape",
+      isComposing: true,
+      key: "Escape",
+      keyCode: 229,
+    });
+    element.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(imeEscapePrevented).toBe(false);
+  await expect(expanded).toBeVisible();
+
+  await selectBodyText(page, 0, editedFirst.length, 0, editedFirst.length);
+  await page.keyboard.press("Delete");
+  await expectBodyText(second, "第二来源段");
+  await expect(expanded.getByRole("status"))
+    .toContainText("已到达来源段落边界。请在当前来源文字块内编辑。");
+
+  await selectBodyText(page, 1, 0, 1, 0);
+  await page.keyboard.press("Backspace");
+  await expectBodyText(first, editedFirst);
+  await expectBodyText(second, "第二来源段");
+
+  await selectBodyText(page, 0, 2, 1, 2);
+  const copied = await page.evaluate(() => {
+    const clipboardData = new DataTransfer();
+    document.activeElement?.dispatchEvent(new ClipboardEvent("copy", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData,
+    }));
+    return clipboardData.getData("text/plain");
+  });
+  expect(copied).toBe(`${editedFirst.slice(2)}\n\n${boundarySource.body[1].slice(0, 2)}`);
+
+  for (const action of [
+    "type",
+    "paste",
+    "cut",
+    "composition",
+    "Backspace",
+    "Delete",
+  ] as const) {
+    await selectBodyText(page, 0, 2, 1, 2);
+    const selectionBefore = await page.evaluate(() => window.getSelection()?.toString());
+    if (action === "type") await page.keyboard.type("跨段改写");
+    else if (action === "paste") await pasteIntoFocusedBody(page, "跨段粘贴\n仍应拒绝");
+    else if (action === "cut") await page.keyboard.press("Control+x");
+    else if (action === "composition") {
+      const compositionPrevented = await first.evaluate((element) => {
+        const event = new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          data: "候",
+          inputType: "insertCompositionText",
+          isComposing: true,
+        });
+        element.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+      expect(compositionPrevented).toBe(true);
+    }
+    else await page.keyboard.press(action);
+    await expectBodyText(first, editedFirst);
+    await expectBodyText(second, "第二来源段");
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(selectionBefore);
+    await expect(first).toBeFocused();
+  }
+
+  await second.focus();
+  await second.blur();
+  await expectBodyText(second, "第二来源段");
+  await page.keyboard.press("Escape");
+  await expect(expanded).toHaveCount(0);
+  await page.getByRole("button", { name: "放大编辑正文" }).click();
+  await expectBodyText(first, editedFirst);
+  await expectBodyText(second, "第二来源段");
+
+  const third = expanded.getByRole("textbox", { name: "正文 03 当前编辑值" });
+  await selectBodyText(page, 2, boundarySource.body[2].length, 2, boundarySource.body[2].length);
+  await page.keyboard.type("尾");
+  await expectBodyText(third, "第三\u200B来源段尾");
+
+  await expanded.getByRole("button", { name: "保存并确认修改" }).click();
+  await expect.poll(() => submitted?.body)
+    .toEqual([editedFirst, "第二来源段", "第三\u200B来源段尾"]);
+  expect(submitted?.titles).toEqual(boundarySource.titles);
 });
 
 test("重复页脚检查收纳为正文次级动作并保留确认与撤销证据", async ({ page }, testInfo) => {
@@ -663,7 +879,29 @@ test("正文放大视图让顶层导航保护对话框优先处理 Escape", asyn
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(expanded).toBeVisible();
-  await expect(editor).toHaveValue("只存在于正文放大视图的本地草稿");
+  await expectBodyText(editor, "只存在于正文放大视图的本地草稿");
+});
+
+test("现有还原流程丢弃正文放大视图草稿并恢复持久正文", async ({ page }) => {
+  await mockNavigationGuardApi(page);
+  await page.goto("/curation");
+
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
+  const editor = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  await expect(editor).toBeFocused();
+  await editor.fill("应由现有还原流程丢弃的正文草稿");
+  await page.getByRole("button", { name: /第 2 页，第 2 页持久标题，待处理/ }).click();
+  const dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await dialog.getByRole("button", { name: "放弃修改并离开" }).click();
+  await expect(page.getByRole("region", { name: "标题与正文核对稿" }))
+    .toContainText("第 2 页持久正文");
+
+  await page.getByRole("button", { name: /第 1 页，第 1 页持久标题，待处理/ }).click();
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
+  await expectBodyText(
+    page.getByRole("textbox", { name: "正文 01 当前编辑值" }),
+    "第 1 页持久正文",
+  );
 });
 
 test("页点击、方向键、筛选与批量排除共用键盘可达的文字导航保护", async ({ page }) => {
