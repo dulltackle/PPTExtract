@@ -54,7 +54,7 @@ try {
       }
       await page.getByText("处理完成，页面已进入待处理队列。").waitFor();
       await page.getByRole("img", { name: "第 2 页标准页渲染结果" }).waitFor();
-      await page.getByText("页已进入普通策展流程").waitFor();
+      await page.getByText(/普通策展/).waitFor();
       checks.push("persistent-enable-to-pending");
     }
     await page.close();

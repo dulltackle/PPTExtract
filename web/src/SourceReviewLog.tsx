@@ -119,6 +119,12 @@ function normalizedSource(source: Partial<SourceContent>): SourceContent {
   };
 }
 
+function fitTextareaToContent(element: HTMLTextAreaElement): void {
+  element.style.height = "auto";
+  const borderHeight = element.offsetHeight - element.clientHeight;
+  element.style.height = `${element.scrollHeight + borderHeight}px`;
+}
+
 function fallbackCuration(source: SourceContent): CurationState {
   const hasText = [
     ...source.titles,
@@ -329,6 +335,10 @@ export function SourceReviewLog({
   const [textExpanded, setTextExpanded] = useState(true);
   const [textEditingEnabled, setTextEditingEnabled] = useState(true);
   const [activeTextEditor, setActiveTextEditor] = useState<ActiveTextEditor | null>(null);
+  const [bodyManuscriptExpanded, setBodyManuscriptExpanded] = useState(false);
+  const [bodyPreviewOverflow, setBodyPreviewOverflow] = useState(false);
+  const [bodyAuditIndex, setBodyAuditIndex] = useState<number | null>(null);
+  const [narrowBodyManuscript, setNarrowBodyManuscript] = useState(false);
   const [operation, setOperation] = useState<
     "text-review" | "image" | "review" | "approve" | "exclude" | "reopen" |
     "noise-preview" | "noise-confirm" | "noise-revoke" | null
@@ -350,6 +360,13 @@ export function SourceReviewLog({
   const firstFieldRef = useRef<HTMLButtonElement>(null);
   const textEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const textEditButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const bodyPreviewRef = useRef<HTMLDivElement>(null);
+  const bodyExpandedRef = useRef<HTMLElement>(null);
+  const bodyCloseRef = useRef<HTMLButtonElement>(null);
+  const bodyExpandButtonRef = useRef<HTMLButtonElement>(null);
+  const bodyTextReviewRef = useRef<HTMLButtonElement>(null);
+  const bodyReturnFocusKeyRef = useRef<string | null>(null);
+  const lastBodyIndexRef = useRef<number | null>(null);
   const textReviewRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
@@ -430,7 +447,10 @@ export function SourceReviewLog({
         setTextExpanded(!curation.current_snapshot?.source_confirmation);
         setTextEditingEnabled(!curation.current_snapshot?.source_confirmation);
         setActiveTextEditor(null);
+        setBodyManuscriptExpanded(false);
+        setBodyAuditIndex(null);
         lastModifiedTextKeyRef.current = null;
+        lastBodyIndexRef.current = null;
         setExclusionReason("");
         setExclusionNote("");
         setExclusionExpanded(false);
@@ -595,6 +615,50 @@ export function SourceReviewLog({
     const key = textBlockKey(kind, index);
     setActiveTextEditor({ kind, index, baseline: textBlockValue(kind, index) });
     window.requestAnimationFrame(() => textEditorRefs.current[key]?.focus());
+  };
+
+  const updateBodyBlock = (index: number, value: string) => {
+    const key = textBlockKey("body", index);
+    lastModifiedTextKeyRef.current = key;
+    lastBodyIndexRef.current = index;
+    setBody((current) => current.map(
+      (item, candidate) => candidate === index ? value : item,
+    ));
+  };
+
+  const closeBodyManuscript = useCallback(() => {
+    setBodyManuscriptExpanded(false);
+    setActiveTextEditor((current) => current?.kind === "body" ? null : current);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const key = bodyReturnFocusKeyRef.current;
+      const target = key ? textEditButtonRefs.current[key] : bodyExpandButtonRef.current;
+      target?.focus();
+      bodyReturnFocusKeyRef.current = null;
+    }));
+  }, []);
+
+  const openBodyManuscript = (index: number | null) => {
+    if (!original?.body.length || busy) return;
+    const preferredIndex = index ?? lastBodyIndexRef.current ?? 0;
+    bodyReturnFocusKeyRef.current = index === null ? null : textBlockKey("body", index);
+    setBodyManuscriptExpanded(true);
+    setBodyAuditIndex(null);
+    if (pending && textEditingEnabled) {
+      const key = textBlockKey("body", preferredIndex);
+      setActiveTextEditor({
+        kind: "body",
+        index: preferredIndex,
+        baseline: body[preferredIndex] ?? "",
+      });
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        textEditorRefs.current[key]?.focus();
+      }));
+    } else {
+      setActiveTextEditor(null);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        bodyCloseRef.current?.focus();
+      }));
+    }
   };
 
   const cancelTextEditor = () => {
@@ -812,6 +876,8 @@ export function SourceReviewLog({
       );
       applyCuration(result.curation, { preserveImageDrafts: imageDirty });
       setActiveTextEditor(null);
+      setBodyManuscriptExpanded(false);
+      bodyReturnFocusKeyRef.current = null;
       setTextEditingEnabled(false);
       setTextExpanded(false);
       if (result.next_unresolved_image) {
@@ -829,7 +895,12 @@ export function SourceReviewLog({
           .replace(/[；。]\s*$/, "")
         : "文字核对未能提交";
       setAnnouncement(`${reason}；持久审核状态未改变，本地文字修改仍保留。`);
-      window.requestAnimationFrame(() => textReviewRef.current?.focus());
+      window.requestAnimationFrame(() => {
+        const target = bodyManuscriptExpanded
+          ? bodyTextReviewRef.current
+          : textReviewRef.current;
+        target?.focus();
+      });
     } finally {
       setOperation(null);
     }
@@ -1145,6 +1216,87 @@ export function SourceReviewLog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [approvalPathReady, busy, curation?.can_approve, dirty, handleApprove, openReopenDialog, pending]);
 
+  useLayoutEffect(() => {
+    if (!textExpanded || bodyManuscriptExpanded || body.length === 0) {
+      setBodyPreviewOverflow(false);
+      return;
+    }
+    const preview = bodyPreviewRef.current;
+    if (!preview) return;
+    const measure = () => {
+      setBodyPreviewOverflow(preview.scrollHeight > preview.clientHeight + 1);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(preview);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [body, bodyManuscriptExpanded, textExpanded]);
+
+  useLayoutEffect(() => {
+    if (!bodyManuscriptExpanded) return;
+    const expanded = bodyExpandedRef.current;
+    if (!expanded) return;
+    const fitEditors = () => {
+      expanded.querySelectorAll<HTMLTextAreaElement>(".source-expanded-editor textarea")
+        .forEach(fitTextareaToContent);
+    };
+    fitEditors();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fitEditors);
+    observer?.observe(expanded);
+    window.addEventListener("resize", fitEditors);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", fitEditors);
+    };
+  }, [body, bodyManuscriptExpanded]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(max-width: 1100px)");
+    const sync = () => setNarrowBodyManuscript(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!bodyManuscriptExpanded) return;
+    const handleExpandedKeys = (event: KeyboardEvent) => {
+      const higherModalOpen = Array.from(
+        document.querySelectorAll<HTMLElement>("[aria-modal='true']"),
+      ).some((element) => element !== bodyExpandedRef.current);
+      if (higherModalOpen) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeBodyManuscript();
+        return;
+      }
+      if (event.key !== "Tab" || !narrowBodyManuscript) return;
+      const controls = Array.from(
+        bodyExpandedRef.current?.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), textarea:not([disabled]), details > summary",
+        ) ?? [],
+      );
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleExpandedKeys, true);
+    return () => document.removeEventListener("keydown", handleExpandedKeys, true);
+  }, [bodyManuscriptExpanded, closeBodyManuscript, narrowBodyManuscript]);
+
   if (loading) {
     return (
       <div className="source-review-loading" aria-busy="true">
@@ -1178,6 +1330,114 @@ export function SourceReviewLog({
   const frozenStatus = review?.status ?? detail.review_status;
   const frozenLabel = frozenStatus === "excluded" ? "已排除" : "已批准";
   const frozenCopy = frozenStatus === "excluded" ? "排除结论已冻结" : "批准结论已冻结";
+
+  const renderBodyAttachedState = (index: number) => {
+    const noiseSource = noiseSources.find((item) => item.source_index === index);
+    const activeNoise = noiseMetadata.find(
+      (item) => item.source_ref === noiseSource?.source_ref,
+    );
+    const latestNoiseHistory = noiseHistory.find(
+      (item) => item.source_ref === noiseSource?.source_ref,
+    );
+    if (activeNoise) {
+      return (
+        <div className="footer-noise-source-state">
+          <div>
+            <strong>已从 Chunk 正文排除</strong>
+            <span>{activeNoise.confirmed_by} · {formatTime(activeNoise.confirmed_at)}</span>
+            <span>规则 {activeNoise.rule_version}</span>
+          </div>
+          <button
+            type="button"
+            ref={(element) => {
+              noiseRevokeButtonRefs.current[activeNoise.source_ref] = element;
+            }}
+            aria-label={`撤销正文来源 ${index + 1} 的重复页脚排除`}
+            disabled={busy || dirty}
+            title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
+            onClick={() => void handleNoiseRevoke(
+              activeNoise.confirmation_id,
+              index + 1,
+              activeNoise.source_ref,
+            )}
+          >
+            {operation === "noise-revoke" ? "正在撤销" : "撤销并恢复正文"}
+          </button>
+        </div>
+      );
+    }
+    if (!noiseSource) return null;
+    return (
+      <>
+        {latestNoiseHistory?.status === "revoked" ? (
+          <div className="footer-noise-revoked-audit">
+            <strong>最近一次排除已撤销</strong>
+            <span>
+              {latestNoiseHistory.revoked_by ?? "未知操作者"} · {
+                latestNoiseHistory.revoked_at
+                  ? formatTime(latestNoiseHistory.revoked_at)
+                  : "时间未知"
+              }
+            </span>
+            <span>规则 {latestNoiseHistory.rule_version}</span>
+            {latestNoiseHistory.revoke_note ? <p>{latestNoiseHistory.revoke_note}</p> : null}
+          </div>
+        ) : null}
+        <div
+          className="source-secondary-actions"
+          onKeyDown={(event) => {
+            if (
+              event.key !== "Escape" ||
+              openNoiseActionRef !== noiseSource.source_ref
+            ) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const trigger = event.currentTarget.querySelector<HTMLButtonElement>(
+              ".source-secondary-action-trigger",
+            );
+            setOpenNoiseActionRef(null);
+            window.requestAnimationFrame(() => trigger?.focus());
+          }}
+        >
+          <button
+            type="button"
+            ref={(element) => {
+              noiseActionTriggerRefs.current[noiseSource.source_ref] = element;
+            }}
+            className="source-secondary-action-trigger"
+            aria-label={`正文来源 ${index + 1} 次级动作`}
+            aria-expanded={openNoiseActionRef === noiseSource.source_ref}
+            aria-controls={`noise-actions-body-${index}`}
+            onClick={() => setOpenNoiseActionRef((current) => (
+              current === noiseSource.source_ref ? null : noiseSource.source_ref
+            ))}
+          >次级动作</button>
+          {openNoiseActionRef === noiseSource.source_ref ? (
+            <div id={`noise-actions-body-${index}`}>
+              <button
+                type="button"
+                className="footer-noise-check"
+                disabled={busy || dirty}
+                title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
+                onClick={(event) => {
+                  const actions = event.currentTarget.closest(".source-secondary-actions");
+                  const trigger = actions?.querySelector<HTMLElement>(
+                    ".source-secondary-action-trigger",
+                  ) ?? event.currentTarget;
+                  setOpenNoiseActionRef(null);
+                  void handleNoisePreview(noiseSource.source_ref, trigger);
+                }}
+              >
+                {operation === "noise-preview"
+                  ? "正在检查是否为重复页脚噪声"
+                  : "检查是否为重复页脚噪声"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </>
+    );
+  };
 
   const renderTextBlock = (
     kind: SourceTextKind,
@@ -1272,10 +1532,85 @@ export function SourceReviewLog({
     );
   };
 
+  const renderBodyBlock = (
+    index: number,
+    originalValue: string,
+    mode: "preview" | "expanded",
+    attachedState?: React.ReactNode,
+  ) => {
+    const key = textBlockKey("body", index);
+    const label = textBlockLabel("body", index);
+    const currentValue = textBlockValue("body", index);
+    const modified = currentValue !== originalValue;
+    const auditOpen = bodyAuditIndex === index;
+    const canEdit = pending && textEditingEnabled && !busy;
+    return (
+      <article
+        className={`source-body-paragraph is-${mode} ${modified ? "is-modified" : ""}`}
+        data-source-text-block={key}
+        key={key}
+      >
+        <button
+          type="button"
+          className="source-manuscript-number source-manuscript-number-button"
+          aria-label={`${label} 来源与审计${modified ? "，已修改" : ""}`}
+          aria-expanded={auditOpen}
+          onClick={() => setBodyAuditIndex((current) => current === index ? null : index)}
+        >
+          <span>{label}</span>
+          {modified ? <span className="source-number-modified">已修改</span> : null}
+        </button>
+        <div className="source-body-paragraph-content">
+          {mode === "preview" ? (
+            <button
+              type="button"
+              ref={(element) => { textEditButtonRefs.current[key] = element; }}
+              className="source-body-preview-text"
+              aria-label={`从${label} 打开放大视图`}
+              onClick={() => openBodyManuscript(index)}
+            >
+              {currentValue || <span className="source-empty-inline">空块</span>}
+            </button>
+          ) : (
+            <label className={`source-expanded-editor ${canEdit ? "" : "is-readonly"}`}>
+              <span className="visually-hidden">
+                {canEdit ? `${label} 当前编辑值` : `${label} 当前只读值`}
+              </span>
+              <textarea
+                ref={(element) => { textEditorRefs.current[key] = element; }}
+                aria-label={canEdit ? `${label} 当前编辑值` : `${label} 当前只读值`}
+                rows={3}
+                value={currentValue}
+                readOnly={!canEdit}
+                disabled={busy}
+                onFocus={() => {
+                  lastBodyIndexRef.current = index;
+                  if (canEdit) {
+                    setActiveTextEditor({ kind: "body", index, baseline: currentValue });
+                  }
+                }}
+                onChange={(event) => updateBodyBlock(index, event.target.value)}
+              />
+            </label>
+          )}
+          {auditOpen ? (
+            <div className="source-body-audit" role="region" aria-label={`${label} 来源与审计详情`}>
+              <dl>
+                <div><dt>当前值</dt><dd>{currentValue || "空块"}</dd></div>
+                <div><dt>AnyDoc 原文</dt><dd>{originalValue || "空块"}</dd></div>
+              </dl>
+              {attachedState}
+            </div>
+          ) : null}
+        </div>
+      </article>
+    );
+  };
+
   return (
     <>
     <div
-      className="source-review-log"
+      className={`source-review-log ${bodyManuscriptExpanded ? "is-body-expanded" : ""}`}
       aria-busy={busy}
       inert={showReopen || noiseCandidate ? true : undefined}
     >
@@ -1291,6 +1626,66 @@ export function SourceReviewLog({
         </span>
       </header>
 
+      {bodyManuscriptExpanded ? (
+        <section
+          ref={bodyExpandedRef}
+          className="source-body-expanded"
+          role="dialog"
+          aria-modal={narrowBodyManuscript ? "true" : undefined}
+          aria-labelledby="source-body-expanded-heading"
+        >
+          <header>
+            <div>
+              <h3 id="source-body-expanded-heading">正文放大视图</h3>
+              <p>
+                {`${original.body.length} 段 · ${pending && textEditingEnabled ? "直接编辑本地草稿" : "只读核对"} · 统一保存时才会持久化`}
+              </p>
+            </div>
+            <button
+              ref={bodyCloseRef}
+              type="button"
+              className="source-body-expanded-close"
+              onClick={closeBodyManuscript}
+            >
+              关闭正文放大视图 <kbd>Esc</kbd>
+            </button>
+          </header>
+          <div className="source-body-expanded-scroll">
+            {announcement ? (
+              <div className="source-body-expanded-status" role="status" aria-live="polite">
+                {announcement}
+              </div>
+            ) : null}
+            {original.body.map((value, index) => renderBodyBlock(
+              index,
+              value,
+              "expanded",
+              renderBodyAttachedState(index),
+            ))}
+          </div>
+          <footer>
+            <span>{textDirty ? "本地草稿已保留，尚未保存" : "当前正文与已保存来源一致"}</span>
+            <div className="source-body-expanded-actions">
+              <button type="button" onClick={closeBodyManuscript}>返回来源日志</button>
+              {pending && (!snapshot?.source_confirmation || textDirty) ? (
+                <button
+                  ref={bodyTextReviewRef}
+                  type="button"
+                  className="is-primary"
+                  disabled={busy || (!textDirty && Boolean(snapshot?.source_confirmation))}
+                  onClick={() => void handleTextReview()}
+                >
+                  {operation === "text-review"
+                    ? "正在提交文字核对"
+                    : textDirty
+                      ? "保存并确认修改"
+                      : "文字一致，确认"}
+                </button>
+              ) : null}
+            </div>
+          </footer>
+        </section>
+      ) : (
       <div className="source-review-scroll">
         {announcement ? (
           <div
@@ -1367,114 +1762,37 @@ export function SourceReviewLog({
                     <span>{`${original.body.length} 段 · 保留原始段落边界`}</span>
                   </header>
                   <div className="source-manuscript-body-copy">
-                  {original.body.map((value, index) => {
-                    const noiseSource = noiseSources.find((item) => item.source_index === index);
-                    const activeNoise = noiseMetadata.find(
-                      (item) => item.source_ref === noiseSource?.source_ref,
-                    );
-                    const latestNoiseHistory = noiseHistory.find(
-                      (item) => item.source_ref === noiseSource?.source_ref,
-                    );
-                    return renderTextBlock("body", index, value, activeNoise ? (
-                  <div className="footer-noise-source-state">
-                    <div>
-                      <strong>已从 Chunk 正文排除</strong>
-                      <span>
-                        {activeNoise.confirmed_by} · {formatTime(activeNoise.confirmed_at)}
-                      </span>
-                      <span>规则 {activeNoise.rule_version}</span>
-                    </div>
+                  <div
+                    ref={bodyPreviewRef}
+                    className="source-body-preview"
+                    role="region"
+                    aria-label="正文整稿预览"
+                  >
+                  {original.body.map((value, index) => renderBodyBlock(
+                    index,
+                    value,
+                    "preview",
+                    renderBodyAttachedState(index),
+                  ))}
+                  </div>
+                  <footer className={`source-body-preview-footer ${bodyPreviewOverflow ? "has-overflow" : ""}`}>
+                    <span>
+                      {bodyPreviewOverflow
+                        ? "还有正文内容，请在放大视图中继续查看。"
+                        : "正文已完整显示。"}
+                    </span>
                     <button
                       type="button"
                       ref={(element) => {
-                        noiseRevokeButtonRefs.current[activeNoise.source_ref] = element;
+                        bodyExpandButtonRef.current = element;
+                        if (original.titles.length === 0) firstFieldRef.current = element;
                       }}
-                      aria-label={`撤销正文来源 ${index + 1} 的重复页脚排除`}
-                      disabled={busy || dirty}
-                      title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
-                      onClick={() => void handleNoiseRevoke(
-                        activeNoise.confirmation_id,
-                        index + 1,
-                        activeNoise.source_ref,
-                      )}
+                      disabled={busy}
+                      onClick={() => openBodyManuscript(null)}
                     >
-                      {operation === "noise-revoke" ? "正在撤销" : "撤销并恢复正文"}
+                      {pending && textEditingEnabled ? "放大编辑正文" : "放大查看正文"}
                     </button>
-                  </div>
-                ) : noiseSource ? (
-                  <>
-                    {latestNoiseHistory?.status === "revoked" ? (
-                      <div className="footer-noise-revoked-audit">
-                        <strong>最近一次排除已撤销</strong>
-                        <span>
-                          {latestNoiseHistory.revoked_by ?? "未知操作者"} · {
-                            latestNoiseHistory.revoked_at
-                              ? formatTime(latestNoiseHistory.revoked_at)
-                              : "时间未知"
-                          }
-                        </span>
-                        <span>规则 {latestNoiseHistory.rule_version}</span>
-                        {latestNoiseHistory.revoke_note ? (
-                          <p>{latestNoiseHistory.revoke_note}</p>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    <div
-                      className="source-secondary-actions"
-                      onKeyDown={(event) => {
-                        if (
-                          event.key !== "Escape" ||
-                          openNoiseActionRef !== noiseSource.source_ref
-                        ) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const trigger = event.currentTarget.querySelector<HTMLButtonElement>(
-                          ".source-secondary-action-trigger",
-                        );
-                        setOpenNoiseActionRef(null);
-                        window.requestAnimationFrame(() => trigger?.focus());
-                      }}
-                    >
-                      <button
-                        type="button"
-                        ref={(element) => {
-                          noiseActionTriggerRefs.current[noiseSource.source_ref] = element;
-                        }}
-                        className="source-secondary-action-trigger"
-                        aria-label={`正文来源 ${index + 1} 次级动作`}
-                        aria-expanded={openNoiseActionRef === noiseSource.source_ref}
-                        aria-controls={`noise-actions-body-${index}`}
-                        onClick={() => setOpenNoiseActionRef((current) => (
-                          current === noiseSource.source_ref ? null : noiseSource.source_ref
-                        ))}
-                      >次级动作</button>
-                      {openNoiseActionRef === noiseSource.source_ref ? (
-                      <div id={`noise-actions-body-${index}`}>
-                        <button
-                          type="button"
-                          className="footer-noise-check"
-                          disabled={busy || dirty}
-                          title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
-                          onClick={(event) => {
-                            const actions = event.currentTarget.closest(".source-secondary-actions");
-                            const trigger = actions?.querySelector<HTMLElement>(
-                              ".source-secondary-action-trigger",
-                            )
-                              ?? event.currentTarget;
-                            setOpenNoiseActionRef(null);
-                            void handleNoisePreview(noiseSource.source_ref, trigger);
-                          }}
-                        >
-                          {operation === "noise-preview"
-                            ? "正在检查是否为重复页脚噪声"
-                            : "检查是否为重复页脚噪声"}
-                        </button>
-                      </div>
-                      ) : null}
-                    </div>
-                  </>
-                    ) : null);
-                  })}
+                  </footer>
                   </div>
                 </section>
               ) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
@@ -1961,6 +2279,7 @@ export function SourceReviewLog({
           </section>
         ) : null}
       </div>
+      )}
 
       <section className={`review-gate ${pending && blockers.length ? "is-blocked" : "is-clear"}`} aria-labelledby="review-gate-heading">
         <header>

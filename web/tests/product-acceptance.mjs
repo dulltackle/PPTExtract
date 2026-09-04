@@ -125,6 +125,7 @@ async function curate(route) {
   await capture.close();
 
   const excluded = await openPage(route, 4);
+  await excluded.getByRole("button", { name: "排除此页" }).click();
   await excluded.getByRole("combobox", { name: "整页排除原因" }).selectOption("irrelevant");
   await excluded.getByRole("button", { name: "排除并转到下一待处理页" }).click();
   await excluded.getByText(/上一页已排除|待处理队列已清空/).waitFor();

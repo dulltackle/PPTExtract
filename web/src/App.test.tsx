@@ -754,9 +754,9 @@ describe("隐藏页策展工作台", () => {
     expect(
       screen.getByRole("button", { name: "第 2 页，公开合成隐藏页，待处理" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("页已进入普通策展流程")).toBeInTheDocument();
+    expect(screen.getByText(/普通策展/)).toBeInTheDocument();
     expect(await screen.findByText("隐藏页真实正文")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑正文 01" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "从正文 01 打开放大视图" })).toBeEnabled();
     expect(
       fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/source-pages/2/enable")),
     ).toHaveLength(1);

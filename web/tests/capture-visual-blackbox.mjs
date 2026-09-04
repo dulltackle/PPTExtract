@@ -434,7 +434,7 @@ async function exercise(route, viewport) {
   }
   await page.getByRole("button", { name: "展开文字核对" }).click();
   await page.getByRole("button", { name: "修改文字" }).click();
-  await page.getByRole("button", { name: "编辑正文 01" }).click();
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
   const revisedBody = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
   await revisedBody.fill(`${await revisedBody.inputValue()}（保留既有人工截图）`);
   await page.getByRole("button", { name: "保存并确认修改" }).click();

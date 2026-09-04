@@ -54,6 +54,7 @@ async function mockCurationApi(
   page: Page,
   onSubmit?: (payload: unknown) => void,
   sourceContent = source,
+  initialSnapshot: null | Record<string, unknown> = null,
 ) {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "sendBeacon", {
@@ -90,7 +91,7 @@ async function mockCurationApi(
           page_number: 1,
           review_status: "pending",
           source_content: sourceContent,
-          curation: curation(null),
+          curation: curation(initialSnapshot),
         },
       });
       return;
@@ -359,6 +360,106 @@ async function mockRepeatedFooterNoiseApi(page: Page) {
   };
 }
 
+test("正文整稿预览从来源日志侧展开、保留草稿并恢复触发焦点", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  let mutationRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "GET") mutationRequests += 1;
+  });
+  await mockCurationApi(page);
+  await page.goto("/curation");
+
+  const preview = page.getByRole("region", { name: "正文整稿预览" });
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText("正文 01");
+  await expect(page.getByText("还有正文内容，请在放大视图中继续查看。")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^编辑正文/ })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("body-preview-wide.png") });
+
+  const thirdParagraph = preview.getByRole("button", {
+    name: "从正文 03 打开放大视图",
+  });
+  await thirdParagraph.click();
+
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  await expect(expanded).toBeVisible();
+  const longestEditor = expanded.getByRole("textbox", { name: "正文 11 当前编辑值" });
+  expect(await longestEditor.evaluate((element) => element.scrollHeight))
+    .toBeLessThanOrEqual(await longestEditor.evaluate((element) => element.clientHeight));
+  const thirdEditor = expanded.getByRole("textbox", { name: "正文 03 当前编辑值" });
+  await expect(thirdEditor).toBeFocused();
+  await thirdEditor.fill("只保存在本地的正文草稿");
+  await expect(page.getByRole("heading", { name: "标准页渲染" })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("body-expanded-wide.png") });
+
+  await page.keyboard.press("Escape");
+  await expect(expanded).toHaveCount(0);
+  await expect(thirdParagraph).toBeFocused();
+  await expect(preview).toContainText("只保存在本地的正文草稿");
+  expect(mutationRequests).toBe(0);
+
+  await page.getByRole("button", { name: "放大编辑正文" }).click();
+  await expect(page.getByRole("textbox", { name: "正文 03 当前编辑值" }))
+    .toHaveValue("只保存在本地的正文草稿");
+});
+
+test("单段短正文保留固定预览与键盘放大入口", async ({ page }) => {
+  const shortSource = {
+    ...source,
+    body: ["单段短正文。"],
+  };
+  await mockCurationApi(page, undefined, shortSource);
+  await page.goto("/curation");
+
+  const preview = page.getByRole("region", { name: "正文整稿预览" });
+  await expect(preview).toContainText("单段短正文。");
+  expect(await preview.evaluate((element) => element.clientHeight)).toBe(224);
+  await expect(page.getByText("正文已完整显示。")).toBeVisible();
+  await expect(page.getByText(/还有正文内容/)).toHaveCount(0);
+
+  const expand = page.getByRole("button", { name: "放大编辑正文" });
+  await expand.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("textbox", { name: "正文 01 当前编辑值" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(expand).toBeFocused();
+});
+
+test("已确认正文仍可放大只读核对且不暴露保存动作", async ({ page }) => {
+  const confirmedSource = {
+    ...source,
+    body: ["已经确认并冻结的公开正文。"],
+  };
+  const snapshot = {
+    snapshot_id: "snapshot-confirmed-browser",
+    source_snapshot_id: null,
+    source_content: confirmedSource,
+    created_by: "operator-browser",
+    created_at: "2026-09-02T08:00:00+00:00",
+    source_confirmation: {
+      actor_id: "operator-browser",
+      confirmed_at: "2026-09-02T08:00:00+00:00",
+    },
+    source_review: {
+      actor_id: "operator-browser",
+      completed_at: "2026-09-02T08:00:01+00:00",
+    },
+    image_source_decisions: [],
+  };
+  await mockCurationApi(page, undefined, confirmedSource, snapshot);
+  await page.goto("/curation");
+
+  await page.getByRole("button", { name: "展开文字核对" }).click();
+  const expand = page.getByRole("button", { name: "放大查看正文" });
+  await expand.click();
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  await expect(expanded.getByRole("button", { name: /关闭正文放大视图/ })).toBeFocused();
+  const readonlyBody = expanded.getByRole("textbox", { name: "正文 01 当前只读值" });
+  await expect(readonlyBody).toHaveAttribute("readonly", "");
+  await expect(readonlyBody).toHaveValue("已经确认并冻结的公开正文。");
+  await expect(expanded.getByRole("button", { name: /保存|确认修改/ })).toHaveCount(0);
+});
+
 test("长页核对稿支持完整阅读、原位多块草稿与组合提交", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   let submitted: unknown = null;
@@ -367,14 +468,14 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
 
   const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
   await expect(manuscript).toBeVisible();
-  const bodyGroup = manuscript.getByRole("region", { name: "正文" });
+  const bodyGroup = manuscript.getByRole("region", { name: "正文", exact: true });
   await expect(bodyGroup).toContainText("11 段 · 保留原始段落边界");
   const blocks = manuscript.locator("[data-source-text-block]");
   await expect(blocks).toHaveCount(12);
   await expect(bodyGroup.locator('[data-source-text-block^="body-"]')).toHaveCount(11);
   await expect(blocks.nth(0).locator(".source-manuscript-text")).toHaveText(source.titles[0]);
   for (const [index, value] of body.entries()) {
-    await expect(blocks.nth(index + 1).locator(".source-manuscript-text"))
+    await expect(blocks.nth(index + 1).locator(".source-body-preview-text"))
       .toHaveText(value || "空块");
   }
   await expect(page.getByRole("textbox", { name: /当前编辑值/ })).toHaveCount(0);
@@ -384,7 +485,7 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
   );
   expect(workspaceColumns).toHaveLength(3);
 
-  const longBlock = blocks.nth(10).locator(".source-manuscript-text");
+  const longBlock = blocks.nth(10).locator(".source-body-preview-text");
   const wrapping = await longBlock.evaluate((element) => ({
     clientWidth: element.clientWidth,
     scrollWidth: element.scrollWidth,
@@ -404,25 +505,34 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
   const titleEditor = page.getByRole("textbox", { name: "标题 1 当前编辑值" });
   await titleEditor.fill("修订后的公开长标题");
 
-  await page.getByRole("button", { name: "编辑正文 02" }).click();
-  await expect(page.getByRole("textbox", { name: /当前编辑值/ })).toHaveCount(1);
-  await expect(page.getByText("修订后的公开长标题", { exact: true })).toBeVisible();
-  await expect(page.getByText("已修改", { exact: true })).toBeVisible();
-  await expect(page.getByText("查看标题 1的原始提取", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "从正文 02 打开放大视图" }).click();
+  await expect(page.getByRole("dialog", { name: "正文放大视图" })).toBeVisible();
 
   const secondBodyEditor = page.getByRole("textbox", { name: "正文 02 当前编辑值" });
-  await secondBodyEditor.fill("会由 Escape 取消的值");
+  await secondBodyEditor.evaluate((element) => {
+    element.setSelectionRange(0, 0);
+  });
+  await secondBodyEditor.press("Backspace");
+  await expect(page.getByRole("textbox", { name: "正文 01 当前编辑值" }))
+    .toHaveValue(body[0]);
+  await expect(page.getByRole("textbox", { name: /正文 \d+ 当前编辑值/ })).toHaveCount(11);
+  await secondBodyEditor.fill("会由 Escape 保留的值");
   await secondBodyEditor.press("Escape");
   await expect(secondBodyEditor).toHaveCount(0);
-  await expect(blocks.nth(2)).toContainText(body[1]);
+  await expect(blocks.nth(2)).toContainText("会由 Escape 保留的值");
+  await expect(page.getByText("修订后的公开长标题", { exact: true })).toBeVisible();
+  await expect(manuscript.getByRole("group", { name: "标题" }).getByText("已修改"))
+    .toBeVisible();
+  await expect(page.getByText("查看标题 1的原始提取", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "编辑正文 01" }).click();
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
   const firstBodyEditor = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
   await firstBodyEditor.fill("第一行\n第二行");
+  await page.getByRole("button", { name: "返回来源日志" }).click();
   await page.getByRole("button", { name: "保存并确认修改" }).click();
   await expect.poll(() => submitted).toMatchObject({
     titles: ["修订后的公开长标题"],
-    body: ["第一行\n第二行", ...body.slice(1)],
+    body: ["第一行\n第二行", "会由 Escape 保留的值", ...body.slice(2)],
   });
 });
 
@@ -434,12 +544,13 @@ test("重复页脚检查收纳为正文次级动作并保留确认与撤销证�
   const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
   const footerBlock = manuscript.locator('[data-source-text-block="body-1"]');
   await expect(manuscript.getByRole("button", { name: /正文来源 \d+ 次级动作/ }))
-    .toHaveCount(source.body.length);
+    .toHaveCount(0);
   await expect(page.getByRole("button", { name: "检查是否为重复页脚噪声" }))
     .toHaveCount(0);
   await expect(page.getByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
     .toHaveCount(0);
 
+  await footerBlock.getByRole("button", { name: "正文 02 来源与审计" }).click();
   const secondaryActions = footerBlock.getByRole("button", { name: "正文来源 2 次级动作" });
   await secondaryActions.focus();
   await page.keyboard.press("Enter");
@@ -461,7 +572,7 @@ test("重复页脚检查收纳为正文次级动作并保留确认与撤销证�
     .toBeFocused();
   await expect.poll(api.candidateRequests).toBe(1);
   expect(api.mutationRequests()).toBe(0);
-  await expect(footerBlock.locator(".source-manuscript-text")).toHaveText(source.body[1]);
+  await expect(footerBlock.locator(".source-body-preview-text")).toHaveText(source.body[1]);
   await expect(dialog.getByRole("link", { name: "查看第 2 页标准页渲染" }))
     .toHaveAttribute("href", "/api/v1/pages/page-browser-2/render");
 
@@ -517,6 +628,42 @@ test("重复页脚检查收纳为正文次级动作并保留确认与撤销证�
   await expect(restoredSecondaryActions).toBeFocused();
   await expect(footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }))
     .toHaveCount(0);
+});
+
+test("正文放大视图让顶层重复页脚对话框优先处理 Escape", async ({ page }) => {
+  await mockRepeatedFooterNoiseApi(page);
+  await page.goto("/curation");
+
+  await page.getByRole("button", { name: "从正文 02 打开放大视图" }).click();
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  const footerBlock = expanded.locator('[data-source-text-block="body-1"]');
+  await footerBlock.getByRole("button", { name: "正文 02 来源与审计" }).click();
+  await footerBlock.getByRole("button", { name: "正文来源 2 次级动作" }).click();
+  await footerBlock.getByRole("button", { name: "检查是否为重复页脚噪声" }).click();
+  const dialog = page.getByRole("dialog", { name: "确认排除重复页脚噪声" });
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(expanded).toBeVisible();
+});
+
+test("正文放大视图让顶层导航保护对话框优先处理 Escape", async ({ page }) => {
+  await mockNavigationGuardApi(page);
+  await page.goto("/curation");
+
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  const editor = expanded.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  await editor.fill("只存在于正文放大视图的本地草稿");
+  await page.getByRole("button", { name: /第 2 页，第 2 页持久标题，待处理/ }).click();
+  const dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(expanded).toBeVisible();
+  await expect(editor).toHaveValue("只存在于正文放大视图的本地草稿");
 });
 
 test("页点击、方向键、筛选与批量排除共用键盘可达的文字导航保护", async ({ page }) => {
@@ -587,32 +734,36 @@ test("页点击、方向键、筛选与批量排除共用键盘可达的文字�
   await expect(page.getByRole("button", { name: /第 2 页，第 2 页持久标题，已排除/ })).toBeVisible();
 });
 
-test("1280 屏幕的 200% 缩放下转为单列且无页面级横向溢出", async ({ page }) => {
+test("1280 屏幕的 200% 缩放下转为单列且无页面级横向溢出", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 640, height: 900 });
   await mockCurationApi(page);
   await page.goto("/curation");
 
   const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
   await expect(manuscript).toBeVisible();
-  const firstBlock = manuscript.locator("[data-source-text-block]").first();
-  const gridColumns = await firstBlock.evaluate(
-    (element) => getComputedStyle(element).gridTemplateColumns.split(" ").length,
-  );
-  expect(gridColumns).toBe(1);
+  const lastTrigger = page.getByRole("button", { name: "从正文 11 打开放大视图" });
+  await lastTrigger.click();
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  await expect(expanded).toBeVisible();
+  await expect(page.locator(".evidence-panel")).toBeHidden();
   const overflow = await page.evaluate(() => ({
     clientWidth: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth,
   }));
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+  await page.screenshot({ path: testInfo.outputPath("body-expanded-narrow.png") });
 
-  const lastEdit = page.getByRole("button", { name: "编辑正文 11" });
-  await lastEdit.focus();
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "文字一致，确认" })).toBeFocused();
-  await page.getByRole("button", { name: "编辑正文 11" }).click();
   const lastEditor = page.getByRole("textbox", { name: "正文 11 当前编辑值" });
   await expect(lastEditor).toBeFocused();
+  expect(await lastEditor.evaluate((element) => element.scrollHeight))
+    .toBeLessThanOrEqual(await lastEditor.evaluate((element) => element.clientHeight));
   await lastEditor.fill("200% 缩放下仍受保护的本地草稿");
+  const saveButton = page.getByRole("button", { name: "保存并确认修改" });
+  await saveButton.focus();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: /关闭正文放大视图/ })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(lastTrigger).toBeFocused();
   await page.getByRole("button", { name: "全部" }).click();
   const dialog = page.getByRole("dialog", { name: "放弃当前页的文字修改？" });
   await expect(dialog).toBeVisible();

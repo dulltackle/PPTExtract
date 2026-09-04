@@ -239,23 +239,21 @@ describe("来源文字审核工作台", () => {
     await userEvent.clear(titleEditor);
     await userEvent.type(titleEditor, "修订标题");
 
-    await userEvent.click(screen.getByRole("button", { name: "编辑正文 02" }));
-    expect(screen.getAllByRole("textbox", { name: /当前编辑值/ })).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "从正文 02 打开放大视图" }));
+    expect(screen.getAllByRole("textbox", { name: /当前编辑值/ })).toHaveLength(2);
     expect(screen.queryByRole("textbox", { name: "标题 1 当前编辑值" })).not.toBeInTheDocument();
-    expect(screen.getByText("修订标题")).toBeInTheDocument();
-    expect(screen.getByText("已修改")).toBeInTheDocument();
-    expect(screen.getByText("查看标题 1的原始提取")).toBeInTheDocument();
-    expect(screen.queryByText("查看正文 01的原始提取")).not.toBeInTheDocument();
 
     const secondBodyEditor = screen.getByRole("textbox", { name: "正文 02 当前编辑值" });
     await userEvent.clear(secondBodyEditor);
-    await userEvent.type(secondBodyEditor, "这次修改会被 Escape 撤销");
+    await userEvent.type(secondBodyEditor, "这次修改会由 Escape 保留");
     fireEvent.keyDown(secondBodyEditor, { key: "Escape" });
     expect(screen.queryByRole("textbox", { name: "正文 02 当前编辑值" })).not.toBeInTheDocument();
-    expect(screen.getByText("第二段原始正文")).toBeInTheDocument();
+    expect(screen.getByText("这次修改会由 Escape 保留")).toBeInTheDocument();
     expect(screen.getByText("修订标题")).toBeInTheDocument();
+    expect(screen.getAllByText("已修改")).toHaveLength(2);
+    expect(screen.getByText("查看标题 1的原始提取")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "编辑正文 01" }));
+    await userEvent.click(screen.getByRole("button", { name: "从正文 01 打开放大视图" }));
     const firstBodyEditor = screen.getByRole("textbox", { name: "正文 01 当前编辑值" });
     await userEvent.clear(firstBodyEditor);
     await userEvent.type(firstBodyEditor, "第一行{enter}第二行");
@@ -266,7 +264,7 @@ describe("来源文字审核工作台", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存并确认修改" }));
     expect(submitted).toMatchObject({
       titles: ["修订标题"],
-      body: ["第一行\n第二行", "第二段原始正文"],
+      body: ["第一行\n第二行", "这次修改会由 Escape 保留"],
     });
     const summary = await screen.findByRole("status", { name: "文字核对摘要" });
     expect(summary).toHaveTextContent("文字已确认");
@@ -536,6 +534,7 @@ describe("来源文字审核工作台", () => {
       .not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
       .not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "正文 02 来源与审计" }));
     const secondaryActions = screen.getByRole("button", { name: "正文来源 2 次级动作" });
     secondaryActions.focus();
     await userEvent.keyboard("{Enter}");
@@ -581,6 +580,7 @@ describe("来源文字审核工作台", () => {
     cleanup();
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
+    await userEvent.click(screen.getByRole("button", { name: "正文 02 来源与审计" }));
     expect(await screen.findByText("已从 Chunk 正文排除")).toBeInTheDocument();
     expect(screen.getAllByText(/operator-zhang ·/).length).toBeGreaterThan(0);
     expect(screen.getByText("规则 manual-exact-text-v1")).toBeInTheDocument();
@@ -602,6 +602,7 @@ describe("来源文字审核工作台", () => {
     cleanup();
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "展开文字核对" }));
+    await userEvent.click(screen.getByRole("button", { name: "正文 02 来源与审计" }));
     expect(await screen.findByText("最近一次排除已撤销")).toBeInTheDocument();
     expect(screen.getByText("从策展工作台撤销并恢复正文。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /检查正文来源 .* 的跨页重复/ }))
@@ -721,11 +722,11 @@ describe("来源文字审核工作台", () => {
     const title = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
     await userEvent.clear(title);
     await userEvent.type(title, "人工修订标题");
-    await userEvent.click(screen.getByRole("button", { name: "编辑正文 01" }));
+    await userEvent.click(screen.getByRole("button", { name: "从正文 01 打开放大视图" }));
     const body = screen.getByRole("textbox", { name: "正文 01 当前编辑值" });
     await userEvent.clear(body);
     await userEvent.type(body, "人工修订正文。");
-    expect(screen.getByText("有本地修改")).toBeInTheDocument();
+    expect(screen.getByText("本地草稿已保留，尚未保存")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "保存并确认修改" }));
     expect(await screen.findByText("等待来源完整性选择")).toBeInTheDocument();
@@ -826,7 +827,7 @@ describe("来源文字审核工作台", () => {
     });
 
     render(<App />);
-    await userEvent.click(await screen.findByRole("button", { name: "编辑正文 01" }));
+    await userEvent.click(await screen.findByRole("button", { name: "从正文 01 打开放大视图" }));
     const body = screen.getByRole("textbox", { name: "正文 01 当前编辑值" });
     await userEvent.type(body, "（保留人工截图后的文字修改）");
     await userEvent.click(screen.getByRole("button", { name: "保存并确认修改" }));
@@ -1615,7 +1616,7 @@ describe("来源文字审核工作台", () => {
     const title = screen.getByRole("textbox", { name: "标题 1 当前编辑值" });
     await userEvent.clear(title);
     await userEvent.type(title, "失败后保留的标题");
-    await userEvent.click(screen.getByRole("button", { name: "编辑正文 01" }));
+    await userEvent.click(screen.getByRole("button", { name: "从正文 01 打开放大视图" }));
     const body = screen.getByRole("textbox", { name: "正文 01 当前编辑值" });
     await userEvent.clear(body);
     await userEvent.type(body, "失败后保留的正文");
@@ -1625,9 +1626,11 @@ describe("来源文字审核工作台", () => {
     expect(await screen.findByText(
       "文字核对未能提交；持久审核状态未改变，本地文字修改仍保留。",
     )).toBeInTheDocument();
-    expect(screen.getByText("失败后保留的标题")).toBeInTheDocument();
     expect(body).toHaveValue("失败后保留的正文");
     await waitFor(() => expect(submit).toHaveFocus());
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByText("失败后保留的标题")).toBeInTheDocument();
+    expect(screen.getByText("失败后保留的正文")).toBeInTheDocument();
   });
 
   it("按 AnyDoc 顺序逐项保留或忽略图片来源并显式完成来源审核", async () => {

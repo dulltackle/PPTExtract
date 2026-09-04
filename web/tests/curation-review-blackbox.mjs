@@ -116,6 +116,7 @@ try {
   await textZoomed.locator(".source-review-scroll").evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
+  await textZoomed.getByRole("button", { name: "排除此页" }).click();
   const exclusionAction = textZoomed.getByRole("button", { name: "排除并转到下一待处理页" });
   await exclusionAction.scrollIntoViewIfNeeded();
   const exclusionBox = await exclusionAction.boundingBox();
@@ -144,10 +145,10 @@ try {
     }
   });
   await page.getByRole("button", { name: "文字一致，确认" }).waitFor();
-  await page.getByRole("button", { name: "编辑正文 01" }).click();
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
   const body = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
   await body.fill(`${await body.inputValue()}（浏览器人工核对）`);
-  await page.getByText("有本地修改").waitFor();
+  await page.getByText("本地草稿已保留，尚未保存").waitFor();
   await page.getByRole("button", { name: "保存并确认修改" }).waitFor();
 
   const bodyText = await page.locator("body").innerText();
