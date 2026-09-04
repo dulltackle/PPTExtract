@@ -337,6 +337,7 @@ export function SourceReviewLog({
   const [announcement, setAnnouncement] = useState<string | null>(arrivalAnnouncement);
   const [exclusionReason, setExclusionReason] = useState<ExclusionReason | "">("");
   const [exclusionNote, setExclusionNote] = useState("");
+  const [exclusionExpanded, setExclusionExpanded] = useState(false);
   const [showReopen, setShowReopen] = useState(false);
   const [openNoiseActionRef, setOpenNoiseActionRef] = useState<string | null>(null);
   const [noiseFocusTarget, setNoiseFocusTarget] = useState<{
@@ -353,6 +354,7 @@ export function SourceReviewLog({
   const reviewRef = useRef<HTMLButtonElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
   const exclusionReasonRef = useRef<HTMLSelectElement>(null);
+  const exclusionFocusRequestedRef = useRef(false);
   const reopenTriggerRef = useRef<HTMLButtonElement>(null);
   const reopenDialogRef = useRef<HTMLElement>(null);
   const reopenSubmitRef = useRef<HTMLButtonElement>(null);
@@ -376,6 +378,12 @@ export function SourceReviewLog({
     sourceConfirmed: false,
     imageSources: [],
   });
+
+  useLayoutEffect(() => {
+    if (!exclusionExpanded || !exclusionFocusRequestedRef.current) return;
+    exclusionFocusRequestedRef.current = false;
+    exclusionReasonRef.current?.focus();
+  }, [exclusionExpanded]);
 
   useLayoutEffect(() => {
     if (!noiseFocusTarget) return;
@@ -425,6 +433,7 @@ export function SourceReviewLog({
         lastModifiedTextKeyRef.current = null;
         setExclusionReason("");
         setExclusionNote("");
+        setExclusionExpanded(false);
         setShowReopen(false);
         setOpenNoiseActionRef(null);
         window.requestAnimationFrame(() => firstFieldRef.current?.focus());
@@ -1120,7 +1129,8 @@ export function SourceReviewLog({
       const key = event.key.toLowerCase();
       if (key === "x" && pending && !busy) {
         event.preventDefault();
-        exclusionReasonRef.current?.focus();
+        exclusionFocusRequestedRef.current = true;
+        setExclusionExpanded(true);
       } else if (key === "r" && !pending && !busy) {
         event.preventDefault();
         openReopenDialog();
@@ -1272,8 +1282,7 @@ export function SourceReviewLog({
         <div>
           <h2>来源日志</h2>
           <p>
-            <span>页已进入普通策展流程</span>
-            <span>完整核对来源文字，按需原位修订</span>
+            普通策展 · 完整核对来源文字，按需原位修订
           </p>
         </div>
         <span className={`pending-chip ${pending ? "" : frozenStatus === "excluded" ? "is-excluded" : "is-approved"}`}>
@@ -2006,41 +2015,56 @@ export function SourceReviewLog({
             >
               {operation === "approve" ? "正在批准" : "批准并转到下一待处理页"}
             </button>
-            <div className="page-exclusion-form">
-              <label>
-                <span>整页排除原因</span>
-                <select
-                  ref={exclusionReasonRef}
-                  aria-label="整页排除原因"
-                  value={exclusionReason}
-                  disabled={busy}
-                  onChange={(event) => setExclusionReason(event.target.value as ExclusionReason | "")}
+            <button
+              type="button"
+              className="review-exclusion-toggle"
+              aria-expanded={exclusionExpanded}
+              aria-controls="page-exclusion-form"
+              disabled={busy}
+              onClick={() => setExclusionExpanded((current) => {
+                exclusionFocusRequestedRef.current = !current;
+                return !current;
+              })}
+            >
+              {exclusionExpanded ? "收起排除选项" : "排除此页"}
+            </button>
+            {exclusionExpanded ? (
+              <div className="page-exclusion-form" id="page-exclusion-form">
+                <label>
+                  <span>整页排除原因</span>
+                  <select
+                    ref={exclusionReasonRef}
+                    aria-label="整页排除原因"
+                    value={exclusionReason}
+                    disabled={busy}
+                    onChange={(event) => setExclusionReason(event.target.value as ExclusionReason | "")}
+                  >
+                    <option value="">请选择规定原因</option>
+                    {EXCLUSION_REASONS.map((reason) => (
+                      <option key={reason.value} value={reason.value}>{reason.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>补充说明（可选）</span>
+                  <textarea
+                    aria-label="整页排除补充说明"
+                    rows={2}
+                    value={exclusionNote}
+                    disabled={busy}
+                    onChange={(event) => setExclusionNote(event.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="is-danger"
+                  disabled={busy || dirty || !exclusionReason}
+                  onClick={() => void handleExclude()}
                 >
-                  <option value="">请选择规定原因</option>
-                  {EXCLUSION_REASONS.map((reason) => (
-                    <option key={reason.value} value={reason.value}>{reason.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>补充说明（可选）</span>
-                <textarea
-                  aria-label="整页排除补充说明"
-                  rows={2}
-                  value={exclusionNote}
-                  disabled={busy}
-                  onChange={(event) => setExclusionNote(event.target.value)}
-                />
-              </label>
-              <button
-                type="button"
-                className="is-danger"
-                disabled={busy || dirty || !exclusionReason}
-                onClick={() => void handleExclude()}
-              >
-                {operation === "exclude" ? "正在排除" : "排除并转到下一待处理页"}
-              </button>
-            </div>
+                  {operation === "exclude" ? "正在排除" : "排除并转到下一待处理页"}
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : (
           <button

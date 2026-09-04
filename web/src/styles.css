@@ -776,7 +776,10 @@ kbd {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 246px minmax(500px, 1fr) 384px;
+  grid-template-columns:
+    clamp(220px, 17vw, 246px)
+    minmax(560px, 1fr)
+    clamp(400px, 30vw, 440px);
   overflow-x: auto;
   overflow-y: hidden;
   background: var(--monitor-black);
@@ -3024,6 +3027,7 @@ kbd {
 
 .review-decision-actions {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.58fr);
   gap: 10px;
   margin-top: 11px;
 }
@@ -3042,6 +3046,19 @@ kbd {
   cursor: pointer;
 }
 
+.review-decision-actions > .review-exclusion-toggle {
+  border-color: #9a5148;
+  color: #702820;
+  background: #f6e6e3;
+}
+
+.review-decision-actions > .review-exclusion-toggle:hover:not(:disabled),
+.review-decision-actions > .review-exclusion-toggle[aria-expanded="true"] {
+  border-color: var(--exclusion-red-deep);
+  color: #5e211b;
+  background: #f0d7d3;
+}
+
 .review-decision-actions > button:disabled,
 .reopen-page-button:disabled {
   border-color: #a0a9ad;
@@ -3051,6 +3068,7 @@ kbd {
 }
 
 .page-exclusion-form {
+  grid-column: 1 / -1;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 7px 8px;
@@ -5773,7 +5791,7 @@ details[open] .scope-chevron {
   }
 
   .curation-workspace {
-    grid-template-columns: 220px minmax(470px, 1fr) 348px;
+    grid-template-columns: 220px minmax(540px, 1fr) 400px;
   }
 
   .mapping-body {
@@ -5799,7 +5817,7 @@ details[open] .scope-chevron {
 
 @media (max-width: 1279px) {
   .curation-workspace {
-    grid-template-columns: 220px 470px 348px;
+    grid-template-columns: 216px minmax(540px, 1fr) 400px;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-color: #53606a #171b20;

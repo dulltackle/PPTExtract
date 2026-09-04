@@ -481,6 +481,7 @@ describe("审核队列、排除与重开", () => {
     expect(within(initialManuscript).getByText("队列页 2")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("checkbox", { name: "选择第 2 页，队列页 2" }));
     expect(screen.getByRole("region", { name: "批量排除" })).toHaveTextContent("已选 1 页");
+    await userEvent.click(screen.getByRole("button", { name: "排除此页" }));
     await userEvent.selectOptions(
       screen.getByRole("combobox", { name: "整页排除原因" }),
       "irrelevant",

@@ -1361,6 +1361,7 @@ describe("来源文字审核工作台", () => {
     const secondRow = screen.getByRole("button", {
       name: "第 2 页，第二页来源标题，待处理",
     });
+    await userEvent.click(screen.getByRole("button", { name: "排除此页" }));
     await userEvent.selectOptions(
       screen.getByRole("combobox", { name: "整页排除原因" }),
       "irrelevant",
