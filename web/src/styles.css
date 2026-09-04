@@ -1260,6 +1260,12 @@ kbd {
 
 .source-manuscript {
   min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.source-manuscript-title-group {
+  min-width: 0;
   border-block: 1px solid #b9c1c4;
 }
 
@@ -1273,6 +1279,76 @@ kbd {
 
 .source-manuscript-block + .source-manuscript-block {
   border-top: 1px solid #d0d5d7;
+}
+
+.source-manuscript-body-group {
+  min-width: 0;
+  border: 1px solid #b9c1c4;
+  border-radius: 6px;
+  background: #f6f7f7;
+}
+
+.source-manuscript-body-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #d0d5d7;
+}
+
+.source-manuscript-body-heading h4 {
+  margin: 0;
+  color: #263239;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.source-manuscript-body-heading span {
+  color: #657078;
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.source-manuscript-body-copy {
+  min-width: 0;
+  padding: 4px 10px 8px;
+}
+
+.source-manuscript-body-copy .source-manuscript-block {
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.source-manuscript-body-copy .source-manuscript-block + .source-manuscript-block {
+  border-top: 0;
+}
+
+.source-manuscript-body-copy .source-manuscript-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 8px;
+}
+
+.source-manuscript-body-copy .source-manuscript-text {
+  font-size: 13px;
+  line-height: 1.62;
+}
+
+.source-manuscript-body-copy .source-manuscript-actions {
+  min-height: 0;
+  margin-top: 0;
+}
+
+.source-manuscript-body-copy .source-inline-editor,
+.source-manuscript-body-copy .source-original-disclosure,
+.source-manuscript-body-copy .footer-noise-source-state,
+.source-manuscript-body-copy .footer-noise-revoked-audit,
+.source-manuscript-body-copy .source-secondary-actions {
+  grid-column: 1 / -1;
 }
 
 .source-manuscript-number {
@@ -1455,6 +1531,27 @@ kbd {
 
   .source-text-collapsed dl {
     align-self: flex-start;
+  }
+}
+
+@container (max-width: 340px) {
+  .source-manuscript-body-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .source-manuscript-body-heading span {
+    text-align: left;
+  }
+
+  .source-manuscript-body-copy .source-manuscript-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-manuscript-body-copy .source-manuscript-actions {
+    justify-content: flex-start;
+    margin-top: 4px;
   }
 }
 

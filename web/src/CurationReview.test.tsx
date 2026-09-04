@@ -127,7 +127,10 @@ describe("来源文字审核工作台", () => {
     expect(await screen.findByText(source.titles[0])).toBeInTheDocument();
     const manuscript = screen.getByRole("region", { name: "标题与正文核对稿" });
     const blocks = manuscript.querySelectorAll("[data-source-text-block]");
+    const bodyGroup = screen.getByRole("region", { name: "正文" });
     expect(blocks).toHaveLength(12);
+    expect(bodyGroup.querySelectorAll('[data-source-text-block^="body-"]')).toHaveLength(11);
+    expect(bodyGroup).toHaveTextContent("11 段 · 保留原始段落边界");
     expect(blocks[0]).toHaveTextContent("标题 1");
     longBody.forEach((text, index) => {
       expect(blocks[index + 1]).toHaveTextContent(`正文 ${String(index + 1).padStart(2, "0")}`);

@@ -367,8 +367,11 @@ test("长页核对稿支持完整阅读、原位多块草稿与组合提交", as
 
   const manuscript = page.getByRole("region", { name: "标题与正文核对稿" });
   await expect(manuscript).toBeVisible();
+  const bodyGroup = manuscript.getByRole("region", { name: "正文" });
+  await expect(bodyGroup).toContainText("11 段 · 保留原始段落边界");
   const blocks = manuscript.locator("[data-source-text-block]");
   await expect(blocks).toHaveCount(12);
+  await expect(bodyGroup.locator('[data-source-text-block^="body-"]')).toHaveCount(11);
   await expect(blocks.nth(0).locator(".source-manuscript-text")).toHaveText(source.titles[0]);
   for (const [index, value] of body.entries()) {
     await expect(blocks.nth(index + 1).locator(".source-manuscript-text"))

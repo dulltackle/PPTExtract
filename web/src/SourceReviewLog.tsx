@@ -1190,12 +1190,13 @@ export function SourceReviewLog({
     const currentValue = textBlockValue(kind, index);
     const modified = currentValue !== originalValue;
     const active = activeTextEditor?.kind === kind && activeTextEditor.index === index;
+    const hasPrimaryActions = modified || (pending && textEditingEnabled);
     const isFirst = (kind === "title" && index === 0) || (
       kind === "body" && original.titles.length === 0 && index === 0
     );
     return (
       <article
-        className={`source-manuscript-block ${modified ? "is-modified" : ""}`}
+        className={`source-manuscript-block is-${kind} ${modified ? "is-modified" : ""}`}
         data-source-text-block={key}
         key={key}
       >
@@ -1242,7 +1243,7 @@ export function SourceReviewLog({
               {currentValue || <span className="source-empty-inline">空块</span>}
             </p>
           )}
-          <div className="source-manuscript-actions">
+          {hasPrimaryActions ? <div className="source-manuscript-actions">
             {modified ? <span className="source-modified-status">已修改</span> : null}
             {pending && textEditingEnabled ? (
               <button
@@ -1258,7 +1259,7 @@ export function SourceReviewLog({
                 {active ? "正在编辑" : "编辑"}
               </button>
             ) : null}
-          </div>
+          </div> : null}
           {modified ? (
             <details className="source-original-disclosure">
               <summary>{`查看${label}的原始提取`}</summary>
@@ -1351,18 +1352,30 @@ export function SourceReviewLog({
               </div>
             ) : (
               <>
-              {original.titles.length
-                ? original.titles.map((value, index) => renderTextBlock("title", index, value))
-                : <p className="source-empty-block">AnyDoc 未生成标题块。</p>}
-              {original.body.length ? original.body.map((value, index) => {
-              const noiseSource = noiseSources.find((item) => item.source_index === index);
-              const activeNoise = noiseMetadata.find(
-                (item) => item.source_ref === noiseSource?.source_ref,
-              );
-              const latestNoiseHistory = noiseHistory.find(
-                (item) => item.source_ref === noiseSource?.source_ref,
-              );
-              return renderTextBlock("body", index, value, activeNoise ? (
+              {original.titles.length ? (
+                <div className="source-manuscript-title-group" role="group" aria-label="标题">
+                  {original.titles.map((value, index) => renderTextBlock("title", index, value))}
+                </div>
+              ) : <p className="source-empty-block">AnyDoc 未生成标题块。</p>}
+              {original.body.length ? (
+                <section
+                  className="source-manuscript-body-group"
+                  aria-labelledby="source-body-group-heading"
+                >
+                  <header className="source-manuscript-body-heading">
+                    <h4 id="source-body-group-heading">正文</h4>
+                    <span>{`${original.body.length} 段 · 保留原始段落边界`}</span>
+                  </header>
+                  <div className="source-manuscript-body-copy">
+                  {original.body.map((value, index) => {
+                    const noiseSource = noiseSources.find((item) => item.source_index === index);
+                    const activeNoise = noiseMetadata.find(
+                      (item) => item.source_ref === noiseSource?.source_ref,
+                    );
+                    const latestNoiseHistory = noiseHistory.find(
+                      (item) => item.source_ref === noiseSource?.source_ref,
+                    );
+                    return renderTextBlock("body", index, value, activeNoise ? (
                   <div className="footer-noise-source-state">
                     <div>
                       <strong>已从 Chunk 正文排除</strong>
@@ -1460,8 +1473,11 @@ export function SourceReviewLog({
                       ) : null}
                     </div>
                   </>
-                ) : null);
-              }) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
+                    ) : null);
+                  })}
+                  </div>
+                </section>
+              ) : <p className="source-empty-block">AnyDoc 未生成正文块。</p>}
               </>
             )}
           </div>
