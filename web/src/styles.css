@@ -1374,9 +1374,12 @@ kbd {
 .source-body-preview {
   height: 224px;
   min-width: 0;
-  overflow: auto;
-  scrollbar-color: #919da2 #eef1f1;
-  scrollbar-width: thin;
+  overflow: clip;
+}
+
+.source-body-preview button:focus-visible,
+.source-body-preview-footer button:focus-visible {
+  outline-offset: -2px;
 }
 
 .source-body-paragraph {

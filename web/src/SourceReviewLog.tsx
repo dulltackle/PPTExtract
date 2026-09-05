@@ -902,6 +902,25 @@ export function SourceReviewLog({
     return () => root.removeEventListener("beforeinput", protectBodyStructure, true);
   }, [body, bodyManuscriptExpanded, busy, pending, textEditingEnabled]);
 
+  // 焦点轮廓绘制在控件内侧，因此控件边界就是完整可见的判定边界。
+  const isBodyPreviewEntryVisible = useCallback((target: HTMLElement) => {
+    const preview = bodyPreviewRef.current;
+    if (!preview || !target.isConnected || !preview.contains(target)) return false;
+    const clip = preview.getBoundingClientRect();
+    const bounds = target.getBoundingClientRect();
+    return bounds.width > 0 && bounds.height > 0 &&
+      bounds.top >= clip.top && bounds.bottom <= clip.bottom &&
+      bounds.left >= clip.left && bounds.right <= clip.right;
+  }, []);
+
+  const restoreBodyFocus = useCallback((target: HTMLElement | null | undefined) => {
+    const inPreview = target && bodyPreviewRef.current?.contains(target);
+    const visibleTarget = target?.isConnected && (!inPreview || isBodyPreviewEntryVisible(target))
+      ? target : bodyExpandButtonRef.current;
+    // overflow: clip 不参与程序化滚动，浏览器只会滚动外侧日志或放大视图。
+    visibleTarget?.focus();
+  }, [isBodyPreviewEntryVisible]);
+
   const closeBodyManuscript = useCallback(() => {
     setBodyManuscriptExpanded(false);
     setBodyAuditLocation(null);
@@ -910,10 +929,10 @@ export function SourceReviewLog({
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       const key = bodyReturnFocusKeyRef.current;
       const target = key ? textEditButtonRefs.current[key] : bodyExpandButtonRef.current;
-      target?.focus();
+      restoreBodyFocus(target);
       bodyReturnFocusKeyRef.current = null;
     }));
-  }, []);
+  }, [restoreBodyFocus]);
 
   const openBodyManuscript = (index: number | null) => {
     if (!original?.body.length || busy) return;
@@ -951,10 +970,10 @@ export function SourceReviewLog({
     setBodyAuditLocation(null);
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       const triggerKey = bodyAuditReturnFocusRef.current;
-      bodyAuditTriggerRefs.current[triggerKey ?? ""]?.focus();
+      restoreBodyFocus(bodyAuditTriggerRefs.current[triggerKey ?? ""]);
       bodyAuditReturnFocusRef.current = null;
     }));
-  }, []);
+  }, [restoreBodyFocus]);
 
   const openBodyAudit = (index: number, mode: BodyAuditLocation["mode"]) => {
     if (busy) return;
@@ -1600,16 +1619,22 @@ export function SourceReviewLog({
     if (!preview) return;
     const measure = () => {
       setBodyPreviewOverflow(preview.scrollHeight > preview.clientHeight + 1);
+      preview.querySelectorAll<HTMLButtonElement>("button").forEach((entry) => {
+        const visible = isBodyPreviewEntryVisible(entry);
+        entry.tabIndex = visible ? 0 : -1;
+        if (!visible && document.activeElement === entry) restoreBodyFocus(null);
+      });
     };
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(preview);
+    preview.querySelectorAll("button").forEach((entry) => observer?.observe(entry));
     window.addEventListener("resize", measure);
     return () => {
       observer?.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [body, bodyManuscriptExpanded, textExpanded]);
+  }, [body, bodyManuscriptExpanded, textExpanded, hiddenBodyIndices, isBodyPreviewEntryVisible, restoreBodyFocus]);
 
   useLayoutEffect(() => {
     if (!bodyManuscriptExpanded) return;
