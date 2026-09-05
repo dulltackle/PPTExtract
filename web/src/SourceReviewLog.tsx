@@ -52,6 +52,7 @@ interface ActiveTextEditor {
 interface BodyAuditLocation {
   index: number;
   mode: "preview" | "expanded";
+  hiddenSources?: boolean;
 }
 
 export interface SourceDraftActions {
@@ -705,6 +706,12 @@ export function SourceReviewLog({
   const snapshot = curation?.current_snapshot ?? null;
   const busy = operation !== null;
   const pending = (detail?.review_status ?? page.review_status) === "pending";
+  const approved = (detail?.review_status ?? page.review_status) === "approved";
+  const hiddenBodyIndices = approved
+    ? (original?.body ?? []).flatMap((_, index) => (body[index] ?? "").trim() ? [] : [index])
+    : [];
+  const allBodyHidden = hiddenBodyIndices.length > 0 && hiddenBodyIndices.length === original?.body.length;
+  const emptyBodyMessage = `无保留正文，${hiddenBodyIndices.length} 段来源可审计`;
 
   useLayoutEffect(() => {
     onOperationStateChange(busy);
@@ -946,6 +953,24 @@ export function SourceReviewLog({
     bodyAuditReturnFocusRef.current = triggerKey;
     setBodyAuditLocation({ index, mode });
   };
+
+  const renderHiddenSourcesTrigger = (mode: BodyAuditLocation["mode"]) => (
+    hiddenBodyIndices.length ? (
+      <button
+        type="button"
+        className="source-hidden-trigger"
+        ref={(element) => { bodyAuditTriggerRefs.current[`${mode}-hidden`] = element; }}
+        aria-haspopup="dialog"
+        disabled={busy}
+        onClick={() => {
+          bodyAuditReturnFocusRef.current = `${mode}-hidden`;
+          setBodyAuditLocation({ index: hiddenBodyIndices[0], mode, hiddenSources: true });
+        }}
+      >
+        {`隐藏来源 · ${hiddenBodyIndices.length}`}
+      </button>
+    ) : null
+  );
 
   const cancelTextEditor = () => {
     if (!activeTextEditor) return;
@@ -1346,6 +1371,10 @@ export function SourceReviewLog({
     setAnnouncement("正在冻结当前快照并记录批准结论…");
     try {
       await approveCurationPage(page.page_id, snapshot.snapshot_id);
+      setDetail((current) => current ? {
+        ...current,
+        review_status: "approved",
+      } : current);
       setAnnouncement("页面已批准，正在转到下一待处理页。");
       await onApproved();
     } catch (cause) {
@@ -1839,9 +1868,11 @@ export function SourceReviewLog({
     const currentValue = textBlockValue("body", index);
     const modified = currentValue !== originalValue;
     const auditOpen = bodyAuditLocation?.index === index && bodyAuditLocation.mode === mode;
-    const empty = currentValue.length === 0;
+    const empty = !currentValue.trim();
+    if (approved && empty) return null;
+    const emptyLabel = currentValue.length ? "仅含空白字符" : "当前值为空";
     const auditStatus = empty
-      ? `当前值为空，${modified ? "已修改" : "未修改"}`
+      ? `${emptyLabel}，${modified ? "已修改" : "未修改"}`
       : modified ? "已修改" : "未修改";
     const canEdit = pending && textEditingEnabled && !busy;
     return (
@@ -1881,7 +1912,7 @@ export function SourceReviewLog({
               aria-label={`从${label} 打开放大视图`}
               onClick={() => openBodyManuscript(index)}
             >
-              {currentValue || <span className="source-empty-inline">空块</span>}
+              {empty ? <span className="source-empty-inline">{currentValue.length ? "仅含空白字符" : "空块"}</span> : currentValue}
             </button>
           ) : (
             <div className={`source-expanded-editor ${canEdit ? "" : "is-readonly"}`}>
@@ -1961,6 +1992,7 @@ export function SourceReviewLog({
           <header>
             <div>
               <h3 id="source-body-expanded-heading">正文放大视图</h3>
+              {renderHiddenSourcesTrigger("expanded")}
               <p>
                 {`${original.body.length} 段 · ${pending && textEditingEnabled ? "直接编辑本地草稿" : "只读核对"} · 统一保存时才会持久化`}
               </p>
@@ -1987,6 +2019,7 @@ export function SourceReviewLog({
               aria-label="连续正文编辑面"
               onCopy={handleBodyCopy}
             >
+              {allBodyHidden ? <p className="source-empty-block">{emptyBodyMessage}</p> : null}
               {original.body.map((value, index) => renderBodyBlock(
                 index,
                 value,
@@ -2100,15 +2133,17 @@ export function SourceReviewLog({
                 >
                   <header className="source-manuscript-body-heading">
                     <h4 id="source-body-group-heading">正文</h4>
+                    {renderHiddenSourcesTrigger("preview")}
                     <span>{`${original.body.length} 段 · 保留原始段落边界`}</span>
                   </header>
                   <div className="source-manuscript-body-copy">
                   <div
                     ref={bodyPreviewRef}
-                    className="source-body-preview"
+                    className={`source-body-preview ${hiddenBodyIndices.length ? "has-hidden-sources" : ""}`}
                     role="region"
                     aria-label="正文整稿预览"
                   >
+                  {allBodyHidden ? <p className="source-empty-block">{emptyBodyMessage}</p> : null}
                   {original.body.map((value, index) => renderBodyBlock(
                     index,
                     value,
@@ -2779,10 +2814,25 @@ export function SourceReviewLog({
         </header>
 
         <div className="source-body-audit-scroll">
+          {bodyAuditLocation.hiddenSources ? (
+            <nav className="source-hidden-list" aria-label="隐藏来源">
+              <p>已批准页只读。恢复内容需先重新打开，再编辑、保存并批准。</p>
+              {hiddenBodyIndices.map((index) => (
+                <button
+                  type="button"
+                  key={index}
+                  aria-pressed={index === auditedIndex}
+                  onClick={() => setBodyAuditLocation({ ...bodyAuditLocation, index })}
+                >
+                  {`${textBlockLabel("body", index)}，${body[index].length ? "仅含空白字符" : "当前值为空"}`}
+                </button>
+              ))}
+            </nav>
+          ) : null}
           <div
             id="source-body-audit-status"
             className={`source-body-audit-status ${
-              auditedCurrentValue.length === 0
+              !auditedCurrentValue.trim()
                 ? "is-empty"
                 : auditedModified ? "is-modified" : "is-matching"
             }`}
@@ -2791,8 +2841,8 @@ export function SourceReviewLog({
           >
             <span aria-hidden="true" />
             <strong>
-              {auditedCurrentValue.length === 0
-                ? "当前值为空"
+              {!auditedCurrentValue.trim()
+                ? (auditedCurrentValue.length ? "仅含空白字符" : "当前值为空")
                 : auditedModified
                   ? "当前值与 AnyDoc 原文不同"
                   : "当前值与 AnyDoc 原文一致"}
@@ -2812,10 +2862,10 @@ export function SourceReviewLog({
                 <h3>当前值</h3>
                 <span>{auditedLocalDraft ? "本地草稿" : "已保存值"}</span>
               </header>
-              {auditedCurrentValue.length ? (
+              {auditedCurrentValue.trim() ? (
                 <p>{auditedCurrentValue}</p>
               ) : (
-                <p className="source-body-audit-empty">当前值为空</p>
+                <p className="source-body-audit-empty">{auditedCurrentValue.length ? "仅含空白字符" : "当前值为空"}</p>
               )}
             </section>
             <section role="region" aria-label={`${auditedLabel} AnyDoc 原文`}>
@@ -2834,6 +2884,8 @@ export function SourceReviewLog({
           <section className="source-body-audit-facts" aria-labelledby="source-body-audit-facts-heading">
             <h3 id="source-body-audit-facts-heading">来源身份与审计记录</h3>
             <dl>
+              <div><dt>保存快照</dt><dd>{snapshot?.snapshot_id ?? "尚未保存"}</dd></div>
+              <div><dt>保存记录</dt><dd>{snapshot ? `${snapshot.created_by ?? "当前响应未提供操作者"} · ${snapshot.created_at ? formatTime(snapshot.created_at) : "当前响应未提供保存时间"}` : "尚未保存"}</dd></div>
               <div><dt>来源类型</dt><dd>AnyDoc 正文</dd></div>
               <div><dt>原始顺序</dt><dd>{String(auditedIndex + 1).padStart(2, "0")}</dd></div>
               <div><dt>来源引用</dt><dd>{auditedSource?.source_ref ?? "当前响应未提供"}</dd></div>
