@@ -444,7 +444,7 @@ export function SourceReviewLog({
   const [narrowBodyManuscript, setNarrowBodyManuscript] = useState(false);
   const [operation, setOperation] = useState<
     "text-review" | "image" | "review" | "approve" | "exclude" | "reopen" |
-    "noise-preview" | "noise-confirm" | "noise-revoke" | null
+    "noise-preview" | "noise-confirm" | "noise-revoke" | "noise-refresh" | null
   >(null);
   const [focusTarget, setFocusTarget] = useState<"review" | "approve" | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(arrivalAnnouncement);
@@ -707,8 +707,17 @@ export function SourceReviewLog({
   const busy = operation !== null;
   const pending = (detail?.review_status ?? page.review_status) === "pending";
   const approved = (detail?.review_status ?? page.review_status) === "approved";
+  const excludedBodyIndices = new Set(
+    (curation?.repeated_footer_noise?.sources ?? [])
+      .filter((source) => curation?.chunk_metadata?.excluded_repeated_footer_noise.some(
+        (excluded) => excluded.source_ref === source.source_ref,
+      ))
+      .map((source) => source.source_index),
+  );
   const hiddenBodyIndices = approved
-    ? (original?.body ?? []).flatMap((_, index) => (body[index] ?? "").trim() ? [] : [index])
+    ? (original?.body ?? []).flatMap((_, index) => (
+        !(body[index] ?? "").trim() || excludedBodyIndices.has(index) ? [index] : []
+      ))
     : [];
   const allBodyHidden = hiddenBodyIndices.length > 0 && hiddenBodyIndices.length === original?.body.length;
   const emptyBodyMessage = `无保留正文，${hiddenBodyIndices.length} 段来源可审计`;
@@ -1148,7 +1157,7 @@ export function SourceReviewLog({
     sourceNumber: number,
     sourceRef: string,
   ) => {
-    if (busy || dirty) return;
+    if (busy || dirty || !pending) return;
     setOperation("noise-revoke");
     setAnnouncement(`正在撤销正文来源 ${sourceNumber} 的重复页脚排除…`);
     try {
@@ -1524,6 +1533,11 @@ export function SourceReviewLog({
   useEffect(() => {
     if (!bodyAuditLocation) return;
     const frame = window.requestAnimationFrame(() => bodyAuditCloseRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [bodyAuditLocation]);
+
+  useEffect(() => {
+    if (!bodyAuditLocation) return;
     const handleAuditKey = (event: KeyboardEvent) => {
       if (noiseCandidate || showReopen) return;
       if (event.key === "Escape") {
@@ -1550,10 +1564,7 @@ export function SourceReviewLog({
       }
     };
     document.addEventListener("keydown", handleAuditKey);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleAuditKey);
-    };
+    return () => document.removeEventListener("keydown", handleAuditKey);
   }, [bodyAuditLocation, closeBodyAudit, noiseCandidate, showReopen]);
 
   useEffect(() => {
@@ -1699,6 +1710,8 @@ export function SourceReviewLog({
       (item) => item.source_ref === noiseSource?.source_ref,
     );
     if (activeNoise) {
+      const affectedPages = latestNoiseHistory?.affected_pages;
+      const frozenPages = affectedPages?.filter((item) => item.review_status !== "pending") ?? [];
       return (
         <div className="footer-noise-source-state">
           <div>
@@ -1706,13 +1719,40 @@ export function SourceReviewLog({
             <span>{activeNoise.confirmed_by} · {formatTime(activeNoise.confirmed_at)}</span>
             <span>规则 {activeNoise.rule_version}</span>
           </div>
+          <section className="footer-noise-group" aria-label="整组撤销影响范围">
+            <strong>撤销将恢复整组来源</strong>
+            {affectedPages ? (
+              <ul>
+                {Array.from(new Map(affectedPages.map((item) => [item.page_version_id, item])).values()).map((item) => (
+                  <li key={item.page_version_id}>
+                    第 {item.page_number} 页 · {item.review_status === "pending" ? "待策展" : item.review_status === "approved" ? "已批准，需重新打开" : "已排除，需重新打开"}
+                    {item.review_status !== "pending" ? (
+                      <a
+                        href={`/curation?filter=all&document=${encodeURIComponent(page.document_id)}&page=${item.page_number}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >定位第 {item.page_number} 页（新标签页）</a>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : <p>受影响页状态尚未提供，请刷新后核对。</p>}
+            {!pending || frozenPages.length ? <p>请先逐页重新打开所有冻结页，再刷新状态并撤销。</p> : null}
+            <button type="button" disabled={busy || dirty} onClick={async () => {
+              if (busy || dirty) return;
+              setOperation("noise-refresh");
+              try { await refreshDetail(); }
+              catch { setAnnouncement("状态刷新失败，请重试。"); }
+              finally { setOperation(null); }
+            }}>刷新整组审核状态</button>
+          </section>
           <button
             type="button"
             ref={(element) => {
               noiseRevokeButtonRefs.current[activeNoise.source_ref] = element;
             }}
             aria-label={`撤销正文来源 ${index + 1} 的重复页脚排除`}
-            disabled={busy || dirty}
+            disabled={busy || dirty || !pending || !affectedPages?.length || frozenPages.length > 0}
             title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
             onClick={() => void handleNoiseRevoke(
               activeNoise.confirmation_id,
@@ -1748,7 +1788,7 @@ export function SourceReviewLog({
             noiseCheckButtonRefs.current[noiseSource.source_ref] = element;
           }}
           className="footer-noise-check"
-          disabled={busy || dirty}
+          disabled={busy || dirty || !pending}
           title={dirty ? "请先保存或还原当前文字与图片修改" : undefined}
           onClick={(event) => void handleNoisePreview(
             noiseSource.source_ref,
@@ -1869,7 +1909,8 @@ export function SourceReviewLog({
     const modified = currentValue !== originalValue;
     const auditOpen = bodyAuditLocation?.index === index && bodyAuditLocation.mode === mode;
     const empty = !currentValue.trim();
-    if (approved && empty) return null;
+    const excluded = excludedBodyIndices.has(index);
+    if (hiddenBodyIndices.includes(index)) return null;
     const emptyLabel = currentValue.length ? "仅含空白字符" : "当前值为空";
     const auditStatus = empty
       ? `${emptyLabel}，${modified ? "已修改" : "未修改"}`
@@ -1877,7 +1918,7 @@ export function SourceReviewLog({
     const canEdit = pending && textEditingEnabled && !busy;
     return (
       <article
-        className={`source-body-paragraph is-${mode} ${modified ? "is-modified" : ""}`}
+        className={`source-body-paragraph is-${mode} ${modified ? "is-modified" : ""} ${excluded ? "is-excluded" : ""}`}
         data-source-text-block={key}
         key={key}
       >
@@ -1889,13 +1930,14 @@ export function SourceReviewLog({
           className={`source-manuscript-number source-manuscript-number-button ${
             empty ? "is-empty" : modified ? "is-modified" : ""
           }`}
-          aria-label={`${label}，${auditStatus}，打开来源审计`}
+          aria-label={`${label}，${excluded ? "已排除重复页脚，" : ""}${auditStatus}，打开来源审计`}
           aria-expanded={auditOpen}
           aria-pressed={auditOpen}
           aria-controls={`source-body-audit-panel-${index}`}
           onClick={() => openBodyAudit(index, mode)}
         >
           <span>{label}</span>
+          {excluded ? <span className="source-excluded-label">已排除</span> : null}
           {empty || modified ? (
             <span
               className={`source-number-state-mark ${empty ? "is-empty" : "is-modified"}`}
@@ -2824,7 +2866,7 @@ export function SourceReviewLog({
                   aria-pressed={index === auditedIndex}
                   onClick={() => setBodyAuditLocation({ ...bodyAuditLocation, index })}
                 >
-                  {`${textBlockLabel("body", index)}，${body[index].length ? "仅含空白字符" : "当前值为空"}`}
+                  {`${textBlockLabel("body", index)}，${excludedBodyIndices.has(index) ? "已排除重复页脚" : body[index].length ? "仅含空白字符" : "当前值为空"}`}
                 </button>
               ))}
             </nav>
@@ -2900,11 +2942,21 @@ export function SourceReviewLog({
             </dl>
           </section>
 
+          {noiseHistory.filter((item) => item.source_ref === auditedSource?.source_ref).map((item) => (
+            <section className="footer-noise-history-entry" key={item.confirmation_id} aria-label="重复页脚确认与撤销历史">
+              <strong>{item.status === "active" ? "有效排除" : "历史排除已撤销"}</strong>
+              <span>确认：{item.confirmed_by} · {formatTime(item.confirmed_at)}</span>
+              <span>规则 {item.rule_version}</span>
+              {item.confirmation_note ? <p>{item.confirmation_note}</p> : null}
+              {item.revoked_at ? <p>撤销：{item.revoked_by} · {formatTime(item.revoked_at)} · {item.revoke_note}</p> : null}
+            </section>
+          ))}
+
           {auditedAttachedState ? (
             <section className="source-body-audit-operations" aria-labelledby="source-body-audit-operations-heading">
               <header>
                 <h3 id="source-body-audit-operations-heading">逐块审计操作</h3>
-                <p>操作只影响该来源的审计处置，不会保存整稿草稿。</p>
+                <p>重复页脚确认与撤销影响整组来源，不会保存整稿草稿。</p>
               </header>
               {auditedAttachedState}
             </section>

@@ -241,6 +241,12 @@ async function mockRepeatedFooterNoiseApi(page: Page, candidateGate?: Promise<vo
       source_text: source.body[1],
       rule_version: "manual-exact-text-v1",
       confirmation_note: "浏览器逐页核对完成。",
+      affected_pages: [1, 2, 3].map((number) => ({
+        page_id: `page-${number}`,
+        page_version_id: `pv-${number}`,
+        page_number: number,
+        review_status: "pending",
+      })),
       confirmed_by: "operator-browser",
       confirmed_at: "2026-09-02T08:03:00+00:00",
       status: active ? "active" : "revoked",

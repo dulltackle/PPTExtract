@@ -277,7 +277,15 @@ export interface RepeatedFooterNoiseMetadata {
   confirmed_at: string;
 }
 
+export interface RepeatedFooterNoiseGroupPage {
+  page_id: string;
+  page_version_id: string;
+  page_number: number;
+  review_status: "pending" | "approved" | "excluded";
+}
+
 export interface RepeatedFooterNoiseHistory {
+  affected_pages?: RepeatedFooterNoiseGroupPage[];
   confirmation_id: string;
   source_ref: string;
   source_text: string;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from collections.abc import Iterator
 from dataclasses import replace
 from io import BytesIO
@@ -12,7 +13,7 @@ from PIL import Image
 
 from pptextract.api import create_app
 from pptextract.config import Settings
-from pptextract.conversion import NormalizedPageContent
+from pptextract.conversion import NormalizedPageContent, NormalizedSourcePart
 from pptextract.db import connect
 from pptextract.pptx_projection import SourcePage
 from pptextract.rendering import StandardPageRender
@@ -41,6 +42,7 @@ def _ingest_repeated_footer_document(
             tables=(),
             images=(),
             speaker_notes=(),
+            source_order=(NormalizedSourcePart("body", 0), NormalizedSourcePart("body", 1)),
         )
 
     monkeypatch.setattr("pptextract.ingest_workflow.convert_page", convert)
@@ -172,7 +174,7 @@ def test_candidate_confirmation_and_revoke_only_change_chunk_composition(
         json={
             "base_snapshot_id": None,
             "titles": ["公开页 1"],
-            "body": ["第 1 页独有正文", " 公开合成重复页脚\n"],
+            "body": ["第 1 页独有正文", "策展后的页脚文字"],
         },
     ).json()["curation"]
     snapshot_id = saved["current_snapshot"]["snapshot_id"]
@@ -192,6 +194,48 @@ def test_candidate_confirmation_and_revoke_only_change_chunk_composition(
         "confirmation_id"
     ] == fact["confirmation_id"]
 
+    warning_url = (
+        f"/api/v1/documents/{pages[0]['document_id']}/versions/"
+        f"{pages[0]['version_id']}/rendering-warnings"
+    )
+    for warning in client.get(warning_url).json()["warnings"]:
+        assert client.post(f"{warning_url}/{warning['warning_id']}/confirm").status_code == 200
+    candidate_response = client.post("/api/v1/publications/candidates")
+    assert candidate_response.status_code == 201, candidate_response.text
+    candidate = candidate_response.json()
+    assert client.post(
+        f"/api/v1/publications/candidates/{candidate['candidate_id']}/confirm"
+    ).status_code == 202
+    assert run_once(settings)
+    current = client.get("/api/v1/publications/current").json()
+    archive = client.get(current["artifact_uri"]).content
+    with zipfile.ZipFile(BytesIO(archive)) as bundle:
+        chunk = json.loads(bundle.read("chunks.jsonl").splitlines()[0])
+        assert "公开合成重复页脚" not in chunk["text"]
+        assert "策展后的页脚文字" not in chunk["text"]
+        assert chunk["metadata"]["excluded_repeated_footer_noise"][0][
+            "confirmation_id"
+        ] == fact["confirmation_id"]
+
+    assert client.post(
+        f"/api/v1/pages/{pages[2]['page_id']}/exclude", json={"reason": "irrelevant"},
+    ).status_code == 200
+    blocked = client.post(
+        f"/api/v1/repeated-footer-noise/confirmations/{fact['confirmation_id']}/revoke",
+        json={"note": "尝试绕过冻结限制"},
+    )
+    assert blocked.status_code == 409
+    for affected_page in fact["affected_pages"]:
+        state = client.get(f"/api/v1/pages/{affected_page['page_id']}").json()["curation"]
+        assert state["repeated_footer_noise"]["history"][0]["status"] == "active"
+        assert state["chunk_metadata"]["excluded_repeated_footer_noise"]
+    assert client.post(f"/api/v1/pages/{first_id}/reopen").status_code == 200
+    assert client.post(
+        f"/api/v1/repeated-footer-noise/confirmations/{fact['confirmation_id']}/revoke",
+        json={"note": "仍有其他冻结页"},
+    ).status_code == 409
+    assert client.post(f"/api/v1/pages/{pages[2]['page_id']}/reopen").status_code == 200
+
     revoked = client.post(
         f"/api/v1/repeated-footer-noise/confirmations/{fact['confirmation_id']}/revoke",
         headers={"X-Actor-ID": "curator-revoke"},
@@ -201,8 +245,8 @@ def test_candidate_confirmation_and_revoke_only_change_chunk_composition(
     assert revoked.status_code == 200
     assert revoked.json()["confirmation"]["status"] == "revoked"
     restored = client.get(f"/api/v1/pages/{first_id}").json()
-    assert restored["review"]["status"] == "approved"
-    assert restored["curation"]["chunk_body"]["preview"].endswith("公开合成重复页脚")
+    assert restored["review"]["status"] == "pending"
+    assert restored["curation"]["chunk_body"]["preview"].endswith("策展后的页脚文字")
     assert restored["curation"]["chunk_metadata"]["excluded_repeated_footer_noise"] == []
     history = restored["curation"]["repeated_footer_noise"]["history"]
     assert history == [
@@ -212,6 +256,7 @@ def test_candidate_confirmation_and_revoke_only_change_chunk_composition(
             "source_text": " 公开合成重复页脚\n",
             "rule_version": "manual-exact-text-v1",
             "confirmation_note": "已在三页标准页渲染结果中核对。",
+            "affected_pages": history[0]["affected_pages"],
             "confirmed_by": "curator-footer",
             "confirmed_at": fact["confirmed_at"],
             "status": "revoked",
@@ -221,6 +266,9 @@ def test_candidate_confirmation_and_revoke_only_change_chunk_composition(
         }
     ]
     assert history[0]["revoked_at"]
+    assert client.get("/api/v1/publications/current").json() == current
+    assert client.get(current["artifact_uri"]).content == archive
+    assert all(item["review_status"] == "pending" for item in history[0]["affected_pages"])
     with connect(settings) as connection:
         events = connection.execute(
             """
@@ -240,3 +288,59 @@ def test_candidate_confirmation_and_revoke_only_change_chunk_composition(
     ]
     assert all(event["occurred_at"] for event in events)
     assert json.loads(immutable_source)["body"][-1] == " 公开合成重复页脚\n"
+
+
+@pytest.mark.parametrize("frozen_status", ["approved", "excluded"])
+def test_revoke_rechecks_group_after_concurrent_freeze(
+    system: tuple[TestClient, Settings], monkeypatch: pytest.MonkeyPatch,
+    frozen_status: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    client, settings = system
+    pages = _ingest_repeated_footer_document(client, settings, monkeypatch)
+    first_id = pages[0]["page_id"]
+    source = client.get(f"/api/v1/pages/{first_id}").json()["curation"][
+        "repeated_footer_noise"
+    ]["sources"][1]
+    candidate = client.get(
+        f"/api/v1/pages/{first_id}/repeated-footer-noise/candidates/{source['source_ref']}"
+    ).json()["candidate"]
+    fact = client.post(
+        f"/api/v1/pages/{first_id}/repeated-footer-noise/confirmations",
+        json={"candidate_id": candidate["candidate_id"], "source_ref": source["source_ref"]},
+    ).json()["confirmation"]
+    assert all(page["review_status"] == "pending" for page in fact["affected_pages"])
+    started = Event()
+
+    def revoke() -> int:
+        started.set()
+        return client.post(
+            f"/api/v1/repeated-footer-noise/confirmations/{fact['confirmation_id']}/revoke",
+            json={"note": "并发撤销"},
+        ).status_code
+
+    # 模拟另一个会话尚未提交的冻结事务，撤销必须等待并读取提交后的状态。
+    with ThreadPoolExecutor(max_workers=1) as executor, connect(settings) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE page_versions SET review_status = ? WHERE page_id = ?",
+            (frozen_status, pages[1]["page_id"]),
+        )
+        future = executor.submit(revoke)
+        assert started.wait(timeout=3)
+        assert not future.done()
+        connection.commit()
+        assert future.result(timeout=5) == 409
+    for page in pages:
+        state = client.get(f"/api/v1/pages/{page['page_id']}").json()["curation"]
+        assert state["repeated_footer_noise"]["history"][0]["status"] == "active"
+        assert state["chunk_metadata"]["excluded_repeated_footer_noise"]
+    assert client.post(f"/api/v1/pages/{pages[1]['page_id']}/reopen").status_code == 200
+    assert revoke() == 200
+    for page in pages:
+        detail = client.get(f"/api/v1/pages/{page['page_id']}").json()
+        assert detail["review"]["status"] == "pending"
+        assert detail["curation"]["chunk_metadata"]["excluded_repeated_footer_noise"] == []
+        assert detail["curation"]["chunk_body"]["preview"].endswith("公开合成重复页脚")

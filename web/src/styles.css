@@ -6682,3 +6682,50 @@ details[open] .scope-chevron {
   font-size: 13px;
   line-height: 1.6;
 }
+
+/* 排除仍保留完整可读正文；来源段号承载状态和审计入口。 */
+.source-body-paragraph.is-excluded .source-manuscript-number-button {
+  color: var(--exclusion-red-deep);
+}
+
+.source-excluded-label {
+  font: 650 12px/1.45 var(--ui-font);
+}
+
+.footer-noise-group,
+.footer-noise-history-entry {
+  min-width: 0;
+  color: var(--log-ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.footer-noise-source-state:has(.footer-noise-group) {
+  display: grid;
+  gap: 12px;
+}
+
+.footer-noise-group ul {
+  margin: 8px 0;
+  padding-inline-start: 20px;
+}
+
+.footer-noise-group li + li {
+  margin-top: 6px;
+}
+
+.footer-noise-group a {
+  display: block;
+  color: var(--selection-teal-deep);
+  text-underline-offset: 3px;
+}
+
+.footer-noise-history-entry {
+  border-top: 1px solid var(--light-hairline);
+  padding-block: 12px;
+}
+
+.footer-noise-history-entry span {
+  display: block;
+  margin-top: 4px;
+}
