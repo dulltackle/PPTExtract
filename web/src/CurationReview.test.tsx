@@ -273,6 +273,7 @@ describe("来源文字审核工作台", () => {
     expect(Array.from(firstBodyEditor.querySelectorAll("[data-body-line]")).map(
       (line) => line.textContent,
     )).toEqual(["第一行", "第二行"]);
+    await waitFor(() => expect(firstBodyEditor).toHaveFocus());
     await userEvent.tab();
     expect(firstBodyEditor).not.toHaveFocus();
 
@@ -505,6 +506,12 @@ describe("来源文字审核工作台", () => {
               source_text: "公开合成重复页脚",
               rule_version: "manual-exact-text-v1",
               confirmation_note: "已核对三页。",
+              affected_pages: [1, 2, 3].map((number) => ({
+                page_id: `page-${number}`,
+                page_version_id: `pv-${number}`,
+                page_number: number,
+                review_status: "pending",
+              })),
               confirmed_by: "operator-zhang",
               confirmed_at: "2026-08-24T18:03:00+00:00",
               status: active ? "active" : "revoked",
@@ -627,7 +634,10 @@ describe("来源文字审核工作台", () => {
     let checkRepeated = screen.getByRole("button", { name: "检查是否为重复页脚噪声" });
     expect(checkRepeated).toBeDisabled();
     await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(auditTrigger).toHaveFocus());
+    // jsdom 不提供裁切几何；预览返回焦点由正文整稿浏览器场景验证。
+    await waitFor(() => expect(
+      screen.queryByRole("dialog", { name: "正文 02 · 来源审计" }),
+    ).not.toBeInTheDocument());
     await userEvent.clear(imageSummary);
     await userEvent.type(imageSummary, savedImageSummary);
     await userEvent.click(auditTrigger);
@@ -664,16 +674,18 @@ describe("来源文字审核工作台", () => {
     const activeImageSummary = screen.getByRole("textbox", { name: "图片来源 01 summary" });
     await userEvent.type(activeImageSummary, "（本地修改）");
     const activeAuditTrigger = screen.getByRole("button", {
-      name: "正文 02，未修改，打开来源审计",
+      name: "正文 02，已排除重复页脚，未修改，打开来源审计",
     });
     await userEvent.click(activeAuditTrigger);
     expect(await screen.findByText("已从 Chunk 正文排除")).toBeInTheDocument();
     expect(screen.getAllByText(/operator-zhang ·/).length).toBeGreaterThan(0);
-    expect(screen.getByText("规则 manual-exact-text-v1")).toBeInTheDocument();
+    expect(screen.getAllByText("规则 manual-exact-text-v1").length).toBeGreaterThan(0);
     const revoke = screen.getByRole("button", { name: "撤销正文来源 2 的重复页脚排除" });
     expect(revoke).toBeDisabled();
     await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(activeAuditTrigger).toHaveFocus());
+    await waitFor(() => expect(
+      screen.queryByRole("dialog", { name: "正文 02 · 来源审计" }),
+    ).not.toBeInTheDocument());
     await userEvent.clear(activeImageSummary);
     await userEvent.type(activeImageSummary, savedImageSummary);
     await userEvent.click(activeAuditTrigger);

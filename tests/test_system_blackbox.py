@@ -903,3 +903,74 @@ def test_product_acceptance_from_upload_to_atomic_downstream_switch(
     }
     assert len(generation.assets) == 2
     assert downstream.synchronize(downstream_source(base_url)) is False
+
+
+def test_cleared_source_browser_approval_and_publication(
+    isolated_product_system: tuple[str, Path],
+) -> None:
+    """通过真实浏览器、来源响应与发布 ZIP 验证清空及恢复闭环。"""
+    import io
+    import zipfile
+
+    base_url, _ = isolated_product_system
+    project_root = Path(__file__).resolve().parents[1]
+    with httpx.Client(base_url=base_url, trust_env=False, timeout=30) as client:
+        response = client.post(
+            "/api/v1/documents",
+            headers={"Idempotency-Key": "cleared-source-browser"},
+            files={"file": ("public-cleared.pptx", build_plain_text_presentation(
+                title="公开清空闭环", body_text="公开待清空正文",
+            ), "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
+        )
+        assert response.status_code == 202
+        identity = response.json()
+        assert wait_for_job(client, base_url, identity["job_id"])["status"] == "succeeded"
+        pages = client.get("/api/v1/curation/pages").json()["pages"]
+        page = next(item for item in pages if item["document_id"] == identity["document_id"])
+        route = (
+            f"/curation?document={identity['document_id']}"
+            f"&version={identity['version_id']}&page=1"
+        )
+        result = subprocess.run(
+            ["node", "tests/cleared-source-blackbox.mjs", base_url, route, page["page_id"]],
+            cwd=project_root / "web", capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        assert report["clearedSnapshot"]["source_content"]["body"] == [""]
+        detail = report["finalDetail"]
+        assert detail["review_status"] == "approved"
+        assert detail["source_content"] == report["original"]
+        assert detail["curation"]["current_snapshot"]["source_content"]["body"] == [" \n "]
+        assert (
+            detail["curation"]["current_snapshot"]["source_confirmation"]["actor_id"]
+            == "blackbox-operator"
+        )
+        assert detail["curation"]["chunk_body"]["preview"] == "公开清空闭环"
+        warnings_path = (
+            f"/api/v1/documents/{identity['document_id']}"
+            f"/versions/{identity['version_id']}/rendering-warnings"
+        )
+        warnings = client.get(warnings_path).json()
+        unconfirmed = [
+            w["warning_id"] for w in warnings["warnings"] if w["status"] == "unconfirmed"
+        ]
+        if unconfirmed:
+            assert client.post(f"{warnings_path}/confirm-all", json={
+                "render_config_version": warnings["render_config_version"],
+                "warning_ids": unconfirmed,
+            }).status_code == 200
+        candidate = client.post("/api/v1/publications/candidates")
+        assert candidate.status_code == 201
+        confirmed = client.post(
+            f"/api/v1/publications/candidates/{candidate.json()['candidate_id']}/confirm"
+        )
+        assert confirmed.status_code == 202
+        assert wait_for_job(client, base_url, confirmed.json()["job_id"])["status"] == "succeeded"
+        pointer = client.get("/api/v1/publications/current").json()
+        artifact = client.get(pointer["artifact_uri"])
+        assert artifact.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(artifact.content)) as archive:
+            chunks = [json.loads(line) for line in archive.read("chunks.jsonl").splitlines()]
+        assert len(chunks) == 1
+        assert chunks[0]["text"] == "public-cleared\n\n公开清空闭环"

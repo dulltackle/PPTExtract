@@ -1297,6 +1297,7 @@ kbd {
 }
 
 .source-manuscript-body-heading {
+  flex-wrap: wrap;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -1373,9 +1374,12 @@ kbd {
 .source-body-preview {
   height: 224px;
   min-width: 0;
-  overflow: auto;
-  scrollbar-color: #919da2 #eef1f1;
-  scrollbar-width: thin;
+  overflow: clip;
+}
+
+.source-body-preview button:focus-visible,
+.source-body-preview-footer button:focus-visible {
+  outline-offset: -2px;
 }
 
 .source-body-paragraph {
@@ -1782,6 +1786,7 @@ kbd {
 }
 
 .source-body-audit-scroll {
+  grid-auto-rows: max-content;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -6644,4 +6649,86 @@ details[open] .scope-chevron {
   .source-body-audit-panel {
     animation: none;
   }
+}
+
+.source-body-preview.has-hidden-sources {
+  height: auto;
+  max-height: 224px;
+}
+
+.source-hidden-trigger,
+.source-hidden-list button {
+  color: var(--selection-teal-deep, #276f70);
+  background: transparent;
+  border: 1px solid #c8ced1;
+  border-radius: 5px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.source-hidden-trigger:hover:not(:disabled),
+.source-hidden-list button:hover,
+.source-hidden-list button[aria-pressed="true"] {
+  background: #e1eeee;
+  border-color: #276f70;
+}
+
+.source-hidden-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.source-hidden-list p {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 排除仍保留完整可读正文；来源段号承载状态和审计入口。 */
+.source-body-paragraph.is-excluded .source-manuscript-number-button {
+  color: var(--exclusion-red-deep);
+}
+
+.source-excluded-label {
+  font: 650 12px/1.45 var(--ui-font);
+}
+
+.footer-noise-group,
+.footer-noise-history-entry {
+  min-width: 0;
+  color: var(--log-ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.footer-noise-source-state:has(.footer-noise-group) {
+  display: grid;
+  gap: 12px;
+}
+
+.footer-noise-group ul {
+  margin: 8px 0;
+  padding-inline-start: 20px;
+}
+
+.footer-noise-group li + li {
+  margin-top: 6px;
+}
+
+.footer-noise-group a {
+  display: block;
+  color: var(--selection-teal-deep);
+  text-underline-offset: 3px;
+}
+
+.footer-noise-history-entry {
+  border-top: 1px solid var(--light-hairline);
+  padding-block: 12px;
+}
+
+.footer-noise-history-entry span {
+  display: block;
+  margin-top: 4px;
 }

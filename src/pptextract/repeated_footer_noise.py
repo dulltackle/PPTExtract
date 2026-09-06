@@ -174,10 +174,12 @@ def _serialize_confirmation(
         raise RepeatedFooterNoiseError(404, "not_found", "未找到重复页脚噪声确认。")
     affected = connection.execute(
         """
-        SELECT page_id, page_version_id, page_number, source_ref, source_kind,
-               source_index, source_text
-        FROM repeated_footer_noise_sources
-        WHERE confirmation_id = ? ORDER BY page_number, source_index, source_ref
+        SELECT sources.page_id, sources.page_version_id, sources.page_number,
+               sources.source_ref, sources.source_kind, sources.source_index,
+               sources.source_text, pv.review_status
+        FROM repeated_footer_noise_sources AS sources
+        JOIN page_versions AS pv ON pv.page_version_id = sources.page_version_id
+        WHERE confirmation_id = ? ORDER BY sources.page_number, source_index, source_ref
         """,
         (confirmation_id,),
     ).fetchall()
@@ -197,6 +199,7 @@ def _serialize_confirmation(
                 "page_id": str(item["page_id"]),
                 "page_version_id": str(item["page_version_id"]),
                 "page_number": int(item["page_number"]),
+                "review_status": str(item["review_status"]),
                 "source_ref": str(item["source_ref"]),
                 "source_kind": str(item["source_kind"]),
                 "source_index": int(item["source_index"]),
@@ -313,7 +316,17 @@ def revoke_confirmation(
 ) -> dict[str, Any]:
     normalized_note = None if note is None or not note.strip() else note.strip()
     with transaction(settings) as connection:
-        _serialize_confirmation(connection, confirmation_id)
+        confirmation = _serialize_confirmation(connection, confirmation_id)
+        frozen = [
+            page for page in confirmation["affected_pages"]
+            if page["review_status"] != "pending"
+        ]
+        if frozen:
+            numbers = "、".join(str(page["page_number"]) for page in frozen)
+            raise RepeatedFooterNoiseError(
+                409, "footer_noise_pages_frozen",
+                f"撤销影响整组来源；请先逐页重新打开第 {numbers} 页，再撤销排除。",
+            )
         if not _is_active(connection, confirmation_id):
             raise RepeatedFooterNoiseError(
                 409, "footer_noise_already_revoked", "这项重复页脚噪声确认已经撤销。"
@@ -399,6 +412,9 @@ def read_page_noise_state(
             "source_text": str(row["source_text"]),
             "rule_version": str(row["rule_version"]),
             "confirmation_note": row["confirmation_note"],
+            "affected_pages": _serialize_confirmation(
+                connection, str(row["confirmation_id"])
+            )["affected_pages"],
             "confirmed_by": str(row["confirmed_by"]),
             "confirmed_at": str(row["confirmed_at"]),
             "status": "active" if row["revoked_at"] is None else "revoked",
