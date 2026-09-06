@@ -567,11 +567,101 @@ test("来源段号以键盘打开受约束审计面板并保留未保存整稿�
   expect(mutationRequests).toBe(0);
 });
 
-test("单段短正文保留固定预览与键盘放大入口", async ({ page }) => {
+test("段间留白记忆段首，正文点击覆盖记忆且审计不触发放大", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  let mutationRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "GET" &&
+      !new URL(request.url()).pathname.startsWith("/api/v1/curation/runtime-facts/")) {
+      mutationRequests += 1;
+    }
+  });
+  await mockCurationApi(page, undefined, { ...source, body: ["第一段原文", "第二段原文"] });
+  await page.goto("/curation");
+  const preview = page.getByRole("region", { name: "正文整稿预览" });
+  const firstTrigger = preview.getByRole("button", { name: "从正文 01 打开放大视图" });
+  const secondTrigger = preview.getByRole("button", { name: "从正文 02 打开放大视图" });
+  const expand = page.getByRole("button", { name: "放大编辑正文" });
+  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+  const first = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  const second = page.getByRole("textbox", { name: "正文 02 当前编辑值" });
+  const clickGap = async () => {
+    const upper = await firstTrigger.boundingBox();
+    const lower = await secondTrigger.boundingBox();
+    if (!upper || !lower) throw new Error("正文预览入口不可见");
+    await page.mouse.click(lower.x + lower.width / 2, (upper.y + upper.height + lower.y) / 2);
+  };
+  await clickGap();
+  await expect(first).toBeFocused();
+  await page.keyboard.insertText("首次：");
+  await expectBodyText(first, "首次：第一段原文");
+  await second.click();
+  await page.keyboard.press("End");
+  await page.keyboard.insertText("末尾草稿");
+  await expanded.getByRole("button", { name: /关闭正文放大视图/ }).click();
+  await expect(expand).toBeFocused();
+  await expect(expand).toBeVisible();
+  await clickGap();
+  await expect(second).toBeFocused();
+  await page.keyboard.insertText("记忆段首：");
+  await expectBodyText(second, "记忆段首：第二段原文末尾草稿");
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Escape");
+  await expect(expand).toBeFocused();
+  await clickGap();
+  await expect(second).toBeFocused();
+  await page.keyboard.insertText("不恢复选区：");
+  await expectBodyText(second, "不恢复选区：记忆段首：第二段原文末尾草稿");
+  await page.keyboard.press("Escape");
+  await firstTrigger.click();
+  await expect(first).toBeFocused();
+  await page.keyboard.insertText("明确点击：");
+  await expectBodyText(first, "明确点击：首次：第一段原文");
+  await page.keyboard.press("Escape");
+  await expect(firstTrigger).toBeFocused();
+  await expect(firstTrigger).toBeVisible();
+  const auditTrigger = preview.getByRole("button", { name: "正文 02，已修改，打开来源审计" });
+  await auditTrigger.click();
+  await expect(page.getByRole("dialog", { name: "正文 02 · 来源审计" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(auditTrigger).toBeFocused();
+  await expect(expanded).toHaveCount(0);
+  expect(mutationRequests).toBe(0);
+  await secondTrigger.click();
+  await expect(second).toBeFocused();
+  await page.keyboard.insertText("刷新前：");
+  await page.reload();
+  await expect(firstTrigger).toBeVisible();
+  await clickGap();
+  await expect(first).toBeFocused();
+  await page.keyboard.insertText("刷新后：");
+  await expectBodyText(first, "刷新后：第一段原文");
+  await expectBodyText(second, "第二段原文");
+  expect(mutationRequests).toBe(0);
+});
+
+test("打开正文后立即清空不会被延迟段首定位打断", async ({ page }) => {
+  await mockCurationApi(page, undefined, { ...source, body: ["公开待清空正文"] });
+  await page.goto("/curation");
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await page.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
+  const editor = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  await editor.press("ControlOrMeta+a");
+  await page.clock.runFor(100);
+  await page.keyboard.press("Backspace");
+  await expect(page.getByRole("button", { name: "正文 01，当前值为空，已修改，打开来源审计" })).toBeVisible();
+});
+
+test("短正文下方空白直接在段首编辑并返回可见放大按钮", async ({ page }) => {
   const shortSource = {
     ...source,
     body: ["单段短正文。"],
   };
+  let mutationRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "GET") mutationRequests += 1;
+  });
   await mockCurationApi(page, undefined, shortSource);
   await page.goto("/curation");
 
@@ -582,6 +672,15 @@ test("单段短正文保留固定预览与键盘放大入口", async ({ page }) 
   await expect(page.getByText(/还有正文内容/)).toHaveCount(0);
 
   const expand = page.getByRole("button", { name: "放大编辑正文" });
+  await preview.click({ position: { x: 100, y: 180 } });
+  const editor = page.getByRole("textbox", { name: "正文 01 当前编辑值" });
+  await expect(editor).toBeFocused();
+  await page.keyboard.insertText("段首修订：");
+  await expectBodyText(editor, "段首修订：单段短正文。");
+  await page.keyboard.press("Escape");
+  await expect(expand).toBeFocused();
+  await expect(expand).toBeVisible();
+  expect(mutationRequests).toBe(0);
   await expand.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("textbox", { name: "正文 01 当前编辑值" })).toBeFocused();
@@ -589,49 +688,59 @@ test("单段短正文保留固定预览与键盘放大入口", async ({ page }) 
   await expect(expand).toBeFocused();
 });
 
-test("已批准正文保持只读且只能通过既有重新打开流程修改", async ({ page }) => {
-  const confirmedSource = {
-    ...source,
-    body: ["已经确认并冻结的公开正文。"],
-  };
-  const snapshot = {
-    snapshot_id: "snapshot-confirmed-browser",
-    source_snapshot_id: null,
-    source_content: confirmedSource,
-    created_by: "operator-browser",
-    created_at: "2026-09-02T08:00:00+00:00",
-    source_confirmation: {
-      actor_id: "operator-browser",
-      confirmed_at: "2026-09-02T08:00:00+00:00",
-    },
-    source_review: {
-      actor_id: "operator-browser",
-      completed_at: "2026-09-02T08:00:01+00:00",
-    },
-    image_source_decisions: [],
-  };
-  await mockCurationApi(page, undefined, confirmedSource, snapshot, "approved");
-  await page.goto("/curation");
+for (const reviewStatus of ["pending", "approved"] as const) {
+  test(`${reviewStatus} 已确认正文通过留白与正文打开仍保持只读`, async ({ page }) => {
+    const confirmedSource = {
+      ...source,
+      body: ["已经确认并冻结的公开正文。"],
+    };
+    const snapshot = {
+      snapshot_id: "snapshot-confirmed-browser",
+      source_snapshot_id: null,
+      source_content: confirmedSource,
+      created_by: "operator-browser",
+      created_at: "2026-09-02T08:00:00+00:00",
+      source_confirmation: {
+        actor_id: "operator-browser",
+        confirmed_at: "2026-09-02T08:00:00+00:00",
+      },
+      source_review: {
+        actor_id: "operator-browser",
+        completed_at: "2026-09-02T08:00:01+00:00",
+      },
+      image_source_decisions: [],
+    };
+    await mockCurationApi(page, undefined, confirmedSource, snapshot, reviewStatus);
+    await page.goto("/curation");
 
-  await expect(page.getByRole("button", { name: "重新打开此页" })).toBeVisible();
-  await page.getByRole("button", { name: "展开文字核对" }).click();
-  const expand = page.getByRole("button", { name: "放大查看正文" });
-  await expand.click();
-  const expanded = page.getByRole("dialog", { name: "正文放大视图" });
-  await expect(expanded.getByRole("button", { name: /关闭正文放大视图/ })).toBeFocused();
-  const readonlyBody = expanded.getByRole("textbox", { name: "正文 01 当前只读值" });
-  await expect(readonlyBody).toHaveAttribute("aria-readonly", "true");
-  await expect(readonlyBody).toHaveAttribute("contenteditable", "false");
-  await expectBodyText(readonlyBody, "已经确认并冻结的公开正文。");
-  await selectBodyText(page, 0, 12, 0, 12);
-  await page.keyboard.press("Enter");
-  await selectBodyText(page, 0, 0, 0, 2);
-  await pasteIntoFocusedBody(page, "不得写入");
-  await selectBodyText(page, 0, 0, 0, 2);
-  await page.keyboard.press("Control+x");
-  await expectBodyText(readonlyBody, "已经确认并冻结的公开正文。");
-  await expect(expanded.getByRole("button", { name: /保存|确认修改/ })).toHaveCount(0);
-});
+    if (reviewStatus === "approved") {
+      await expect(page.getByRole("button", { name: "重新打开此页" })).toBeVisible();
+    }
+    await page.getByRole("button", { name: "展开文字核对" }).click();
+    const expand = page.getByRole("button", { name: "放大查看正文" });
+    const preview = page.getByRole("region", { name: "正文整稿预览" });
+    await preview.click({ position: { x: 100, y: 180 } });
+    const expanded = page.getByRole("dialog", { name: "正文放大视图" });
+    await expect(expanded.getByRole("button", { name: /关闭正文放大视图/ })).toBeFocused();
+    const readonlyBody = expanded.getByRole("textbox", { name: "正文 01 当前只读值" });
+    await expect(readonlyBody).toHaveAttribute("aria-readonly", "true");
+    await expect(readonlyBody).toHaveAttribute("contenteditable", "false");
+    await expectBodyText(readonlyBody, "已经确认并冻结的公开正文。");
+    await selectBodyText(page, 0, 12, 0, 12);
+    await page.keyboard.press("Enter");
+    await selectBodyText(page, 0, 0, 0, 2);
+    await pasteIntoFocusedBody(page, "不得写入");
+    await selectBodyText(page, 0, 0, 0, 2);
+    await page.keyboard.press("Control+x");
+    await expectBodyText(readonlyBody, "已经确认并冻结的公开正文。");
+    await expect(expanded.getByRole("button", { name: /保存|确认修改/ })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(expand).toBeFocused();
+    await preview.getByRole("button", { name: "从正文 01 打开放大视图" }).click();
+    await expect(expanded.getByRole("button", { name: /关闭正文放大视图/ })).toBeFocused();
+    await expect(readonlyBody).toHaveAttribute("aria-readonly", "true");
+  });
+}
 
 test("长页核对稿支持完整阅读、原位多块草稿与组合提交", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });

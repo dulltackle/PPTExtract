@@ -938,21 +938,20 @@ export function SourceReviewLog({
     if (!original?.body.length || busy) return;
     const preferredIndex = index ?? lastBodyIndexRef.current ?? 0;
     bodyReturnFocusKeyRef.current = index === null ? null : textBlockKey("body", index);
-    setBodyManuscriptExpanded(true);
-    setBodyAuditLocation(null);
-    setBodyBoundaryNotice(null);
-    if (pending && textEditingEnabled) {
-      const key = textBlockKey("body", preferredIndex);
-      setActiveTextEditor({
+    const canEdit = pending && textEditingEnabled;
+    flushSync(() => {
+      setBodyManuscriptExpanded(true);
+      setBodyAuditLocation(null);
+      setBodyBoundaryNotice(null);
+      setActiveTextEditor(canEdit ? {
         kind: "body",
         index: preferredIndex,
         baseline: body[preferredIndex] ?? "",
-      });
-      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-        textEditorRefs.current[key]?.focus();
-      }));
+      } : null);
+    });
+    if (canEdit) {
+      placeBodyCaret(textEditorRefs.current[textBlockKey("body", preferredIndex)], 0);
     } else {
-      setActiveTextEditor(null);
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
         bodyCloseRef.current?.focus();
       }));
@@ -2209,6 +2208,10 @@ export function SourceReviewLog({
                     className={`source-body-preview ${hiddenBodyIndices.length ? "has-hidden-sources" : ""}`}
                     role="region"
                     aria-label="正文整稿预览"
+                    onClick={(event) => {
+                      if (event.target instanceof Element && event.target.closest("button")) return;
+                      openBodyManuscript(null);
+                    }}
                   >
                   {allBodyHidden ? <p className="source-empty-block">{emptyBodyMessage}</p> : null}
                   {original.body.map((value, index) => renderBodyBlock(
